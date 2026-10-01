@@ -47,7 +47,7 @@
   "author": "Powerduck limited",
   "repository": {
     "type": "git",
-    "url": "https://github.com/powerducklab/code-to-openapi.git"
+    "url": "git+https://github.com/powerducklab/code-to-openapi.git"
   },
   "bugs": {
     "url": "https://github.com/powerducklab/code-to-openapi/issues"
