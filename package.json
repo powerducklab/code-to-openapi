@@ -1,6 +1,6 @@
 {
   "name": "@powerduck/code-to-openapi",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "description": "Scan a local codebase into OpenAPI 3.2 with a language-neutral AST engine, pluggable language and framework packs, and an optional AI gap resolver.",
   "main": "./dist/index.cjs",

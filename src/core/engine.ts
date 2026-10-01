@@ -377,7 +377,14 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     if (!languageFiles.length) continue;
 
     ctx.onProgress?.("analyze", `${entry.pack.id} (${languageFiles.length} files)`);
-    const analysis = await entry.pack.analyze(ctx);
+    let analysis;
+    try {
+      analysis = await entry.pack.analyze(ctx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      diagnostics.push(`language "${entry.pack.id}" analysis failed: ${message}`);
+      continue;
+    }
     if (!analysis) continue;
     activeLanguages.push(entry.pack.id);
     analyzedFiles = analyzedFiles.concat(languageFiles);
@@ -386,12 +393,18 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
       if (!pack.applies(ctx)) continue;
       ctx.onProgress?.("extract", pack.id);
-      const result = await pack.extract(analysis, ctx);
-      for (const route of result.routes) {
-        route.language = pack.language;
-        route.framework = pack.id;
+      try {
+        const result = await pack.extract(analysis, ctx);
+        for (const route of result.routes) {
+          route.language = pack.language;
+          route.framework = pack.id;
+        }
+        extractions.push({ result, language: pack.language, framework: pack.id });
+      } catch (error) {
+        // One broken framework pack must never erase results from the others.
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.report?.(`framework pack "${pack.id}" failed: ${message}`);
       }
-      extractions.push({ result, language: pack.language, framework: pack.id });
     }
   }
 
@@ -458,6 +471,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     gaps: operations
       .filter((o) => o.gaps?.length)
       .map((o) => ({ route: `${o.method} ${o.path}`, gaps: [...(o.gaps ?? [])] })),
+    diagnostics,
   };
 
   return {

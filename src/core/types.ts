@@ -166,6 +166,8 @@ export interface ScanReport {
   routesPartial: number;
   unresolved: number;
   gaps: Array<{ route: string; gaps: GapCode[] }>;
+  /** Non-fatal problems encountered during analysis (pack failures, etc.). */
+  diagnostics: string[];
 }
 
 export interface ScanResult {
