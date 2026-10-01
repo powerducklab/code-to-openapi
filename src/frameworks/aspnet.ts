@@ -246,7 +246,7 @@ function collectControllerResponses(
         statusCode: "200",
         description: "Server-sent events",
         confidence: "medium",
-        content: [{ mediaType: "text/event-stream", ...(schema ? { itemSchema: schema } : {}) }],
+        content: [{ mediaType: "text/event-stream", itemSchema: schema && Object.keys(schema).length ? schema : {} }],
       },
     ];
   }
@@ -605,7 +605,7 @@ function inferMinimalResponses(
         statusCode: "200",
         description: "Server-sent events",
         confidence: "medium",
-        content: [{ mediaType: "text/event-stream" }],
+        content: [{ mediaType: "text/event-stream", itemSchema: {} }],
       });
       continue;
     }

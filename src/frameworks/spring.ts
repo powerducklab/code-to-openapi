@@ -606,18 +606,20 @@ function collectSseResponse(
     }
   }
   if (!itemSchema || !Object.keys(itemSchema).length) {
-    itemSchema = undefined;
+    // Keep an explicit empty item schema so the SSE media type is structurally
+    // complete; the sse-events-unknown gap is the single honest signal here.
+    itemSchema = {};
     gaps.push("sse-events-unknown");
   }
   return [
     {
       statusCode: "200",
       description: "Server-sent events",
-      confidence: itemSchema ? "high" : "medium",
+      confidence: Object.keys(itemSchema).length ? "high" : "medium",
       content: [
         {
           mediaType: "text/event-stream",
-          ...(itemSchema ? { itemSchema } : {}),
+          itemSchema,
         },
       ],
     },

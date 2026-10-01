@@ -480,16 +480,19 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
       // Event::default().json_data(OrderEvent { .. }).
       itemSchema = ssePayloadFromBody(fn, model);
     }
-    if (!itemSchema || !Object.keys(itemSchema).length) gaps.push("sse-events-unknown");
+    if (!itemSchema || !Object.keys(itemSchema).length) {
+      itemSchema = {};
+      gaps.push("sse-events-unknown");
+    }
     return [
       {
         statusCode: "200",
         description: "Server-sent events",
-        confidence: itemSchema ? "high" : "medium",
+        confidence: Object.keys(itemSchema).length ? "high" : "medium",
         content: [
           {
             mediaType: "text/event-stream",
-            ...(itemSchema ? { itemSchema } : {}),
+            itemSchema,
           },
         ],
       },

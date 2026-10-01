@@ -574,7 +574,7 @@ function collectSseResponse(
       statusCode: "200",
       description: "Server-sent events",
       confidence: itemSchema ? "high" : "medium",
-      content: [{ mediaType: "text/event-stream", ...(itemSchema ? { itemSchema } : {}) }],
+      content: [{ mediaType: "text/event-stream", itemSchema: itemSchema ?? {} }],
     },
   ];
 }
