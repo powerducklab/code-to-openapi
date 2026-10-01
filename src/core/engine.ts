@@ -367,6 +367,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
 
   const extractions: Array<{ result: ExtractionResult; language: string; framework: string }> = [];
   const activeLanguages: string[] = [];
+  const candidateLanguages: string[] = [];
   let analyzedFiles: FileEntry[] = [];
 
   for (const entry of REGISTRY) {
@@ -375,6 +376,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       extensionSet.has(extname(file.path)),
     );
     if (!languageFiles.length) continue;
+    candidateLanguages.push(entry.pack.id);
 
     ctx.onProgress?.("analyze", `${entry.pack.id} (${languageFiles.length} files)`);
     let analysis;
@@ -409,6 +411,13 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   }
 
   if (!activeLanguages.length) {
+    // Source files existed but every language analyzer failed: surface the
+    // underlying failures instead of a misleading "no files" message.
+    if (candidateLanguages.length && diagnostics.length) {
+      throw new Error(
+        `Source files were found for ${candidateLanguages.join(", ")} but analysis failed: ${diagnostics.join("; ")}`,
+      );
+    }
     throw new Error(
       "No supported source files found. Supported languages: TypeScript/JavaScript, Python, Go, Java, C#, Rust, PHP.",
     );

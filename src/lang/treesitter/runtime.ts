@@ -9,17 +9,14 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
-// Anchor module resolution at this file so the external web-tree-sitter
-// runtime and grammar WASMs load from node_modules in both ESM and CJS
-// bundles. A bare `typeof require` probe is unreliable after bundling:
-// bundlers inject a callable require shim even in ESM output, so require.resolve
-// must be present before trusting it; otherwise anchor createRequire at the
-// module URL (CJS output keeps a native require and never hits this branch).
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const nodeRequire: NodeRequire =
-  typeof require === "function" && typeof (require as any).resolve === "function"
-    ? require
-    : createRequire(import.meta.url);
+// Anchor module resolution at this bundle file. An ambient `require` must never
+// be trusted: inside an eval'd worker_thread (the Electron scan worker) the
+// native require is anchored at the worker cwd, so it resolves a hoisted,
+// potentially incompatible web-tree-sitter instead of the dependency declared
+// by this package. createRequire(import.meta.url) anchors at dist in both the
+// ESM bundle and (via the CJS __filename shim) the CommonJS bundle.
+/* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+const nodeRequire: NodeRequire = createRequire(import.meta.url);
 
 export type GrammarName =
   | "python"
