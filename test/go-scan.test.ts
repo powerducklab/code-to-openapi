@@ -27,6 +27,7 @@ describe("Gin (Go) golden project", () => {
         "/api/v1/items/{id}",
         "/api/v1/stream",
         "/health",
+        "/ping",
       ].sort(),
     );
 
@@ -77,6 +78,12 @@ describe("Gin (Go) golden project", () => {
       type: "string",
     });
 
+    // Inline closure handler.
+    const ping = doc.paths["/ping"].get;
+    expect(ping.responses["200"].content["application/json"].schema.properties.ping).toEqual({
+      type: "string",
+    });
+
     // SSE canonical extension.
     const stream = doc.paths["/api/v1/stream"].get;
     expect(stream["x-protocol"]).toBe("sse");
@@ -119,6 +126,7 @@ describe("Chi (Go) golden project", () => {
     expect(paths).toEqual(
       [
         "/health",
+        "/ready",
         "/api/v1/users",
         "/api/v1/users/{userID}",
         "/api/v1/admin/users/{id}",
@@ -130,6 +138,11 @@ describe("Chi (Go) golden project", () => {
     expect(health.responses["200"].content["application/json"].schema.properties.status).toEqual({
       type: "string",
     });
+
+    // Inline closure handler.
+    const ready = doc.paths["/ready"].get;
+    expect(ready.responses["204"]).toBeDefined();
+    expect(ready.responses["204"].content).toBeUndefined();
 
     // Query and slice response.
     const list = doc.paths["/api/v1/users"].get;

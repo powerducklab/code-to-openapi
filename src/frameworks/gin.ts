@@ -533,11 +533,33 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
 
         const converted = ginPathToOas(rawPath);
         const fullPath = joinPath(instance.prefix, converted.path);
-        const handlerRefs = args.slice(pathNode === args[0] ? 1 : 2).filter((a) => a.type === "identifier");
-        const primaryHandler = handlerRefs[0]?.text;
-        const handlerFn = primaryHandler
-          ? analysis.functions.get(primaryHandler)?.[0]
-          : undefined;
+        // Gin accepts a handler chain; the final handler owns the response
+        // contract. Both named functions and inline closures are supported.
+        const handlerArgs = args.slice(pathNode === args[0] ? 1 : 2);
+        const terminal = [...handlerArgs]
+          .reverse()
+          .find((a) => a.type === "identifier" || a.type === "func_literal");
+
+        let handlerFn: GoFunction | null = null;
+        let handlerNode: TsNode | null = null;
+        if (terminal?.type === "identifier") {
+          handlerFn = analysis.functions.get(terminal.text)?.[0] ?? null;
+          handlerNode = handlerFn?.node ?? null;
+        } else if (terminal?.type === "func_literal") {
+          const block = findFirst(terminal, (c) => c.type === "block") ?? null;
+          if (block) {
+            handlerFn = {
+              name: "<anonymous>",
+              file: file.path,
+              node: terminal,
+              body: block,
+              receiver: null,
+            };
+            handlerNode = terminal;
+          }
+        }
+        const primaryHandler =
+          terminal?.type === "identifier" ? terminal.text : undefined;
 
         const origin: SourceLocation = {
           file: file.path,

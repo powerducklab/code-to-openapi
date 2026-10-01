@@ -63,6 +63,7 @@ interface RouteSite {
   method: string;
   path: string;
   handlerName: string | null;
+  handlerNode: TsNode | null;
   origin: SourceLocation;
 }
 
@@ -265,6 +266,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
               method: sel.method.toLowerCase(),
               path: joinPath(prefix, rawPath),
               handlerName: handler?.type === "identifier" ? handler.text : null,
+              handlerNode: handler?.type === "func_literal" ? handler : null,
               origin: { file: file.path, line: call.startPosition.row + 1 },
             });
             return;
@@ -374,9 +376,22 @@ function buildRoute(
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
   let isSse = false;
 
-  const fn = site.handlerName
+  const namedFn = site.handlerName
     ? analysis.functions.get(site.handlerName)?.[0]
     : undefined;
+  const inlineBlock = site.handlerNode
+    ? (findFirst(site.handlerNode, (c) => c.type === "block") ?? null)
+    : null;
+  const fn: GoFunction | null = namedFn
+    ?? (site.handlerNode && inlineBlock
+      ? {
+          name: "<anonymous>",
+          file: site.origin.file,
+          node: site.handlerNode,
+          body: inlineBlock,
+          receiver: null,
+        }
+      : null);
   const body = fn?.body ?? null;
 
   if (body) {

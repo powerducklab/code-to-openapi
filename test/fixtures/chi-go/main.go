@@ -17,6 +17,9 @@ type User struct {
 func main() {
 	r := chi.NewRouter()
 	r.Get("/health", health)
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/users", listUsers)
 		r.Post("/users", createUser)

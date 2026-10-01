@@ -13,6 +13,9 @@ func main() {
 	v1.DELETE("/items/:id", DeleteItem)
 	v1.GET("/stream", Stream)
 	r.GET("/health", Health)
+	r.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ping": "pong"})
+	})
 
 	// Decoy: a non-Gin receiver exposing a GET method must never be confirmed.
 	decoy := &DecoyClient{}
