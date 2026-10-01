@@ -1,11 +1,12 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DependencyManifest, FileIndex } from "./types.js";
 
 /**
- * Reads the closest package.json manifest and merges every dependency bucket
- * so framework detection does not depend on where a package was declared.
+ * Reads every supported dependency manifest (package.json, requirements.txt,
+ * pyproject.toml, go.mod) and merges dependency names into one map so framework
+ * detection does not depend on the ecosystem.
  */
 export function probeManifest(root: string, index: FileIndex): DependencyManifest {
   const packages = new Map<string, string>();
@@ -39,7 +40,67 @@ export function probeManifest(root: string, index: FileIndex): DependencyManifes
     }
   }
 
+  probePython(root, packages);
+  probeGo(root, packages);
+
   return { packages, packageJsonPath };
+}
+
+function addPackage(packages: Map<string, string>, name: string, version = ""): void {
+  const normalized = name.trim().toLowerCase();
+  if (normalized && !packages.has(normalized)) packages.set(normalized, version);
+}
+
+function probePython(root: string, packages: Map<string, string>): void {
+  const requirements = join(root, "requirements.txt");
+  if (existsSync(requirements)) {
+    try {
+      for (const rawLine of readFileSync(requirements, "utf8").split(/\r?\n/)) {
+        const line = rawLine.replace(/#.*$/, "").trim();
+        if (!line || line.startsWith("-")) continue;
+        const match = /^([A-Za-z0-9._-]+)/.exec(line);
+        if (match) addPackage(packages, match[1]!, line.slice(match[1]!.length));
+      }
+    } catch {
+      // Ignore unreadable requirements files.
+    }
+  }
+
+  const pyproject = join(root, "pyproject.toml");
+  if (existsSync(pyproject)) {
+    try {
+      const text = readFileSync(pyproject, "utf8");
+      // Dependency lines look like `fastapi = "^0.115"` (Poetry) or
+      // `"fastapi>=0.115"` (PEP 621); a line scan avoids a TOML dependency.
+      for (const line of text.split(/\r?\n/)) {
+        const quoted = /^\s*"([A-Za-z0-9._-]+)[<>=!~^;[]/.exec(line);
+        if (quoted) {
+          addPackage(packages, quoted[1]!);
+          continue;
+        }
+        const table = /^\s*([A-Za-z0-9._-]+)\s*=\s*"[^"]*"/.exec(line);
+        if (table) addPackage(packages, table[1]!);
+      }
+    } catch {
+      // Ignore unreadable pyproject files.
+    }
+  }
+}
+
+function probeGo(root: string, packages: Map<string, string>): void {
+  const goMod = join(root, "go.mod");
+  if (!existsSync(goMod)) return;
+  try {
+    const text = readFileSync(goMod, "utf8");
+    const requireLine = /^\s*([^\s/][^\s]*\.[^\s]+)\s+(v[^\s]+)/;
+    for (const line of text.split(/\r?\n/)) {
+      if (line.includes("module ") || line.trim().startsWith("//")) continue;
+      const match = requireLine.exec(line);
+      if (match) addPackage(packages, match[1]!, match[2]!);
+    }
+  } catch {
+    // Ignore unreadable go.mod files.
+  }
 }
 
 export function hasAnyDependency(

@@ -96,6 +96,12 @@ export interface RouteCandidate {
   path: string;
   /** Full path including the mount chain; filled by the framework pack. */
   fullPath?: string;
+  /** Stable operation id suggested by the framework pack. */
+  operationId?: string;
+  /** Language that produced this candidate. */
+  language?: string;
+  /** Framework pack id that produced this candidate. */
+  framework?: string;
   origin: SourceLocation;
   parameters: RouteParameter[];
   requestBody?: {

@@ -10,6 +10,6 @@ export default defineConfig([
     target: "node18",
     platform: "node",
     minify: "terser",
-    external: ["typescript"],
+    external: ["typescript", "web-tree-sitter", "tree-sitter-wasms"],
   },
 ]);

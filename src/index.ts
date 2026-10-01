@@ -30,6 +30,10 @@ export {
   type MergeChange,
 } from "./core/merge.js";
 export { expressPack } from "./frameworks/express.js";
+export { fastapiPack } from "./frameworks/fastapi.js";
+export { flaskPack } from "./frameworks/flask.js";
+export { ginPack } from "./frameworks/gin.js";
+export { chiPack } from "./frameworks/chi.js";
 export {
   type GapRequest,
   type GapResolution,

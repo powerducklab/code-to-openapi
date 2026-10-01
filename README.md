@@ -50,13 +50,19 @@ indexer  →  language packs (AST + type checker)
 | Language   | Framework | Status |
 | ---------- | --------- | ------ |
 | TypeScript / JavaScript | Express | 0.1.x |
+| Python     | FastAPI, Flask | 0.5.x |
+| Go         | Gin, Chi | 0.5.x |
 | TypeScript / JavaScript | Fastify, NestJS | Planned |
-| Python     | FastAPI, Flask | Planned |
-| Go         | Gin, Chi | Planned |
 
 HTTP is fully supported; SSE endpoints are emitted with the canonical
 `x-protocol: "sse"` extension and a `text/event-stream` media type carrying
 `itemSchema`.
+
+The TypeScript/JavaScript layer uses the TypeScript compiler API (an optional
+peer dependency; the pack degrades to syntactic analysis with explicit gaps
+when it is not installed). Python and Go are parsed through tree-sitter WASM,
+so no language toolchain is required. Framework pack ids are `express`,
+`fastapi`, `flask`, `gin` and `chi`.
 
 ---
 

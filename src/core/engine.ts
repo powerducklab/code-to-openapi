@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
 
 import {
   type DiscoveredOperation,
@@ -15,9 +15,11 @@ import { buildSidecar } from "./sidecar.js";
 import type {
   Confidence,
   ExtractionResult,
+  FileEntry,
   FileIndex,
   FrameworkPack,
   JsonSchema,
+  LanguagePack,
   RouteCandidate,
   ScanContext,
   ScanOptions,
@@ -25,22 +27,52 @@ import type {
   ScanResult,
 } from "./types.js";
 import { createTsAnalysis, type TsAnalysis } from "../lang/typescript/index.js";
+import { createPythonAnalysis, type PythonAnalysis } from "../lang/python/index.js";
+import { createGoAnalysis, type GoAnalysis } from "../lang/go/index.js";
 import { expressPack } from "../frameworks/express.js";
+import { fastapiPack } from "../frameworks/fastapi.js";
+import { flaskPack } from "../frameworks/flask.js";
+import { ginPack } from "../frameworks/gin.js";
+import { chiPack } from "../frameworks/chi.js";
 import type { GapResolver } from "../ai/gapResolver.js";
 
-const REGISTRY: {
-  language: (ctx: ScanContext) => TsAnalysis | null;
-  frameworks: Array<FrameworkPack<TsAnalysis>>;
-} = {
-  language: (ctx) => createTsAnalysis(ctx),
-  frameworks: [expressPack],
-};
+interface LanguageRegistryEntry {
+  pack: LanguagePack;
+  frameworks: FrameworkPack[];
+}
+
+const REGISTRY: LanguageRegistryEntry[] = [
+  {
+    pack: {
+      id: "typescript",
+      extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+      analyze: (ctx) => createTsAnalysis(ctx),
+    },
+    frameworks: [expressPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "python",
+      extensions: [".py", ".pyi"],
+      analyze: (ctx) => createPythonAnalysis(ctx),
+    },
+    frameworks: [fastapiPack as FrameworkPack, flaskPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "go",
+      extensions: [".go"],
+      analyze: (ctx) => createGoAnalysis(ctx),
+    },
+    frameworks: [ginPack as FrameworkPack, chiPack as FrameworkPack],
+  },
+];
 
 function toOperation(candidate: RouteCandidate): DiscoveredOperation {
   return {
     method: candidate.method,
     path: candidate.fullPath ?? candidate.path,
-    operationId: undefined,
+    operationId: candidate.operationId,
     summary: undefined,
     description: undefined,
     tags: candidate.tags,
@@ -86,8 +118,8 @@ async function applyAiGaps(
       pathParameters: candidate.parameters
         .filter((p) => p.in === "path")
         .map((p) => p.name),
-      framework: "express",
-      language: "typescript",
+      framework: candidate.framework ?? "unknown",
+      language: candidate.language ?? "unknown",
     },
   });
   if (!resolution) return candidate;
@@ -221,14 +253,44 @@ async function applyAiGaps(
 
 function projectMeta(root: string): { title: string; version: string } {
   try {
-    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-    return {
-      title: typeof pkg.name === "string" ? pkg.name : "Scanned API",
-      version: typeof pkg.version === "string" ? pkg.version : "1.0.0",
-    };
+    const pkgPath = join(root, "package.json");
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      if (typeof pkg.name === "string") {
+        return {
+          title: pkg.name,
+          version: typeof pkg.version === "string" ? pkg.version : "1.0.0",
+        };
+      }
+    }
   } catch {
-    return { title: "Scanned API", version: "1.0.0" };
+    // Fall through to other ecosystems.
   }
+
+  try {
+    const pyproject = join(root, "pyproject.toml");
+    if (existsSync(pyproject)) {
+      const text = readFileSync(pyproject, "utf8");
+      const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(text)?.[1];
+      const version = /^\s*version\s*=\s*"([^"]+)"/m.exec(text)?.[1];
+      if (name) return { title: name, version: version ?? "1.0.0" };
+    }
+  } catch {
+    // Fall through to go.mod.
+  }
+
+  try {
+    const goMod = join(root, "go.mod");
+    if (existsSync(goMod)) {
+      const text = readFileSync(goMod, "utf8");
+      const moduleName = /^module\s+(\S+)/m.exec(text)?.[1];
+      if (moduleName) return { title: moduleName.split("/").pop() ?? moduleName, version: "1.0.0" };
+    }
+  } catch {
+    // Fall through to defaults.
+  }
+
+  return { title: "Scanned API", version: "1.0.0" };
 }
 
 /**
@@ -257,34 +319,48 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     report: (message) => diagnostics.push(message),
   };
 
-  const tsFiles = index.files.filter((f) =>
-    ["typescript", "javascript"].includes(f.language),
-  );
-  if (!tsFiles.length) {
+  const extractions: Array<{ result: ExtractionResult; language: string; framework: string }> = [];
+  const activeLanguages: string[] = [];
+  let analyzedFiles: FileEntry[] = [];
+
+  for (const entry of REGISTRY) {
+    const extensionSet = new Set(entry.pack.extensions);
+    const languageFiles = index.files.filter((file) =>
+      extensionSet.has(extname(file.path)),
+    );
+    if (!languageFiles.length) continue;
+
+    ctx.onProgress?.("analyze", `${entry.pack.id} (${languageFiles.length} files)`);
+    const analysis = await entry.pack.analyze(ctx);
+    if (!analysis) continue;
+    activeLanguages.push(entry.pack.id);
+    analyzedFiles = analyzedFiles.concat(languageFiles);
+
+    for (const pack of entry.frameworks) {
+      if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
+      if (!pack.applies(ctx)) continue;
+      ctx.onProgress?.("extract", pack.id);
+      const result = await pack.extract(analysis, ctx);
+      for (const route of result.routes) {
+        route.language = pack.language;
+        route.framework = pack.id;
+      }
+      extractions.push({ result, language: pack.language, framework: pack.id });
+    }
+  }
+
+  if (!activeLanguages.length) {
     throw new Error(
-      "No supported source files found. P1 supports TypeScript/JavaScript projects.",
+      "No supported source files found. Supported languages: TypeScript/JavaScript, Python, Go.",
     );
   }
-
-  ctx.onProgress?.("analyze", `${tsFiles.length} source files`);
-  const analysis = REGISTRY.language(ctx);
-  if (!analysis) throw new Error("TypeScript analysis could not be initialized.");
-
-  const extractions: ExtractionResult[] = [];
-  for (const pack of REGISTRY.frameworks) {
-    if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
-    if (!pack.applies(ctx)) continue;
-    ctx.onProgress?.("extract", pack.id);
-    extractions.push(await pack.extract(analysis, ctx));
-  }
-
   if (!extractions.length) {
     throw new Error(
-      "No supported HTTP framework detected. P1 ships the Express framework pack.",
+      "No supported HTTP framework detected. Supported packs: Express, FastAPI, Flask, Gin, Chi.",
     );
   }
 
-  let candidates = extractions.flatMap((result) => result.routes);
+  let candidates = extractions.flatMap((entry) => entry.result.routes);
   if (options.gapResolver) {
     candidates = await Promise.all(
       candidates.map((candidate) =>
@@ -300,7 +376,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
 
   const componentsByName = new Map<string, JsonSchema>();
   for (const extraction of extractions) {
-    for (const component of extraction.components) {
+    for (const component of extraction.result.components) {
       const existing = componentsByName.get(component.name);
       if (!existing) componentsByName.set(component.name, component.schema);
     }
@@ -310,9 +386,9 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     schema,
   }));
 
-  const securitySchemes = extractions.flatMap((r) => r.securitySchemes);
-  const servers = extractions.flatMap((r) => r.servers);
-  const unresolved = extractions.flatMap((r) => r.unresolved);
+  const securitySchemes = extractions.flatMap((entry) => entry.result.securitySchemes);
+  const servers = extractions.flatMap((entry) => entry.result.servers);
+  const unresolved = extractions.flatMap((entry) => entry.result.unresolved);
 
   const meta = projectMeta(root);
   const project: DiscoveredProject = {
@@ -325,10 +401,11 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     unresolved,
   };
 
+  const frameworks = [...new Set(extractions.map((entry) => entry.framework))];
   const report: ScanReport = {
-    languages: ["typescript"],
-    frameworks: extractions.length ? ["express"] : [],
-    filesScanned: tsFiles.length,
+    languages: activeLanguages,
+    frameworks,
+    filesScanned: analyzedFiles.length,
     routesConfirmed: operations.filter((o) => o.confidence === "high").length,
     routesPartial: operations.filter((o) => o.confidence !== "high").length,
     unresolved: unresolved.length,
@@ -344,8 +421,8 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     sidecar: buildSidecar({
       files: index.files,
       operations,
-      language: "typescript",
-      framework: extractions.length ? "express" : undefined,
+      language: activeLanguages.join("+"),
+      framework: frameworks.join("+") || undefined,
     }),
     convert(): Promise<DiscoveryResult> {
       return discoveryToOpenApi(project, { validate: true });

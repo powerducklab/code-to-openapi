@@ -24,9 +24,18 @@ const ALWAYS_IGNORE_DIRS = new Set([
   "__pycache__",
   ".venv",
   "venv",
+  "env",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".eggs",
+  "site-packages",
+  "egg-info",
 ]);
 
-const TEST_FILE = /(?:\.test|\.spec|\.stories)\.[a-z]+$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
+const TEST_FILE =
+  /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
 
 const EXTENSION_LANGUAGE: Record<string, string> = {
   ".ts": "typescript",
@@ -37,6 +46,9 @@ const EXTENSION_LANGUAGE: Record<string, string> = {
   ".jsx": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
+  ".py": "python",
+  ".pyi": "python",
+  ".go": "go",
 };
 
 export interface IndexOptions {
