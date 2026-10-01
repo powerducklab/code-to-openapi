@@ -810,7 +810,37 @@ function collectParameters(
     }
     if (fromQuery) {
       const explicit = attributeStringArg(fromQuery);
-      addParam("query", explicit ?? name, schema, "high", !optional);
+      if (explicit) {
+        addParam("query", explicit, schema, "high", !optional);
+      } else if (schema && "$ref" in schema) {
+        // A complex [FromQuery] object binds each property as an individual
+        // query parameter (ASP.NET model binding), not as one $ref parameter.
+        const refName = String(schema.$ref).split("/").pop();
+        const dereferenced = refName ? model.components.get(refName) : undefined;
+        if (dereferenced && dereferenced.type === "object" && dereferenced.properties) {
+          // A complex [FromQuery] object binds each property as an individual
+          // query parameter (ASP.NET model binding), not as one $ref parameter.
+          const requiredSet = new Set<string>(
+            Array.isArray(dereferenced.required)
+              ? (dereferenced.required as string[])
+              : [],
+          );
+          for (const [propName, propSchema] of Object.entries(dereferenced.properties)) {
+            addParam(
+              "query",
+              propName,
+              propSchema as JsonSchema,
+              "high",
+              requiredSet.has(propName),
+            );
+          }
+        } else {
+          // Scalar and enum query parameters stay a single parameter.
+          addParam("query", name, schema, "high", !optional);
+        }
+      } else {
+        addParam("query", name, schema, "high", !optional);
+      }
       continue;
     }
     if (fromHeader) {

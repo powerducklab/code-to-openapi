@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Demo.Api": {
+      "applicationUrl": "http://localhost:5188",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

@@ -156,6 +156,14 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
     return null;
   }
 
+  // error values always expose Error() string; common in gin.H{"error": err.Error()}.
+  if (node.type === "call_expression") {
+    const callee = node.namedChildren[0];
+    if (callee?.type === "selector_expression" && /\.Error$/.test(callee.text)) {
+      return { type: "string" };
+    }
+  }
+
   return null;
 }
 
@@ -534,172 +542,239 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
     const servers = new Set<string>();
 
     for (const file of analysis.files.values()) {
-      const instances = new Map<string, Instance>();
-
-      const registerInstance = (name: string, prefix: string) => {
-        instances.set(name, { id: `${file.path}::${name}`, file: file.path, name, prefix });
+      // Registration helpers accept the engine or a router group as a parameter
+      // (e.g. `func registerRoutes(api *gin.RouterGroup)`). Their parameter name
+      // is bound to the caller instance when the helper is invoked.
+      const groupParameterName = (fn: GoFunction): string | null => {
+        const params = findFirst(fn.node, (n) => n.type === "parameter_list");
+        if (!params) return null;
+        for (const parameter of childrenOfType(params, "parameter_declaration")) {
+          if (!/\bgin\.(RouterGroup|Engine)\b/.test(parameter.text)) continue;
+          const nameNode = childrenOfType(parameter, "identifier")[0];
+          if (nameNode) return nameNode.text;
+        }
+        return null;
       };
 
-      // Pass 1: engines and groups.
-      for (const declaration of findAll(file.root, (n) =>
-        n.type === "short_var_declaration" || n.type === "var_declaration" || n.type === "assignment_statement",
-      )) {
-        const assignments = declaration.type === "var_declaration"
-          ? childrenOfType(declaration, "var_spec")
-          : [declaration];
+      interface RegistrationCall {
+        fn: GoFunction;
+        paramName: string;
+        caller: Instance;
+      }
+      const registrationCalls: RegistrationCall[] = [];
 
-        for (const spec of assignments) {
-          const names = findAll(spec, (n) => n.type === "identifier");
-          const calls = findAll(spec, (n) => n.type === "call_expression");
-          for (const call of calls) {
-            const sel = selectorCall(call);
-            if (!sel || sel.receiver.type !== "identifier") continue;
-            const args = positionalArguments(call);
+      const scanScope = (
+        scopeRoot: TsNode,
+        scopeFile: { path: string; root: TsNode },
+        seed: Map<string, Instance>,
+      ) => {
+        const instances = new Map(seed);
 
-            if (sel.receiver.text === "gin" && (sel.method === "New" || sel.method === "Default")) {
-              const name = names[0]?.text;
-              if (name) registerInstance(name, "");
-            } else if (sel.method === "Group") {
-              const parent = instances.get(sel.receiver.text);
-              const name = names[0]?.text;
-              if (parent && name) {
-                const groupPath = literalString(args[0]) ?? "";
-                registerInstance(name, joinPath(parent.prefix, groupPath));
+        const registerInstance = (name: string, prefix: string) => {
+          instances.set(name, { id: `${scopeFile.path}::${name}`, file: scopeFile.path, name, prefix });
+        };
+
+        // Pass 1: engines and groups.
+        for (const declaration of findAll(scopeRoot, (n) =>
+          n.type === "short_var_declaration" || n.type === "var_declaration" || n.type === "assignment_statement",
+        )) {
+          const assignments = declaration.type === "var_declaration"
+            ? childrenOfType(declaration, "var_spec")
+            : [declaration];
+
+          for (const spec of assignments) {
+            const names = findAll(spec, (n) => n.type === "identifier");
+            const calls = findAll(spec, (n) => n.type === "call_expression");
+            for (const call of calls) {
+              const sel = selectorCall(call);
+              if (!sel || sel.receiver.type !== "identifier") continue;
+              const args = positionalArguments(call);
+
+              if (sel.receiver.text === "gin" && (sel.method === "New" || sel.method === "Default")) {
+                const name = names[0]?.text;
+                if (name) registerInstance(name, "");
+              } else if (sel.method === "Group") {
+                const parent = instances.get(sel.receiver.text);
+                const name = names[0]?.text;
+                if (parent && name) {
+                  const groupPath = literalString(args[0]) ?? "";
+                  registerInstance(name, joinPath(parent.prefix, groupPath));
+                }
               }
             }
           }
         }
-      }
 
-      // Pass 2: routes.
-      for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
-        const sel = selectorCall(call);
-        if (!sel || sel.receiver.type !== "identifier") continue;
-        const instance = instances.get(sel.receiver.text);
-        if (!instance) continue;
-        const args = positionalArguments(call);
+        // Pass 2: routes.
+        for (const call of findAll(scopeRoot, (n) => n.type === "call_expression")) {
+          const sel = selectorCall(call);
+          if (sel) {
+            if (!sel.receiver.type || sel.receiver.type !== "identifier") continue;
+            const instance = instances.get(sel.receiver.text);
+            if (!instance) continue;
+            const args = positionalArguments(call);
 
-        const methods: string[] = [];
-        let pathNode: TsNode | undefined;
-        if (HTTP_METHODS.has(sel.method.toLowerCase())) {
-          methods.push(sel.method.toLowerCase());
-          pathNode = args[0];
-        } else if (sel.method === "Any") {
-          methods.push(...HTTP_METHODS);
-          pathNode = args[0];
-        } else if (sel.method === "Handle") {
-          const verb = literalString(args[0])?.toLowerCase();
-          if (verb && HTTP_METHODS.has(verb)) methods.push(verb);
-          pathNode = args[1];
-        } else {
-          continue;
-        }
+            const methods: string[] = [];
+            let pathNode: TsNode | undefined;
+            if (HTTP_METHODS.has(sel.method.toLowerCase())) {
+              methods.push(sel.method.toLowerCase());
+              pathNode = args[0];
+            } else if (sel.method === "Any") {
+              methods.push(...HTTP_METHODS);
+              pathNode = args[0];
+            } else if (sel.method === "Handle") {
+              const verb = literalString(args[0])?.toLowerCase();
+              if (verb && HTTP_METHODS.has(verb)) methods.push(verb);
+              pathNode = args[1];
+            } else {
+              continue;
+            }
 
-        const rawPath = pathNode ? literalString(pathNode) : null;
-        if (rawPath === null) {
-          if (pathNode) {
-            unresolved.push({
-              reason: "dynamic-path",
-              message: "Gin route path is not a static string literal",
-              origin: { file: file.path, line: call.startPosition.row + 1 },
-            });
-          }
-          continue;
-        }
+            const rawPath = pathNode ? literalString(pathNode) : null;
+            if (rawPath === null) {
+              if (pathNode) {
+                unresolved.push({
+                  reason: "dynamic-path",
+                  message: "Gin route path is not a static string literal",
+                  origin: { file: scopeFile.path, line: call.startPosition.row + 1 },
+                });
+              }
+              continue;
+            }
 
-        const converted = ginPathToOas(rawPath);
-        const fullPath = joinPath(instance.prefix, converted.path);
-        // Gin accepts a handler chain; the final handler owns the response
-        // contract. Both named functions and inline closures are supported.
-        const handlerArgs = args.slice(pathNode === args[0] ? 1 : 2);
-        const terminal = [...handlerArgs]
-          .reverse()
-          .find((a) => a.type === "identifier" || a.type === "func_literal");
+            const converted = ginPathToOas(rawPath);
+            const fullPath = joinPath(instance.prefix, converted.path);
+            // Gin accepts a handler chain; the final handler owns the response
+            // contract. Both named functions and inline closures are supported.
+            const handlerArgs = args.slice(pathNode === args[0] ? 1 : 2);
+            const terminal = [...handlerArgs]
+              .reverse()
+              .find((a) => a.type === "identifier" || a.type === "func_literal");
 
-        let handlerFn: GoFunction | null = null;
-        let handlerNode: TsNode | null = null;
-        if (terminal?.type === "identifier") {
-          handlerFn = analysis.functions.get(terminal.text)?.[0] ?? null;
-          handlerNode = handlerFn?.node ?? null;
-        } else if (terminal?.type === "func_literal") {
-          const block = findFirst(terminal, (c) => c.type === "block") ?? null;
-          if (block) {
-            handlerFn = {
-              name: "<anonymous>",
-              file: file.path,
-              node: terminal,
-              body: block,
-              receiver: null,
+            let handlerFn: GoFunction | null = null;
+            let handlerNode: TsNode | null = null;
+            if (terminal?.type === "identifier") {
+              handlerFn = analysis.functions.get(terminal.text)?.[0] ?? null;
+              handlerNode = handlerFn?.node ?? null;
+            } else if (terminal?.type === "func_literal") {
+              const block = findFirst(terminal, (c) => c.type === "block") ?? null;
+              if (block) {
+                handlerFn = {
+                  name: "<anonymous>",
+                  file: scopeFile.path,
+                  node: terminal,
+                  body: block,
+                  receiver: null,
+                };
+                handlerNode = terminal;
+              }
+            }
+            const primaryHandler =
+              terminal?.type === "identifier" ? terminal.text : undefined;
+
+            const origin: SourceLocation = {
+              file: handlerFn?.file ?? scopeFile.path,
+              line: call.startPosition.row + 1,
+              symbol: primaryHandler,
             };
-            handlerNode = terminal;
+
+            for (const method of methods) {
+              const analyzed = handlerFn
+                ? analyzeHandler(handlerFn, analysis, modelIndex, converted.params)
+                : {
+                    parameters: converted.params.map((name) => ({
+                      name,
+                      in: "path" as const,
+                      required: true,
+                      schema: { type: "string" },
+                      confidence: "medium" as Confidence,
+                    })),
+                    requestBody: undefined,
+                    responses: [] as RouteCandidate["responses"],
+                    security: undefined,
+                    gaps: new Set<GapCode>(["response-unknown"]),
+                    extensions: undefined,
+                    components: [] as RouteCandidate["components"],
+                  };
+
+              const confidence: Confidence = analyzed.gaps.size > 0 ? "medium" : "high";
+              routes.push({
+                method,
+                path: fullPath,
+                fullPath,
+                origin,
+                operationId: operationId(method, fullPath),
+                tags: [],
+                parameters: analyzed.parameters,
+                ...(analyzed.requestBody ? { requestBody: analyzed.requestBody } : {}),
+                responses: analyzed.responses,
+                ...(analyzed.security?.length ? { security: analyzed.security } : {}),
+                ...(analyzed.extensions ? { extensions: analyzed.extensions } : {}),
+                confidence,
+                gaps: [...analyzed.gaps],
+                components: analyzed.components,
+                handlerSource: handlerNode?.text.slice(0, 8192),
+              });
+            }
+          }
+
+          // Plain helper call: registerProductRoutes(api).
+          if (!sel) {
+            const callee = call.namedChildren[0];
+            const args = positionalArguments(call);
+            if (callee?.type === "identifier" && args[0]?.type === "identifier") {
+              const caller = instances.get(args[0].text);
+              const candidates = analysis.functions.get(callee.text) ?? [];
+              const fn = candidates.find((candidate) => groupParameterName(candidate) !== null);
+              const paramName = fn ? groupParameterName(fn) : null;
+              if (caller && fn && paramName) {
+                registrationCalls.push({ fn, paramName, caller });
+              }
+            }
           }
         }
-        const primaryHandler =
-          terminal?.type === "identifier" ? terminal.text : undefined;
 
-        const origin: SourceLocation = {
-          file: file.path,
-          line: call.startPosition.row + 1,
-          symbol: primaryHandler,
-        };
-
-        for (const method of methods) {
-          const analyzed = handlerFn
-            ? analyzeHandler(handlerFn, analysis, modelIndex, converted.params)
-            : {
-                parameters: converted.params.map((name) => ({
-                  name,
-                  in: "path" as const,
-                  required: true,
-                  schema: { type: "string" },
-                  confidence: "medium" as Confidence,
-                })),
-                requestBody: undefined,
-                responses: [] as RouteCandidate["responses"],
-                security: undefined,
-                gaps: new Set<GapCode>(["response-unknown"]),
-                extensions: undefined,
-                components: [] as RouteCandidate["components"],
-              };
-
-          const confidence: Confidence = analyzed.gaps.size > 0 ? "medium" : "high";
-          routes.push({
-            method,
-            path: fullPath,
-            fullPath,
-            origin,
-            operationId: operationId(method, fullPath),
-            tags: [],
-            parameters: analyzed.parameters,
-            ...(analyzed.requestBody ? { requestBody: analyzed.requestBody } : {}),
-            responses: analyzed.responses,
-            ...(analyzed.security?.length ? { security: analyzed.security } : {}),
-            ...(analyzed.extensions ? { extensions: analyzed.extensions } : {}),
-            confidence,
-            gaps: [...analyzed.gaps],
-            components: analyzed.components,
-            handlerSource: handlerFn?.node.text.slice(0, 8192),
-          });
+        // Server detection: r.Run(":8080") or http.ListenAndServe(addr, engine).
+        for (const call of findAll(scopeRoot, (n) => n.type === "call_expression")) {
+          const sel = selectorCall(call);
+          if (!sel) continue;
+          const args = positionalArguments(call);
+          if (sel.method === "Run" && instances.has(sel.receiver.text)) {
+            const addr = literalString(args[0]);
+            if (addr) servers.add(addrToUrl(addr));
+          }
+          if (
+            sel.receiver.type === "identifier" &&
+            sel.receiver.text === "http" &&
+            sel.method === "ListenAndServe"
+          ) {
+            const addr = literalString(args[0]);
+            if (addr) servers.add(addrToUrl(addr));
+          }
         }
-      }
+      };
 
-      // Server detection: r.Run(":8080") or http.ListenAndServe(addr, engine).
-      for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
-        const sel = selectorCall(call);
-        if (!sel) continue;
-        const args = positionalArguments(call);
-        if (sel.method === "Run" && instances.has(sel.receiver.text)) {
-          const addr = literalString(args[0]);
-          if (addr) servers.add(addrToUrl(addr));
+      scanScope(file.root, file, new Map());
+
+      // Expand registration helpers breadth-first, binding their group
+      // parameter to the caller instance (prefix included).
+      const visited = new Set<string>();
+      let queue = registrationCalls.splice(0, registrationCalls.length);
+      while (queue.length) {
+        const next: RegistrationCall[] = [];
+        for (const item of queue) {
+          const visitKey = `${item.fn.file}::${item.fn.name}::${item.caller.prefix}`;
+          if (visited.has(visitKey)) continue;
+          visited.add(visitKey);
+          const before = registrationCalls.length;
+          const seed = new Map<string, Instance>();
+          seed.set(item.paramName, item.caller);
+          const scopeFile = analysis.files.get(item.fn.file) ?? file;
+          scanScope(item.fn.node, scopeFile, seed);
+          const discovered = registrationCalls.splice(before, registrationCalls.length - before);
+          next.push(...discovered);
         }
-        if (
-          sel.receiver.type === "identifier" &&
-          sel.receiver.text === "http" &&
-          sel.method === "ListenAndServe"
-        ) {
-          const addr = literalString(args[0]);
-          if (addr) servers.add(addrToUrl(addr));
-        }
+        queue = next;
       }
     }
 

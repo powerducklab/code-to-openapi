@@ -23,6 +23,9 @@ export interface JavaField {
 export interface JavaTypeDef {
   readonly kind: "record" | "class" | "enum";
   readonly name: string;
+  /** Fully qualified name including enclosing classes, e.g. a.b.Outer.Inner. */
+  readonly fqn: string;
+  readonly packageName: string;
   readonly file: string;
   readonly node: TsNode;
   readonly fields: JavaField[];
@@ -52,6 +55,17 @@ export interface JavaAnalysis {
   readonly files: Map<string, JavaFile>;
   /** Keyed by simple class name; first declaration wins. */
   readonly types: Map<string, JavaTypeDef>;
+  /** Keyed by fully qualified name, e.g. cn.apipost.result.CommonResult. */
+  readonly typesByFqn: Map<string, JavaTypeDef>;
+  /** Per-file import table used for simple-name resolution. */
+  readonly imports: Map<
+    string,
+    {
+      readonly packageName: string;
+      readonly explicit: Map<string, string>;
+      readonly wildcards: string[];
+    }
+  >;
 }
 
 const REQUIRED_ANNOTATIONS = new Set([
@@ -71,6 +85,8 @@ const TYPE_NODE_TYPES = new Set([
   "boolean_type",
   "void_type",
   "scoped_identifier",
+  "scoped_type_identifier",
+  "wildcard",
 ]);
 
 function modifiersOf(node: TsNode): TsNode[] {
@@ -128,7 +144,8 @@ function collectSuperclass(node: TsNode): TsNode | null {
       (c) =>
         c.type === "generic_type" ||
         c.type === "type_identifier" ||
-        c.type === "scoped_identifier",
+        c.type === "scoped_identifier" ||
+        c.type === "scoped_type_identifier",
     ) ?? null
   );
 }
@@ -260,7 +277,56 @@ function collectClassFields(node: TsNode): JavaField[] {
       });
     }
   }
+  // Immutable DTOs and interface-backed models often expose properties only
+  // through getters. Derive the missing ones following JavaBeans rules.
+  const declared = new Set(fields.map((field) => field.name));
+  for (const getter of collectGetterFields(body)) {
+    if (declared.has(getter.name)) continue;
+    declared.add(getter.name);
+    fields.push(getter);
+  }
   return fields;
+}
+
+/** JavaBeans Introspector.decapitalize semantics. */
+function decapitalizeBean(name: string): string {
+  if (name.length > 1 && name === name.toUpperCase()) return name;
+  return name.charAt(0).toLowerCase() + name.slice(1);
+}
+
+function collectGetterFields(body: TsNode): JavaField[] {
+  const fields: JavaField[] = [];
+  for (const method of findAll(body, (n) => n.type === "method_declaration")) {
+    const mods = method.namedChildren.find((c) => c.type === "modifiers");
+    if (mods && /\bstatic\b/.test(mods.text)) continue;
+    const params = findFirst(method, (n) => n.type === "formal_parameters");
+    if (params && childrenOfType(params, "formal_parameter").length > 0) continue;
+    const nameNode = method.namedChildren.find((c) => c.type === "identifier");
+    if (!nameNode) continue;
+    const name = nameNode.text;
+    let property: string | null = null;
+    if (/^get[A-Z]/.test(name) && name !== "getClass") {
+      property = decapitalizeBean(name.slice(3));
+    } else if (/^is[A-Z]/.test(name)) {
+      property = decapitalizeBean(name.slice(2));
+    }
+    if (!property) continue;
+    const typeNode = typeNodeOf(method);
+    if (!typeNode || typeNode.type === "void_type") continue;
+    fields.push({
+      name: property,
+      ...(jsonPropertyName(method) ? { jsonName: jsonPropertyName(method) } : {}),
+      typeNode,
+      required: hasRequiredAnnotation(method),
+      ignored: hasJsonIgnore(method),
+    });
+  }
+  return fields;
+}
+
+function collectInterfaceFields(node: TsNode): JavaField[] {
+  const body = childrenOfType(node, "interface_body")[0];
+  return body ? collectGetterFields(body) : [];
 }
 
 function collectEnumValues(node: TsNode): string[] {
@@ -276,6 +342,51 @@ function declarationName(node: TsNode): string | null {
   return id ? id.text : null;
 }
 
+const TYPE_BODY_NODES = new Set([
+  "class_body",
+  "record_body",
+  "enum_body",
+  "interface_body",
+]);
+
+/** Enclosing simple names for a nested type, outermost first. */
+function enclosingTypeNames(node: TsNode): string[] {
+  const names: string[] = [];
+  let current = node.parent;
+  while (current) {
+    if (TYPE_BODY_NODES.has(current.type)) {
+      const owner = current.parent;
+      if (
+        owner &&
+        /_declaration$/.test(owner.type) &&
+        owner.type !== "annotation_type_declaration"
+      ) {
+        const ownerName = declarationName(owner);
+        if (ownerName) names.unshift(ownerName);
+      }
+    }
+    current = current.parent;
+  }
+  return names;
+}
+
+function collectImports(root: TsNode): { explicit: Map<string, string>; wildcards: string[] } {
+  const explicit = new Map<string, string>();
+  const wildcards: string[] = [];
+  for (const imp of findAll(root, (n) => n.type === "import_declaration")) {
+    const scoped = findFirst(imp, (n) => n.type === "scoped_identifier");
+    if (!scoped) continue;
+    const isWildcard = imp.namedChildren.some((c) => c.type === "asterisk");
+    if (isWildcard) {
+      wildcards.push(scoped.text);
+    } else {
+      const simple = scoped.text.slice(scoped.text.lastIndexOf(".") + 1);
+      explicit.set(simple, scoped.text);
+    }
+  }
+  return { explicit, wildcards };
+}
+
 export async function createJavaAnalysis(
   ctx: ScanContext,
 ): Promise<JavaAnalysis | null> {
@@ -284,9 +395,51 @@ export async function createJavaAnalysis(
 
   const files = new Map<string, JavaFile>();
   const types = new Map<string, JavaTypeDef>();
+  const typesByFqn = new Map<string, JavaTypeDef>();
+  const imports = new Map<
+    string,
+    { packageName: string; explicit: Map<string, string>; wildcards: string[] }
+  >();
 
   const registerType = (def: JavaTypeDef) => {
     if (!types.has(def.name)) types.set(def.name, def);
+    if (!typesByFqn.has(def.fqn)) typesByFqn.set(def.fqn, def);
+  };
+
+  const buildDef = (
+    kind: JavaTypeDef["kind"],
+    node: TsNode,
+    entry: { path: string },
+    packageName: string,
+  ): JavaTypeDef | null => {
+    const name = declarationName(node);
+    if (!name) return null;
+    const enclosing = enclosingTypeNames(node);
+    const fqn = packageName
+      ? `${packageName}.${[...enclosing, name].join(".")}`
+      : [...enclosing, name].join(".");
+    const discriminator = kind === "class" ? collectDiscriminator(node) : null;
+    return {
+      kind,
+      name,
+      fqn,
+      packageName,
+      file: entry.path,
+      node,
+      fields:
+        kind === "record"
+          ? collectRecordParams(node)
+          : kind === "enum"
+            ? []
+            : node.type === "interface_declaration"
+              ? collectInterfaceFields(node)
+              : collectClassFields(node),
+      enumValues: kind === "enum" ? collectEnumValues(node) : [],
+      typeParameters: collectTypeParameters(node),
+      superclass: collectSuperclass(node),
+      naming: classNamingStrategy(node),
+      ...(discriminator ? { discriminator } : {}),
+    };
   };
 
   for (const entry of javaFiles) {
@@ -301,58 +454,32 @@ export async function createJavaAnalysis(
     };
     files.set(entry.path, file);
 
+    const table = collectImports(root);
+    imports.set(entry.path, {
+      packageName,
+      explicit: table.explicit,
+      wildcards: table.wildcards,
+    });
+
     for (const record of findAll(root, (n) => n.type === "record_declaration")) {
-      const name = declarationName(record);
-      if (!name) continue;
-      registerType({
-        kind: "record",
-        name,
-        file: entry.path,
-        node: record,
-        fields: collectRecordParams(record),
-        enumValues: [],
-        typeParameters: collectTypeParameters(record),
-        superclass: null,
-        naming: classNamingStrategy(record),
-      });
+      const def = buildDef("record", record, entry, packageName);
+      if (def) registerType(def);
     }
-
     for (const cls of findAll(root, (n) => n.type === "class_declaration")) {
-      const name = declarationName(cls);
-      if (!name) continue;
-      const discriminator = collectDiscriminator(cls);
-      registerType({
-        kind: "class",
-        name,
-        file: entry.path,
-        node: cls,
-        fields: collectClassFields(cls),
-        enumValues: [],
-        typeParameters: collectTypeParameters(cls),
-        superclass: collectSuperclass(cls),
-        naming: classNamingStrategy(cls),
-        ...(discriminator ? { discriminator } : {}),
-      });
+      const def = buildDef("class", cls, entry, packageName);
+      if (def) registerType(def);
     }
-
+    for (const iface of findAll(root, (n) => n.type === "interface_declaration")) {
+      const def = buildDef("class", iface, entry, packageName);
+      if (def) registerType(def);
+    }
     for (const en of findAll(root, (n) => n.type === "enum_declaration")) {
-      const name = declarationName(en);
-      if (!name) continue;
-      registerType({
-        kind: "enum",
-        name,
-        file: entry.path,
-        node: en,
-        fields: [],
-        enumValues: collectEnumValues(en),
-        typeParameters: [],
-        superclass: null,
-        naming: "default",
-      });
+      const def = buildDef("enum", en, entry, packageName);
+      if (def) registerType(def);
     }
   }
 
-  return { id: "java", files, types };
+  return { id: "java", files, types, typesByFqn, imports };
 }
 
 export { annotationName, modifiersOf, typeNodeOf, TYPE_NODE_TYPES };

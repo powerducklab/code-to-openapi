@@ -251,7 +251,13 @@ function ensureSpecializedCsComponent(
   const args: SubstValue[] = rawArgs.map((arg) => resolveValue(arg, outerSubst));
 
   const suffix = args.map((arg) => typeKey(arg, index, outerSubst)).join("_");
-  const componentName = uniqueComponentName(index, `${name}_${suffix}`);
+  const desired = `${name}_${suffix}`;
+  // The suffix is deterministic from base name + concrete arguments, so an
+  // existing specialization is structurally identical and can be reused.
+  if (index.components.has(desired)) return desired;
+  const componentName = index.byName.has(desired)
+    ? uniqueComponentName(index, desired)
+    : desired;
   if (index.components.has(componentName)) return componentName;
   index.components.set(componentName, {});
 
@@ -434,6 +440,7 @@ export function csTypeToSchema(
 
   if (resolved.type === "identifier") {
     const name = resolved.text;
+    if (name === "Guid") return { type: "string", format: "uuid" };
     if (STRING_TYPES.has(name)) return { type: "string" };
     if (INTEGER_TYPES.has(name)) return { type: "integer" };
     if (NUMBER_TYPES.has(name)) return { type: "number" };

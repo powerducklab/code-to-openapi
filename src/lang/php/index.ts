@@ -22,8 +22,14 @@ export interface PhpClass {
   methods: Map<string, TsNode>;
   /** Constructor promotion and declared public properties. */
   properties: { name: string; typeNode: TsNode; nullable: boolean; hasDefault: boolean }[];
+  /** Docblock @var tag per property name (e.g. "string[]"). */
+  propertyDoc: Map<string, string>;
   /** FormRequest rules() entries, when present. */
   formRules: PhpRule[];
+  /** Laravel API resource classification. */
+  resourceKind: "json-resource" | "resource-collection" | null;
+  /** Model class short name referenced by the resource @mixin docblock. */
+  mixinModel: string | null;
 }
 
 export interface PhpEnum {
@@ -50,7 +56,36 @@ function nodeName(node: TsNode): string | null {
   return node.namedChildren.find((c) => c.type === "name")?.text ?? null;
 }
 
-function parseClass(node: TsNode, namespace: string | null): PhpClass | null {
+/** Collect contiguous doc/comment lines immediately above a node. */
+function docblockAbove(lines: string[], row: number): string {
+  const collected: string[] = [];
+  let rowIndex = row - 1;
+  let closing = false;
+  while (rowIndex >= 0) {
+    const line = lines[rowIndex]?.trim() ?? "";
+    if (!line) {
+      if (collected.length) break;
+      rowIndex -= 1;
+      continue;
+    }
+    if (closing || line.endsWith("*/")) {
+      closing = !line.startsWith("/**") && !line.startsWith("/*");
+      collected.unshift(line);
+      if (line.startsWith("/**") || line.startsWith("/*")) break;
+      rowIndex -= 1;
+      continue;
+    }
+    if (line.startsWith("//")) {
+      collected.unshift(line);
+      rowIndex -= 1;
+      continue;
+    }
+    break;
+  }
+  return collected.join("\n");
+}
+
+function parseClass(node: TsNode, namespace: string | null, lines: string[]): PhpClass | null {
   const nameNode = node.namedChildren.find((c) => c.type === "name");
   if (!nameNode) return null;
   const name = nameNode.text;
@@ -61,7 +96,19 @@ function parseClass(node: TsNode, namespace: string | null): PhpClass | null {
 
   const methods = new Map<string, TsNode>();
   const properties: PhpClass["properties"] = [];
+  const propertyDoc = new Map<string, string>();
   let formRules: PhpRule[] = [];
+
+  const classDoc = docblockAbove(lines, node.startPosition.row);
+  const mixinMatch = classDoc.match(/@mixin\s+([\\\w]+)/);
+  const mixinModel = mixinMatch ? mixinMatch[1]!.split("\\").pop()! : null;
+  const baseShort = extendsName?.split("\\").pop() ?? "";
+  const resourceKind: PhpClass["resourceKind"] =
+    baseShort === "JsonResource"
+      ? "json-resource"
+      : baseShort === "ResourceCollection"
+        ? "resource-collection"
+        : null;
 
   const body = node.namedChildren.find((c) => c.type === "declaration_list");
   if (body) {
@@ -82,8 +129,12 @@ function parseClass(node: TsNode, namespace: string | null): PhpClass | null {
           c.type === "union_type",
       );
       if (!variable || !typeNode) continue;
+      const propName = variable.text.replace(/^\$/, "");
+      const doc = docblockAbove(lines, prop.startPosition.row);
+      const varMatch = doc.match(/@var\s+([^\s*]+)/);
+      if (varMatch) propertyDoc.set(propName, varMatch[1]!);
       properties.push({
-        name: variable.text.replace(/^\$/, ""),
+        name: propName,
         typeNode,
         nullable: typeNode.type === "optional_type",
         hasDefault: Boolean(prop.namedChildren.find((c) => c.type === "assignment_expression")),
@@ -136,7 +187,10 @@ function parseClass(node: TsNode, namespace: string | null): PhpClass | null {
     extends: extendsName,
     methods,
     properties,
+    propertyDoc,
     formRules,
+    resourceKind,
+    mixinModel,
   };
 }
 
@@ -235,7 +289,7 @@ export const createPhpAnalysis: LanguagePack<PhpAnalysis>["analyze"] = async (
     files.set(file.path, { path: file.path, root, namespace, imports });
 
     for (const classNode of findAll(root, (n) => n.type === "class_declaration")) {
-      const cls = parseClass(classNode, namespace);
+      const cls = parseClass(classNode, namespace, file.content.split("\n"));
       if (cls && !classes.has(cls.name)) classes.set(cls.name, cls);
     }
     for (const enumNode of findAll(root, (n) => n.type === "enum_declaration")) {

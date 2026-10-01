@@ -66,20 +66,60 @@ export function buildStructSchema(
   struct: GoStruct,
   index: GoModelIndex,
   depth = 0,
+  stack: Set<string> = new Set(),
 ): JsonSchema {
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
 
+  // Declared fields win over promoted (embedded) fields on JSON name conflicts.
+  const declaredNames = new Set<string>();
   for (const field of struct.fields) {
+    if (field.embedded) continue;
     if (isSkipped(field)) continue;
     const name = fieldName(field);
     if (!name) continue;
-    properties[name] = goTypeToSchema(field.typeNode, index, depth + 1);
+    declaredNames.add(name);
+    properties[name] = goTypeToSchema(field.typeNode, index, depth + 1, stack);
     if (isRequired(field)) required.push(name);
   }
 
+  for (const field of struct.fields) {
+    if (!field.embedded) continue;
+    const inner = field.typeNode.type === "pointer_type" ? field.typeNode.namedChildren[0] : field.typeNode;
+    const embeddedName = inner?.type === "type_identifier" ? inner.text : null;
+    const embeddedStruct = embeddedName ? index.byName.get(embeddedName) : undefined;
+    if (inner && embeddedStruct) {
+      // encoding/json promotes the embedded struct's fields to the same level.
+      ensureGoComponent(embeddedName!, index, stack);
+      const promoted = index.components.get(embeddedName!);
+      const promotedProps = (promoted?.properties ?? {}) as Record<string, JsonSchema>;
+      for (const [name, schema] of Object.entries(promotedProps)) {
+        if (declaredNames.has(name)) continue;
+        properties[name] = schema;
+        declaredNames.add(name);
+        // Pointer-embedded structs may be nil; their fields stay optional.
+        if (
+          field.typeNode.type !== "pointer_type" &&
+          Array.isArray(promoted?.required) &&
+          (promoted!.required as string[]).includes(name)
+        ) {
+          required.push(name);
+        }
+      }
+      continue;
+    }
+    // Non-struct embedding (primitive alias, external package type): the JSON
+    // key is the unqualified type name.
+    const key = (embeddedName ?? field.goName.split(".").pop() ?? field.goName).replace(/^\*/, "");
+    if (!declaredNames.has(key)) {
+      properties[key] = goTypeToSchema(field.typeNode, index, depth + 1, stack);
+      declaredNames.add(key);
+      if (isRequired(field)) required.push(key);
+    }
+  }
+
   const schema: JsonSchema = { type: "object", properties };
-  if (required.length > 0) schema.required = required;
+  if (required.length > 0) schema.required = [...new Set(required)];
   return schema;
 }
 
@@ -95,7 +135,7 @@ export function ensureGoComponent(
   stack.add(name);
   // Reserve the slot to break recursive references.
   index.components.set(name, {});
-  index.components.set(name, buildStructSchema(struct, index));
+  index.components.set(name, buildStructSchema(struct, index, 0, stack));
   stack.delete(name);
 }
 
@@ -103,26 +143,27 @@ export function goTypeToSchema(
   node: TsNode,
   index: GoModelIndex,
   depth = 0,
+  stack: Set<string> = new Set(),
 ): JsonSchema {
   if (depth > 6) return {};
 
   if (node.type === "pointer_type") {
     const inner = node.namedChildren[0];
-    return inner ? goTypeToSchema(inner, index, depth + 1) : {};
+    return inner ? goTypeToSchema(inner, index, depth + 1, stack) : {};
   }
 
   if (node.type === "slice_type" || node.type === "array_type") {
     const inner = node.namedChildren[0];
     return {
       type: "array",
-      items: inner ? goTypeToSchema(inner, index, depth + 1) : {},
+      items: inner ? goTypeToSchema(inner, index, depth + 1, stack) : {},
     };
   }
 
   if (node.type === "map_type") {
     const value = node.namedChildren[1];
     const schema: JsonSchema = { type: "object" };
-    if (value) schema.additionalProperties = goTypeToSchema(value, index, depth + 1);
+    if (value) schema.additionalProperties = goTypeToSchema(value, index, depth + 1, stack);
     return schema;
   }
 

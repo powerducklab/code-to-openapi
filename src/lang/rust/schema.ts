@@ -77,6 +77,7 @@ export function ensureRustComponent(
   index: RustModelIndex,
   stack: Set<string> = new Set(),
   genericArgs: TsNode[] = [],
+  outerSubst: Map<string, TsNode> = new Map(),
 ): JsonSchema | null {
   const def = index.byName.get(name);
   if (!def) return null;
@@ -84,7 +85,7 @@ export function ensureRustComponent(
   // Generic instantiation produces an inline schema; concrete types become
   // components.
   if (def.generics.length && genericArgs.length === def.generics.length) {
-    return instantiateGeneric(def, genericArgs, index, stack);
+    return instantiateGeneric(def, genericArgs, index, stack, outerSubst);
   }
   if (def.generics.length) return null;
 
@@ -104,28 +105,30 @@ function instantiateGeneric(
   genericArgs: TsNode[],
   index: RustModelIndex,
   stack: Set<string>,
+  outerSubst: Map<string, TsNode> = new Map(),
 ): JsonSchema {
-  const substitution = new Map<string, TsNode>();
+  const substitution = new Map<string, TsNode>(outerSubst);
   def.generics.forEach((param, i) => {
-    if (genericArgs[i]) substitution.set(param, genericArgs[i]!);
+    if (genericArgs[i]) {
+      // The argument may itself be an outer generic parameter (B<T> inside A<T>).
+      const arg = genericArgs[i]!;
+      substitution.set(
+        param,
+        arg.type === "type_identifier" && outerSubst.has(arg.text)
+          ? outerSubst.get(arg.text)!
+          : arg,
+      );
+    }
   });
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
   for (const field of def.fields) {
-    const typeNode = substituteType(field.typeNode, substitution);
-    properties[field.name] = rustTypeToSchema(typeNode, index, stack, 0);
+    properties[field.name] = rustTypeToSchema(field.typeNode, index, stack, 0, substitution);
     if (field.required) required.push(field.name);
   }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;
   return schema;
-}
-
-function substituteType(node: TsNode, substitution: Map<string, TsNode>): TsNode {
-  if (node.type === "type_identifier" && substitution.has(node.text)) {
-    return substitution.get(node.text)!;
-  }
-  return node;
 }
 
 function buildTypeSchema(
@@ -160,8 +163,14 @@ export function rustTypeToSchema(
   index: RustModelIndex,
   stack: Set<string> = new Set(),
   depth = 0,
+  subst: Map<string, TsNode> = new Map(),
 ): JsonSchema {
   if (!node || depth > 6) return {};
+
+  // Generic parameter in scope (T inside ApiResponse<T>): use the bound type.
+  if (node.type === "type_identifier" && subst.has(node.text)) {
+    return rustTypeToSchema(subst.get(node.text), index, stack, depth, subst);
+  }
 
   if (node.type === "reference_type") {
     // &T / &str / &[T]
@@ -182,10 +191,10 @@ export function rustTypeToSchema(
             c.type === "generic_type" ||
             c.type === "primitive_type",
         );
-        return { type: "array", items: item ? rustTypeToSchema(item, index, stack, depth + 1) : {} };
+        return { type: "array", items: item ? rustTypeToSchema(item, index, stack, depth + 1, subst) : {} };
       }
     }
-    return inner ? rustTypeToSchema(inner, index, stack, depth) : { type: "string" };
+    return inner ? rustTypeToSchema(inner, index, stack, depth, subst) : { type: "string" };
   }
 
   if (node.type === "primitive_type") {
@@ -206,7 +215,7 @@ export function rustTypeToSchema(
         c.type === "generic_type" ||
         c.type === "primitive_type",
     );
-    return { type: "array", items: item ? rustTypeToSchema(item, index, stack, depth + 1) : {} };
+    return { type: "array", items: item ? rustTypeToSchema(item, index, stack, depth + 1, subst) : {} };
   }
 
   if (node.type === "generic_type") {
@@ -215,28 +224,28 @@ export function rustTypeToSchema(
     if (name && COLLECTION_TYPES.has(name)) {
       return {
         type: "array",
-        items: args[0] ? rustTypeToSchema(args[0], index, stack, depth + 1) : {},
+        items: args[0] ? rustTypeToSchema(args[0], index, stack, depth + 1, subst) : {},
       };
     }
     if (name === "Option") {
-      return args[0] ? rustTypeToSchema(args[0], index, stack, depth) : {};
+      return args[0] ? rustTypeToSchema(args[0], index, stack, depth, subst) : {};
     }
     if (name && (name === "HashMap" || name === "BTreeMap" || name === "IndexMap")) {
       return {
         type: "object",
         ...(args[1]
-          ? { additionalProperties: rustTypeToSchema(args[1], index, stack, depth + 1) }
+          ? { additionalProperties: rustTypeToSchema(args[1], index, stack, depth + 1, subst) }
           : {}),
       };
     }
     if (name && WRAPPER_TYPES.has(name) && args[0]) {
-      return rustTypeToSchema(args[0], index, stack, depth);
+      return rustTypeToSchema(args[0], index, stack, depth, subst);
     }
     if (name && (name === "Json" || name === "Extension")) {
-      return args[0] ? rustTypeToSchema(args[0], index, stack, depth) : {};
+      return args[0] ? rustTypeToSchema(args[0], index, stack, depth, subst) : {};
     }
     if (name && index.byName.has(name)) {
-      const ref = ensureRustComponent(name, index, stack, args);
+      const ref = ensureRustComponent(name, index, stack, args, subst);
       return ref ?? {};
     }
     return {};
@@ -251,7 +260,7 @@ export function rustTypeToSchema(
     );
     return {
       type: "array",
-      items: types[0] ? rustTypeToSchema(types[0], index, stack, depth + 1) : {},
+      items: types[0] ? rustTypeToSchema(types[0], index, stack, depth + 1, subst) : {},
     };
   }
 
@@ -303,10 +312,9 @@ export function expandStructFields(
     if (args[i]) substitution.set(param, args[i]!);
   });
   return def.fields.map((field) => {
-    const resolved = substituteType(field.typeNode, substitution);
     return {
       name: field.name,
-      schema: rustTypeToSchema(resolved, index),
+      schema: rustTypeToSchema(field.typeNode, index, new Set(), 0, substitution),
       required: field.required,
     };
   });

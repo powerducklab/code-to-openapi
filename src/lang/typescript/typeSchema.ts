@@ -333,18 +333,70 @@ function objectSchema(
   return schema;
 }
 
+/**
+ * Stable short name for a generic type argument, mirroring the Java typeKey
+ * conventions: named types keep their symbol name, arrays gain a List suffix.
+ */
+function genericArgShortName(type: any, ctx: SchemaContext): string {
+  const { ts, checker } = ctx;
+  const flags = type.flags ?? 0;
+  const flag = (name: string) => Boolean(flags & (ts.TypeFlags[name] ?? 0));
+  if (flag("String") || flag("StringLiteral")) return "String";
+  if (flag("Number") || flag("NumberLiteral")) return "Number";
+  if (flag("Boolean") || flag("BooleanLiteral")) return "Boolean";
+  const numberIndex = checker.getIndexTypeOfType?.(type, ts.IndexKind.Number);
+  const typeArgs = checker.getTypeArguments?.(type) ?? [];
+  if (checker.isArrayType?.(type) || type.symbol?.name === "Array" || numberIndex) {
+    const item = numberIndex ?? typeArgs[0];
+    return `${genericArgShortName(item ?? type, ctx)}List`;
+  }
+  const symbol = type.getSymbol?.() ?? type.aliasSymbol;
+  if (symbol?.name) {
+    const nestedArgs: any[] = checker.getTypeArguments?.(type) ?? [];
+    const decl = symbol.declarations?.find((d: any) => d.typeParameters?.length);
+    const params: any[] = decl?.typeParameters ?? [];
+    const instantiated =
+      nestedArgs.length === params.length &&
+      nestedArgs.length > 0 &&
+      nestedArgs.some((arg, i) => arg !== params[i]);
+    return instantiated
+      ? `${symbol.name}_${nestedArgs.map((arg) => genericArgShortName(arg, ctx)).join("_")}`
+      : symbol.name;
+  }
+  const printed = checker.typeToString ? checker.typeToString(type) : "T";
+  return printed.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
 function hoistComponent(
   type: any,
   symbol: any,
   ctx: SchemaContext,
   hintName?: string,
 ): JsonSchema {
-  const key = String(symbol.id ?? symbol.name);
+  const { checker } = ctx;
+
+  // Generic instantiations (ApiResponse<Product>, PageResult<T[]>) get their
+  // own specialized component; the checker already binds property types to
+  // the concrete arguments, so two instantiations must not share one schema.
+  const typeArgs: any[] = checker.getTypeArguments?.(type) ?? [];
+  const declaration = symbol.declarations?.find((d: any) => d.typeParameters?.length);
+  const typeParameters: any[] = declaration?.typeParameters ?? [];
+  const instantiated =
+    typeArgs.length > 0 &&
+    typeArgs.length === typeParameters.length &&
+    typeArgs.some((arg, i) => arg !== typeParameters[i]);
+  const argKey = instantiated
+    ? `⟨${typeArgs.map((arg) => arg.id ?? checker.typeToString?.(arg)).join(",")}⟩`
+    : "";
+  const key = `${String(symbol.id ?? symbol.name)}${argKey}`;
   const existing = ctx.symbolToComponent.get(key);
   if (existing) return ref(existing);
 
-  const baseName = hintName ?? symbol.name;
-  const name = uniqueName(baseName, new Set(ctx.components.keys()));
+  const baseName = symbol.name ?? hintName;
+  const suffix = instantiated
+    ? `_${typeArgs.map((arg) => genericArgShortName(arg, ctx)).join("_")}`
+    : "";
+  const name = uniqueName(`${baseName}${suffix}`, new Set(ctx.components.keys()));
   ctx.symbolToComponent.set(key, name);
   ctx.inProgress.add(name);
 

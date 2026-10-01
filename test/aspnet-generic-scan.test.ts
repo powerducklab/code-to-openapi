@@ -33,7 +33,7 @@ describe("asp.net generic response wrappers", () => {
     expect(wrapper.properties.data).toEqual({ $ref: "#/components/schemas/ProductDto" });
 
     const product = doc.components.schemas.ProductDto;
-    expect(product.properties.id).toEqual({ type: "string" });
+    expect(product.properties.id).toEqual({ type: "string", format: "uuid" });
     expect(product.properties.name).toEqual({ type: "string" });
     expect(product.properties.price).toEqual({ type: "number" });
     expect(product.properties.category).toEqual({ $ref: "#/components/schemas/ProductCategory" });

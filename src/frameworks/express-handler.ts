@@ -29,6 +29,7 @@ export interface HandlerFacts {
 interface CollectedField {
   name: string;
   schema?: JsonSchema;
+  required?: boolean;
 }
 
 const HTTP_VERB_LITERAL = /^\d{3}$/;
@@ -456,8 +457,18 @@ export function analyzeHandler(
   }
 
   if (genericQuery) {
-    for (const [name, schema] of Object.entries(genericQuery.properties ?? {})) {
-      queryFields.push({ name, schema });
+    // Query interfaces are hoisted as $ref components; dereference them so
+    // every declared field (including optional ones) becomes a parameter.
+    const querySchema = genericQuery as JsonSchema;
+    const refName = typeof querySchema.$ref === "string" ? querySchema.$ref.match(/[^/]+$/)?.[0] : null;
+    const dereferenced = refName
+      ? analysis.schemaContext.components.get(refName)
+      : querySchema;
+    const requiredSet = new Set<string>(
+      Array.isArray(dereferenced?.required) ? (dereferenced!.required as string[]) : [],
+    );
+    for (const [name, schema] of Object.entries(dereferenced?.properties ?? {})) {
+      queryFields.push({ name, schema: schema as JsonSchema, required: requiredSet.has(name) });
     }
   }
 
@@ -805,7 +816,7 @@ export function analyzeHandler(
 
   // ---- assemble parameters ----
   for (const field of queryFields) {
-    addParam("query", field.name, field.schema, field.schema ? "high" : "low", false);
+    addParam("query", field.name, field.schema, field.schema ? "high" : "low", field.required ?? false);
   }
   for (const field of headerFields) {
     addParam("header", field.name, field.schema, field.schema ? "high" : "low", false);

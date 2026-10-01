@@ -32,6 +32,23 @@ beforeAll(() => {
   mkdirSync(join(root, "dotnet", "bin", "Debug"), { recursive: true });
   writeFileSync(join(root, "dotnet", "App.csproj"), "<Project/>");
   writeFileSync(join(root, "dotnet", "bin", "Debug", "App.dll"), "binary");
+  // A Java-style source package named "env" must stay indexed.
+  mkdirSync(join(root, "src", "main", "java", "demo", "env"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "main", "java", "demo", "env", "EnvDto.java"),
+    "package demo.env; class EnvDto {}",
+  );
+  // A real Python virtualenv named "env" (pyvenv.cfg marker) must be ignored.
+  mkdirSync(join(root, "env", "bin"), { recursive: true });
+  writeFileSync(join(root, "env", "pyvenv.cfg"), "home = /usr/bin\n");
+  writeFileSync(join(root, "env", "bin", "activate"), "# shell\n");
+  writeFileSync(join(root, "env", "polluted.py"), "import os\n");
+  // A source folder named "venv" without virtualenv markers must stay indexed.
+  mkdirSync(join(root, "src", "main", "python", "venv"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "main", "python", "venv", "config.py"),
+    "SETTINGS = {}\n",
+  );
 });
 
 afterAll(() => {
@@ -44,8 +61,11 @@ describe("indexer build directory detection", () => {
     const paths = index.files.map((f) => f.path);
     expect(paths).toContain("src/main/java/demo/target/Thing.java");
     expect(paths).toContain("src/main/java/demo/bin/BinThing.java");
+    expect(paths).toContain("src/main/java/demo/env/EnvDto.java");
+    expect(paths).toContain("src/main/python/venv/config.py");
     expect(paths.some((p) => p.startsWith("target/"))).toBe(false);
     expect(paths.some((p) => p.startsWith("node_modules/"))).toBe(false);
     expect(paths.some((p) => p.startsWith("dotnet/bin/"))).toBe(false);
+    expect(paths.some((p) => p.startsWith("env/"))).toBe(false);
   });
 });

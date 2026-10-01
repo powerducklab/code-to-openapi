@@ -19,8 +19,6 @@ const ALWAYS_IGNORE_DIRS = new Set([
   "vendor",
   "__pycache__",
   ".venv",
-  "venv",
-  "env",
   ".mypy_cache",
   ".pytest_cache",
   ".ruff_cache",
@@ -42,6 +40,20 @@ function hasEntry(dir: string, predicate: (name: string) => boolean): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Python virtualenvs are conventionally named "env" or "venv", but those are
+ * also common source package names (e.g. a Java `...api.env` package). Only
+ * skip the directory when it carries unmistakable virtualenv markers.
+ */
+function isPythonVirtualenv(absolute: string): boolean {
+  return (
+    hasEntry(absolute, (entry) => entry === "pyvenv.cfg") ||
+    hasEntry(absolute, (entry) => entry === "activate") ||
+    (hasEntry(absolute, (entry) => entry === "bin") &&
+      hasEntry(absolute, (entry) => entry === "lib"))
+  );
 }
 
 /**
@@ -164,6 +176,12 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
       if (entry.isDirectory()) {
         if (entry.name.startsWith(".")) continue;
         if (ALWAYS_IGNORE_DIRS.has(entry.name)) continue;
+        if (
+          (entry.name === "env" || entry.name === "venv") &&
+          isPythonVirtualenv(absolute)
+        ) {
+          continue;
+        }
         if (
           CONDITIONAL_BUILD_DIRS.has(entry.name) &&
           isConditionalBuildOutput(absolute, entry.name)

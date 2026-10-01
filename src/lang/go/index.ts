@@ -14,6 +14,8 @@ export interface GoField {
   readonly goName: string;
   readonly typeNode: TsNode;
   readonly tag: string | null;
+  /** Anonymous (embedded) field such as `Base` in `struct { Base; Name string }`. */
+  readonly embedded?: boolean;
 }
 
 export interface GoStruct {
@@ -114,7 +116,7 @@ function collectStructs(file: GoFile): GoStruct[] {
           if (!typeNode) continue;
           if (names.length === 0) {
             // Embedded field.
-            fields.push({ goName: typeNode.text.replace(/^\*/, ""), typeNode, tag: null });
+            fields.push({ goName: typeNode.text.replace(/^\*/, ""), typeNode, tag: null, embedded: true });
             continue;
           }
           for (const name of names) {

@@ -158,15 +158,22 @@ export function annotationToSchema(
   node: TsNode | null,
   index: ModelIndex,
   depth = 0,
+  subst: Map<string, TsNode> = new Map(),
 ): JsonSchema | null {
   if (!node || depth > 6) return null;
+
+  // Substitute a generic type variable (T in Generic[T]) with the concrete
+  // annotation captured at the parameterized reference (ApiResponse[Product]).
+  if (node.type === "identifier" && subst.has(node.text)) {
+    return annotationToSchema(subst.get(node.text) ?? null, index, depth + 1, subst);
+  }
 
   // X | Y unions (PEP 604).
   if (node.type === "binary_operator" && node.text.includes("|")) {
     const variants = node.namedChildren.filter((child) => child.type !== "none");
     const nullable = node.namedChildren.some(isNoneNode);
     const schemas = variants
-      .map((variant) => annotationToSchema(variant, index, depth + 1))
+      .map((variant) => annotationToSchema(variant, index, depth + 1, subst))
       .filter((schema): schema is JsonSchema => schema !== null);
     if (!schemas.length) return nullable ? { type: "null" } : null;
     if (schemas.length === 1) {
@@ -182,7 +189,7 @@ export function annotationToSchema(
     const name = generic.name.split(".").pop() ?? generic.name;
 
     if (name === "Annotated" && generic.args[0]) {
-      return annotationToSchema(generic.args[0], index, depth + 1);
+      return annotationToSchema(generic.args[0], index, depth + 1, subst);
     }
     if (name === "Literal" || name === "typing.Literal") {
       const values = generic.args.map(literalValue).filter((v) => v !== undefined);
@@ -198,14 +205,14 @@ export function annotationToSchema(
       };
     }
     if (name === "Optional" && generic.args[0]) {
-      const inner = annotationToSchema(generic.args[0], index, depth + 1);
+      const inner = annotationToSchema(generic.args[0], index, depth + 1, subst);
       return inner ? { ...inner, nullable: true } : null;
     }
     if (name === "Union") {
       const variants = generic.args.filter((arg) => !isNoneNode(arg));
       const nullable = generic.args.some(isNoneNode);
       const schemas = variants
-        .map((arg) => annotationToSchema(arg, index, depth + 1))
+        .map((arg) => annotationToSchema(arg, index, depth + 1, subst))
         .filter((schema): schema is JsonSchema => schema !== null);
       if (schemas.length === 1) return nullable ? { ...schemas[0], nullable: true } : schemas[0];
       if (schemas.length > 1) {
@@ -216,14 +223,14 @@ export function annotationToSchema(
     }
     if (["list", "List", "Sequence", "Iterable", "set", "Set", "tuple", "Tuple"].includes(name)) {
       const items = generic.args[0]
-        ? annotationToSchema(generic.args[0], index, depth + 1)
+        ? annotationToSchema(generic.args[0], index, depth + 1, subst)
         : {};
       return { type: "array", items: items ?? {} };
     }
     if (["dict", "Dict", "Mapping"].includes(name)) {
       const schema: JsonSchema = { type: "object" };
       const valueType = generic.args[1]
-        ? annotationToSchema(generic.args[1], index, depth + 1)
+        ? annotationToSchema(generic.args[1], index, depth + 1, subst)
         : null;
       if (valueType) schema.additionalProperties = valueType;
       return schema;
@@ -231,8 +238,14 @@ export function annotationToSchema(
     if (SCALAR_MAP[generic.name] || SCALAR_MAP[name]) {
       return SCALAR_MAP[name] ?? SCALAR_MAP[generic.name] ?? null;
     }
-    // Parameterized model (e.g. generic Pydantic classes): ref the base name.
+    // Parameterized user model (e.g. ApiResponse[Product]): build a specialized
+    // component so every type variable is bound to its concrete argument.
     if (index.pydanticNames.has(generic.name)) {
+      const specialized = specializedComponentName(generic.name, generic.args, index);
+      if (specialized) {
+        ensureSpecializedComponent(generic.name, generic.args, specialized, index);
+        return { $ref: `#/components/schemas/${specialized}` };
+      }
       ensureComponent(generic.name, index);
       return { $ref: `#/components/schemas/${generic.name}` };
     }
@@ -301,30 +314,117 @@ export function fieldRequired(field: PyField, index: ModelIndex): boolean {
   return false;
 }
 
+/** Declared Generic[...] parameter names for a class, in declaration order. */
+function classTypeParameters(cls: PyClass): string[] {
+  for (const base of cls.bases) {
+    if (base.type !== "generic_type" && base.type !== "subscript") continue;
+    const generic = genericParts(base);
+    if (!generic) continue;
+    const baseNameText = generic.name.split(".").pop() ?? generic.name;
+    if (baseNameText === "Generic") {
+      return generic.args
+        .map((arg) => (arg.type === "identifier" ? arg.text : null))
+        .filter((v): v is string => v !== null);
+    }
+  }
+  return [];
+}
+
+/** Stable component suffix for a concrete generic argument node. */
+function genericArgShortName(node: TsNode, index: ModelIndex): string {
+  if (node.type === "generic_type" || node.type === "subscript") {
+    const generic = genericParts(node);
+    if (generic) {
+      const name = generic.name.split(".").pop() ?? generic.name;
+      if (["list", "List", "Sequence", "Iterable", "set", "Set", "tuple", "Tuple"].includes(name)) {
+        return `${generic.args[0] ? genericArgShortName(generic.args[0], index) : "Object"}List`;
+      }
+      if (index.pydanticNames.has(generic.name)) {
+        const nested = specializedComponentName(generic.name, generic.args, index);
+        return nested ?? generic.name;
+      }
+      if (SCALAR_MAP[name]) return scalarShortName(name);
+      return name;
+    }
+  }
+  if (node.type === "identifier" || node.type === "attribute") {
+    const name = node.type === "attribute" ? (node.namedChildren[1]?.text ?? node.text) : node.text;
+    if (index.pydanticNames.has(name) || index.enumNames.has(name)) return name;
+    return scalarShortName(name);
+  }
+  if (node.type === "binary_operator" && node.text.includes("|")) {
+    return "Union";
+  }
+  return "Object";
+}
+
+function scalarShortName(name: string): string {
+  const capitalized = name.charAt(0).toUpperCase() + name.slice(1);
+  if (name === "int") return "Integer";
+  if (name === "str") return "String";
+  if (name === "bool" || name === "boolean") return "Boolean";
+  if (name === "float" || name === "Decimal") return "Number";
+  return capitalized;
+}
+
+/** Component name for a parameterized model, or null when args do not bind. */
+function specializedComponentName(
+  baseName: string,
+  argNodes: TsNode[],
+  index: ModelIndex,
+): string | null {
+  const cls = index.analysis.classes.find((candidate) => candidate.name === baseName);
+  if (!cls) return null;
+  const parameters = classTypeParameters(cls);
+  if (!parameters.length || argNodes.length !== parameters.length) return null;
+  return `${baseName}_${argNodes.map((arg) => genericArgShortName(arg, index)).join("_")}`;
+}
+
 export function buildComponent(
   cls: PyClass,
   index: ModelIndex,
   stack: Set<string> = new Set(),
+  subst: Map<string, TsNode> = new Map(),
+  componentName?: string,
 ): DiscoveredComponent | null {
+  const name = componentName ?? cls.name;
   if (index.enumNames.has(cls.name)) {
     const enumeration = enumValues(cls);
     if (!enumeration) return null;
-    return { name: cls.name, schema: { type: enumeration.type, enum: enumeration.values } };
+    return { name, schema: { type: enumeration.type, enum: enumeration.values } };
   }
 
-  if (stack.has(cls.name)) return { name: cls.name, schema: {} };
-  stack.add(cls.name);
+  if (stack.has(name)) return { name, schema: {} };
+  stack.add(name);
 
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
 
-  // Inherit fields from model superclasses first.
+  // Inherit fields from model superclasses first. Generic superclasses with
+  // bound parameters are specialized; plain ones keep their component name.
   for (const base of cls.bases) {
-    const parentName = baseName(base);
+    const baseGeneric = base.type === "generic_type" || base.type === "subscript" ? genericParts(base) : null;
+    const parentName = baseGeneric ? baseGeneric.name.split(".").pop() ?? baseGeneric.name : baseName(base);
     if (!index.pydanticNames.has(parentName) || parentName === cls.name) continue;
     const parent = index.analysis.classes.find((candidate) => candidate.name === parentName);
     if (!parent) continue;
-    const parentComponent = buildComponent(parent, index, new Set(stack));
+    const parentParams = classTypeParameters(parent);
+    const parentSubst = new Map(subst);
+    let parentComponentName = parentName;
+    if (baseGeneric && parentParams.length === baseGeneric.args.length) {
+      baseGeneric.args.forEach((arg, i) => {
+        // Resolve the parent's variable through the child's substitution first.
+        const resolved = arg.type === "identifier" && subst.has(arg.text)
+          ? subst.get(arg.text)!
+          : arg;
+        parentSubst.set(parentParams[i], resolved);
+      });
+      parentComponentName =
+        specializedComponentName(parentName, baseGeneric.args.map((arg) =>
+          arg.type === "identifier" && subst.has(arg.text) ? subst.get(arg.text)! : arg,
+        ), index) ?? parentName;
+    }
+    const parentComponent = buildComponent(parent, index, new Set(stack), parentSubst, parentComponentName);
     const parentSchema = parentComponent?.schema;
     if (parentSchema?.properties) {
       for (const [key, value] of Object.entries(parentSchema.properties)) {
@@ -336,20 +436,20 @@ export function buildComponent(
 
   for (const field of cls.fields) {
     const schema = field.annotation
-      ? annotationToSchema(field.annotation, index, 1)
+      ? annotationToSchema(field.annotation, index, 1, subst)
       : null;
     if (schema) properties[field.name] = schema;
     if (fieldRequired(field, index) && schema) required.push(field.name);
   }
 
-  stack.delete(cls.name);
+  stack.delete(name);
 
   const schema: JsonSchema = {
     type: "object",
     properties,
     ...(required.length ? { required: [...new Set(required)] } : {}),
   };
-  return { name: cls.name, schema };
+  return { name, schema };
 }
 
 export function ensureComponent(name: string, index: ModelIndex): void {
@@ -359,6 +459,27 @@ export function ensureComponent(name: string, index: ModelIndex): void {
   // Reserve the slot first to break recursive models.
   index.componentsByName.set(name, { name, schema: {} });
   const component = buildComponent(cls, index);
+  if (component) index.componentsByName.set(name, component);
+}
+
+export function ensureSpecializedComponent(
+  baseName: string,
+  argNodes: TsNode[],
+  name: string,
+  index: ModelIndex,
+): void {
+  if (index.componentsByName.has(name)) return;
+  const cls = index.analysis.classes.find((candidate) => candidate.name === baseName);
+  if (!cls) return;
+  const parameters = classTypeParameters(cls);
+  if (!parameters.length || argNodes.length !== parameters.length) {
+    ensureComponent(baseName, index);
+    return;
+  }
+  const subst = new Map<string, TsNode>();
+  parameters.forEach((parameter, i) => subst.set(parameter, argNodes[i]));
+  index.componentsByName.set(name, { name, schema: {} });
+  const component = buildComponent(cls, index, new Set(), subst, name);
   if (component) index.componentsByName.set(name, component);
 }
 

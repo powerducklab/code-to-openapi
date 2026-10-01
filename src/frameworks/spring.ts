@@ -32,8 +32,8 @@ import {
   annotationElement,
   annotationStringArg,
   buildJavaModelIndex,
-  ensureJavaComponent,
   findAnnotation,
+  javaBeanProperties,
   javaTypeToSchema,
   listAnnotations,
   type JavaModelIndex,
@@ -142,6 +142,7 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             method,
             model,
             pathParams,
+            rel,
           );
 
           const producesEventStream = annotationProducesEventStream(mapping.node);
@@ -152,7 +153,8 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
                 c.type === "generic_type" ||
                 c.type === "void_type" ||
                 c.type === "array_type" ||
-                c.type === "scoped_identifier",
+                c.type === "scoped_identifier" ||
+                c.type === "scoped_type_identifier",
             ) ?? null;
 
           const isStreamingEmitter =
@@ -165,8 +167,8 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             (returnType === null && /text\/event-stream/.test(method.text));
 
           const responses = isSse
-            ? collectSseResponse(returnType, model, gaps)
-            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps);
+            ? collectSseResponse(returnType, model, gaps, rel)
+            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps, rel);
 
           const extensions = isSse ? { "x-protocol": "sse" } : undefined;
 
@@ -229,10 +231,57 @@ function annotationProducesEventStream(node: TsNode): boolean {
   );
 }
 
+/**
+ * Spring binding annotations: each pins a parameter to a specific source.
+ * Validation annotations (@Valid, @Validated) do not, so a POJO carrying only
+ * those is still an implicit command object bound from query parameters.
+ */
+const BINDING_ANNOTATIONS = new Set([
+  "PathVariable",
+  "RequestParam",
+  "RequestHeader",
+  "CookieValue",
+  "RequestBody",
+  "RequestPart",
+  "ModelAttribute",
+  "RequestAttribute",
+  "SessionAttribute",
+]);
+
+const SIMPLE_BIND_TYPES = new Set([
+  "String",
+  "CharSequence",
+  "Integer",
+  "int",
+  "Long",
+  "long",
+  "Short",
+  "short",
+  "Byte",
+  "byte",
+  "Boolean",
+  "boolean",
+  "Double",
+  "double",
+  "Float",
+  "float",
+  "BigDecimal",
+  "BigInteger",
+  "Number",
+  "UUID",
+  "LocalDate",
+  "LocalDateTime",
+  "OffsetDateTime",
+  "ZonedDateTime",
+  "Instant",
+  "Date",
+]);
+
 function collectParameters(
   method: TsNode,
   model: JavaModelIndex,
   pathParams: Set<string>,
+  rel: string,
 ): {
   parameters: RouteParameter[];
   requestBody?: {
@@ -274,23 +323,17 @@ function collectParameters(
   };
 
   const expandModel = (typeNode: TsNode, location: RouteParameter["in"]) => {
-    const typeName =
-      typeNode.type === "generic_type"
-        ? typeNode.namedChildren.find((c) => c.type === "type_identifier")?.text
-        : typeNode.type === "type_identifier"
-          ? typeNode.text
-          : null;
+    const typeName = typeNameOf(typeNode);
     if (!typeName) return;
-    const def = model.byName.get(typeName);
+    const def = model.resolveDef(typeName, rel);
     if (!def) return;
-    ensureJavaComponent(typeName, model);
-    for (const field of def.fields) {
+    for (const property of javaBeanProperties(def, model)) {
       addParam(
         location,
-        field.name,
-        javaTypeToSchema(field.typeNode, model),
+        property.name,
+        Object.keys(property.schema).length ? property.schema : undefined,
         "high",
-        field.required,
+        property.required,
       );
     }
   };
@@ -305,7 +348,8 @@ function collectParameters(
         c.type === "array_type" ||
         c.type === "integral_type" ||
         c.type === "floating_point_type" ||
-        c.type === "boolean_type",
+        c.type === "boolean_type" ||
+        c.type === "scoped_type_identifier",
     );
 
     const pathVar = annotations.find((a) => a.name === "PathVariable");
@@ -324,7 +368,7 @@ function collectParameters(
         addParam(
           "path",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
           "high",
           !isRequiredFalse(pathVar.node),
         );
@@ -342,7 +386,7 @@ function collectParameters(
         addParam(
           "query",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model) : undefined,
+          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : undefined,
           "high",
           required,
         );
@@ -357,10 +401,8 @@ function collectParameters(
       if (name) {
         addParam(
           "header",
-          // Keep an explicitly annotated header name verbatim; only fall back
-          // to the lowercased Java parameter name.
           explicitName ? name : name.toLowerCase(),
-          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
           "high",
           !isRequiredFalse(requestHeader.node),
         );
@@ -376,7 +418,7 @@ function collectParameters(
         addParam(
           "cookie",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
           "high",
           !isRequiredFalse(cookieValue.node),
         );
@@ -401,7 +443,7 @@ function collectParameters(
                 [partName]: isFile
                   ? { type: "string", format: "binary" }
                   : typeNode
-                    ? javaTypeToSchema(typeNode, model)
+                    ? javaTypeToSchema(typeNode, model, 0, undefined, rel)
                     : { type: "string" },
               },
               required: [partName],
@@ -414,7 +456,7 @@ function collectParameters(
     }
 
     if (body && typeNode) {
-      const schema = javaTypeToSchema(typeNode, model);
+      const schema = javaTypeToSchema(typeNode, model, 0, undefined, rel);
       if (schema && Object.keys(schema).length) {
         requestBody = {
           required: !isRequiredFalse(body.node),
@@ -432,10 +474,24 @@ function collectParameters(
       continue;
     }
 
-    // Unannotated complex POJO parameters are implicitly command objects in
-    // Spring MVC and bind from query parameters.
-    if (!annotations.length && typeNode && model.byName.has(typeNameOf(typeNode))) {
-      expandModel(typeNode, "query");
+    // Parameters without any binding annotation: Spring MVC treats simple
+    // types as implicit @RequestParam and POJOs as implicit command objects
+    // (query binding). Validation-only annotations such as @Validated do not
+    // change this rule.
+    if (typeNode && !annotations.some((a) => BINDING_ANNOTATIONS.has(a.name))) {
+      const simple = typeNameOf(typeNode);
+      const def = model.resolveDef(simple, rel);
+      if (def) {
+        expandModel(typeNode, "query");
+      } else if (simple && SIMPLE_BIND_TYPES.has(simple) && nameNode) {
+        addParam(
+          "query",
+          nameNode.text,
+          javaTypeToSchema(typeNode, model, 0, undefined, rel),
+          "high",
+          false,
+        );
+      }
     }
   }
 
@@ -454,9 +510,15 @@ function collectParameters(
 
 function typeNameOf(node: TsNode): string {
   if (node.type === "type_identifier") return node.text;
+  if (node.type === "scoped_type_identifier") {
+    return node.text.slice(node.text.lastIndexOf(".") + 1);
+  }
   if (node.type === "generic_type") {
     return node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? "";
   }
+  if (node.type === "integral_type") return node.text;
+  if (node.type === "floating_point_type") return node.text;
+  if (node.type === "boolean_type") return "boolean";
   return "";
 }
 
@@ -478,6 +540,7 @@ function collectJsonResponse(
   returnType: TsNode | null,
   model: JavaModelIndex,
   gaps: GapCode[],
+  rel: string,
 ): DiscoveredResponse[] {
   const status = resolveStatus(method) ?? "200";
   void mapping;
@@ -500,7 +563,7 @@ function collectJsonResponse(
       },
     ];
   }
-  const schema = javaTypeToSchema(returnType, model);
+  const schema = javaTypeToSchema(returnType, model, 0, undefined, rel);
   if (!schema || !Object.keys(schema).length) {
     gaps.push("response-unknown");
     return [
@@ -526,6 +589,7 @@ function collectSseResponse(
   returnType: TsNode | null,
   model: JavaModelIndex,
   gaps: GapCode[],
+  rel: string,
 ): DiscoveredResponse[] {
   let itemSchema: JsonSchema | undefined;
   if (returnType) {
@@ -535,13 +599,14 @@ function collectSseResponse(
     if (firstArg) {
       if (firstArg.type === "generic_type" && /ServerSentEvent/.test(firstArg.text)) {
         const inner = findFirst(firstArg, (n) => n.type === "type_arguments")?.namedChildren[0];
-        if (inner) itemSchema = javaTypeToSchema(inner, model);
+        if (inner) itemSchema = javaTypeToSchema(inner, model, 0, undefined, rel);
       } else {
-        itemSchema = javaTypeToSchema(firstArg, model);
+        itemSchema = javaTypeToSchema(firstArg, model, 0, undefined, rel);
       }
     }
   }
   if (!itemSchema || !Object.keys(itemSchema).length) {
+    itemSchema = undefined;
     gaps.push("sse-events-unknown");
   }
   return [

@@ -38,7 +38,7 @@ describe("spring generic response wrappers", () => {
     const wrapper = component(converted, "CommonResult_CompareResp");
     expect(Object.keys(wrapper.properties).sort()).toEqual(["code", "data", "msg", "time"]);
     expect(wrapper.properties.data).toEqual({ $ref: "#/components/schemas/CompareResp" });
-    expect(wrapper.properties.code).toEqual({ type: "integer" });
+    expect(wrapper.properties.code).toEqual({ type: "integer", format: "int32" });
     expect(wrapper.properties.time).toEqual({ type: "string", format: "date-time" });
 
     // Snake-case naming strategy, nested DTOs and @JsonIgnore handling.

@@ -78,7 +78,20 @@ function jsonPropertyName(node: TsNode): string | undefined {
 function isOptionalMember(typeNode: TsNode, node: TsNode): boolean {
   if (typeNode.type === "nullable_type") return true;
   if (findFirst(node, (c) => c.type === "equals_value_clause")) return true;
-  return false;
+  // Property initializers (`int Page { get; init; } = 1;`) appear as a value
+  // node after the accessor list rather than an equals_value_clause.
+  const accessor = node.namedChildren.find((c) => c.type === "accessor_list");
+  const hasInitializer = node.namedChildren.some((c) => {
+    if (accessor && c.startPosition.row < accessor.startPosition.row) return false;
+    return (
+      /literal$/.test(c.type) ||
+      c.type === "invocation_expression" ||
+      c.type === "array_creation_expression" ||
+      c.type === "object_creation_expression" ||
+      c.type === "member_access_expression"
+    );
+  });
+  return hasInitializer;
 }
 
 function extractTypeDef(node: TsNode): CsTypeDef | null {
