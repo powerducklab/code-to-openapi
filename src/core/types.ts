@@ -163,6 +163,10 @@ export interface ScanReport {
 export interface ScanResult {
   project: import("@powerduck/x-to-openapi").DiscoveredProject;
   report: ScanReport;
+  /** Indexed source files (relative path and content hash) used by the scan. */
+  files: FileEntry[];
+  /** Sidecar snapshot for incremental rescans. */
+  sidecar: import("./sidecar.js").DiscoverySidecar;
   /** Re-exported conversion result; document is validated OAS 3.2. */
   convert(): Promise<import("@powerduck/x-to-openapi").DiscoveryResult>;
 }

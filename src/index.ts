@@ -18,6 +18,7 @@ export { applyCompletenessGate } from "./core/completeness.js";
 export {
   diffSidecars,
   affectedFiles,
+  buildSidecar,
   type DiscoverySidecar,
   type SidecarDiff,
   type SidecarRoute,

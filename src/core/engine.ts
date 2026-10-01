@@ -11,6 +11,7 @@ import {
 import { applyCompletenessGate } from "./completeness.js";
 import { indexProject } from "./indexer.js";
 import { probeManifest } from "./probe.js";
+import { buildSidecar } from "./sidecar.js";
 import type {
   ExtractionResult,
   FileIndex,
@@ -272,6 +273,13 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   return {
     project,
     report,
+    files: index.files,
+    sidecar: buildSidecar({
+      files: index.files,
+      operations,
+      language: "typescript",
+      framework: extractions.length ? "express" : undefined,
+    }),
     convert(): Promise<DiscoveryResult> {
       return discoveryToOpenApi(project, { validate: true });
     },

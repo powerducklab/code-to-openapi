@@ -7,6 +7,12 @@
  * generated OAS stays clean.
  */
 
+import { createHash } from "node:crypto";
+
+import type { DiscoveredOperation } from "@powerduck/x-to-openapi";
+
+import type { FileEntry } from "./types.js";
+
 export interface SidecarRoute {
   /** Stable identity: `${method} ${fullPath}`. */
   key: string;
@@ -92,4 +98,64 @@ export function diffSidecars(
 /** Routes that can be re-analyzed incrementally: only changed/new files. */
 export function affectedFiles(diff: SidecarDiff): string[] {
   return [...diff.addedFiles, ...diff.changedFiles];
+}
+
+/** Compact, ordering-independent contract of one discovered operation. */
+function operationContract(operation: DiscoveredOperation): string {
+  const parameters = [...(operation.parameters ?? [])]
+    .map((parameter) => `${parameter.in}:${parameter.name}:${parameter.required ? 1 : 0}`)
+    .sort();
+  const mediaTypes = (operation.requestBody?.content ?? [])
+    .map((media) => media.mediaType)
+    .sort();
+  const statuses = [...operation.responses]
+    .map((response) => response.statusCode)
+    .sort();
+  return JSON.stringify({ parameters, mediaTypes, statuses });
+}
+
+export interface SidecarBuildInput {
+  files: FileEntry[];
+  operations: DiscoveredOperation[];
+  language?: string;
+  framework?: string;
+}
+
+/**
+ * Build the sidecar snapshot for a completed scan. Each route fingerprint
+ * combines its source file hash with its resolved contract, so either handler
+ * edits or a changed parameter/response shape surface as "changed".
+ */
+export function buildSidecar(input: SidecarBuildInput): DiscoverySidecar {
+  const files: Record<string, string> = {};
+  for (const file of input.files) files[file.path] = file.hash;
+
+  const routes: SidecarRoute[] = input.operations.map((operation) => {
+    const file = operation.origin?.file ?? "";
+    const fingerprint = createHash("sha256")
+      .update(files[file] ?? "")
+      .update("\u0000")
+      .update(operationContract(operation))
+      .digest("hex");
+    return {
+      key: `${operation.method} ${operation.path}`,
+      method: operation.method,
+      path: operation.path,
+      ...(operation.operationId ? { operationId: operation.operationId } : {}),
+      file,
+      ...(typeof operation.origin?.line === "number"
+        ? { line: operation.origin.line }
+        : {}),
+      fingerprint,
+    };
+  });
+
+  return {
+    version: 1,
+    scannedAt: new Date().toISOString(),
+    ...(input.language ? { language: input.language } : {}),
+    ...(input.framework ? { framework: input.framework } : {}),
+    files,
+    routes,
+  };
 }
