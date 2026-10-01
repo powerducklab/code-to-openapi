@@ -1,0 +1,80 @@
+{
+  "name": "@powerduck/code-to-openapi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Scan a local codebase into OpenAPI 3.2 with a language-neutral AST engine, pluggable language and framework packs, and an optional AI gap resolver.",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build",
+    "demo": "tsx examples/basic.ts",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "keywords": [
+    "openapi",
+    "code-scan",
+    "reverse-engineering",
+    "ast",
+    "express",
+    "typescript",
+    "sse",
+    "api",
+    "code-to-openapi"
+  ],
+  "license": "MIT",
+  "author": "Powerduck limited",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/powerducklab/code-to-openapi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/powerducklab/code-to-openapi/issues"
+  },
+  "homepage": "https://www.powerduck.com/",
+  "dependencies": {
+    "@powerduck/x-to-openapi": "^0.3.0",
+    "ignore": "^5.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.2.7",
+    "express": "^4.22.3",
+    "terser": "^5.51.2",
+    "tsup": "^8.1.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7",
+    "zod": "^3.25.76"
+  }
+}

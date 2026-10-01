@@ -1,0 +1,870 @@
+import { jsonSchema } from "@powerduck/x-to-openapi";
+
+import type {
+  Confidence,
+  DiscoveredMediaType,
+  DiscoveredResponse,
+  GapCode,
+  JsonSchema,
+  RouteParameter,
+  SourceLocation,
+} from "../core/types.js";
+import type { TsAnalysis } from "../lang/typescript/index.js";
+import { typeToSchema } from "../lang/typescript/typeSchema.js";
+import { convertZodNode } from "../lang/typescript/zod.js";
+import type { ValidatedField } from "../lang/typescript/validate.js";
+
+export interface HandlerFacts {
+  parameters: RouteParameter[];
+  requestBody?: {
+    required: boolean;
+    content: DiscoveredMediaType[];
+    confidence: Confidence;
+  };
+  responses: DiscoveredResponse[];
+  gaps: GapCode[];
+  sse: boolean;
+}
+
+interface CollectedField {
+  name: string;
+  schema?: JsonSchema;
+}
+
+const HTTP_VERB_LITERAL = /^\d{3}$/;
+
+function rootIdentifier(ts: any, node: any): string | undefined {
+  let cur = node;
+  while (cur) {
+    if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+      cur = cur.expression;
+    } else if (ts.isCallExpression(cur)) {
+      cur = ts.isPropertyAccessExpression(cur.expression)
+        ? cur.expression.expression
+        : cur.expression;
+    } else {
+      break;
+    }
+  }
+  return ts.isIdentifier(cur) ? cur.text : undefined;
+}
+
+/** A response site whose observed schema carries no usable shape. */
+function isEmptyishSchema(schema: JsonSchema): boolean {
+  if (!schema || Object.keys(schema).length === 0) return true;
+  if (
+    schema.type === "array" &&
+    (!schema.items || Object.keys(schema.items as JsonSchema).length === 0)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function schemaHasRef(schema: JsonSchema | undefined): boolean {
+  if (!schema) return false;
+  if (schema.$ref) return true;
+  const combiners = (schema.oneOf ?? schema.anyOf ?? schema.allOf) as
+    | JsonSchema[]
+    | undefined;
+  if (Array.isArray(combiners)) {
+    return combiners.some((s) => schemaHasRef(s));
+  }
+  if (schema.items) return schemaHasRef(schema.items as JsonSchema);
+  return false;
+}
+
+function literalToValue(ts: any, node: any, depth = 0): unknown {
+  if (depth > 12) return undefined;
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isNumericLiteral(node)) return Number(node.text);
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+  if (node.kind === ts.SyntaxKind.NullKeyword) return null;
+  if (ts.isPrefixUnaryExpression(node) && ts.isNumericLiteral(node.operand)) {
+    return Number(`${node.operator === ts.SyntaxKind.MinusToken ? "-" : ""}${node.operand.text}`);
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    return node.elements.map((el: any) => literalToValue(ts, el, depth + 1));
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    const out: Record<string, unknown> = {};
+    for (const prop of node.properties) {
+      if (ts.isPropertyAssignment(prop)) {
+        const name = prop.name.getText ? prop.name.getText().replace(/['"]/g, "") : undefined;
+        if (name) out[name] = literalToValue(ts, prop.initializer, depth + 1);
+      }
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function schemaFromNode(
+  analysis: TsAnalysis,
+  node: any,
+  fallbackLiteral = true,
+): { schema?: JsonSchema; typed: boolean } {
+  const { ts, checker } = analysis;
+  try {
+    const type = checker.getTypeAtLocation(node);
+    if (type && !(type.flags & ts.TypeFlags.Any) && !(type.flags & ts.TypeFlags.Unknown)) {
+      const schema = typeToSchema(type, analysis.schemaContext);
+      if (schema && Object.keys(schema).length) return { schema, typed: true };
+    }
+  } catch {
+    // Fall through to literal inference.
+  }
+  if (fallbackLiteral) {
+    const value = literalToValue(ts, node);
+    if (value !== undefined) return { schema: jsonSchema(value), typed: false };
+  }
+  return { typed: false };
+}
+
+/** Resolves an identifier to a function-like node across local/imported files. */
+export function resolveHandler(
+  analysis: TsAnalysis,
+  sourceFile: any,
+  node: any,
+  seen: Set<string> = new Set(),
+): { node: any; file: any } | null {
+  const { ts } = analysis;
+  if (!node) return null;
+
+  if (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node)
+  ) {
+    return { node, file: sourceFile };
+  }
+
+  if (!ts.isIdentifier(node)) return null;
+  const key = `${sourceFile.fileName}:${node.text}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+
+  let found: { node: any; file: any } | null = null;
+
+  const visit = (sf: any, identifier: string): any => {
+    let target: any;
+    sf.forEachChild((child: any) => {
+      if (target) return;
+      if (
+        ts.isFunctionDeclaration(child) &&
+        child.name?.text === identifier
+      ) {
+        target = child;
+      }
+      if (ts.isVariableStatement(child)) {
+        for (const decl of child.declarationList.declarations) {
+          if (
+            ts.isIdentifier(decl.name) &&
+            decl.name.text === identifier &&
+            decl.initializer &&
+            (ts.isArrowFunction(decl.initializer) ||
+              ts.isFunctionExpression(decl.initializer))
+          ) {
+            target = decl.initializer;
+          }
+        }
+      }
+      if (
+        ts.isExportAssignment(child) &&
+        ts.isIdentifier(child.expression) &&
+        child.expression.text === identifier
+      ) {
+        target = child.expression;
+      }
+    });
+    return target;
+  };
+
+  const local = visit(sourceFile, node.text);
+  if (local) found = { node: local, file: sourceFile };
+
+  if (!found) {
+    // Follow imports / requires into other project files.
+    const imported = resolveImportedFile(analysis, sourceFile, node.text);
+    if (imported) {
+      const { file, exportName } = imported;
+      const target = visit(file, exportName);
+      if (target) found = { node: target, file };
+      else {
+        // module.exports = function ...
+        let exported: any;
+        file.forEachChild((child: any) => {
+          if (exported) return;
+          if (
+            ts.isExpressionStatement(child) &&
+            ts.isBinaryExpression(child.expression) &&
+            child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ) {
+            const lhs = child.expression.left;
+            if (
+              ts.isPropertyAccessExpression(lhs) &&
+              ((lhs.expression.getText(file) === "module" && lhs.name.text === "exports") ||
+                lhs.expression.getText(file) === "exports")
+            ) {
+              const rhs = child.expression.right;
+              if (ts.isArrowFunction(rhs) || ts.isFunctionExpression(rhs) ||
+                  ts.isFunctionDeclaration(rhs)) {
+                exported = rhs;
+              } else if (ts.isIdentifier(rhs)) {
+                const nested = resolveHandler(analysis, file, rhs, seen);
+                if (nested) exported = nested.node;
+              }
+            }
+          }
+        });
+        if (exported) found = { node: exported, file };
+      }
+    }
+  }
+
+  return found;
+}
+
+export function resolveImportedFile(
+  analysis: TsAnalysis,
+  sourceFile: any,
+  localName: string,
+): { file: any; exportName: string } | null {
+  const { ts, program } = analysis;
+  let specifier: string | undefined;
+  let exportName = "default";
+
+  sourceFile.forEachChild((child: any) => {
+    if (specifier || !ts.isImportDeclaration(child) || !child.importClause) return;
+    const moduleSpec = child.moduleSpecifier;
+    if (!ts.isStringLiteral(moduleSpec)) return;
+    const bindings = child.importClause.namedBindings;
+    if (child.importClause.name?.text === localName) {
+      specifier = moduleSpec.text;
+      exportName = "default";
+    } else if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        if (element.name.text === localName) {
+          specifier = moduleSpec.text;
+          exportName =
+            element.propertyName?.text ?? element.name.text;
+        }
+      }
+    }
+  });
+
+  if (!specifier) {
+    // const x = require('./m')
+    sourceFile.forEachChild((child: any) => {
+      if (specifier) return;
+      const walk = (n: any) => {
+        if (
+          ts.isCallExpression(n) &&
+          ts.isIdentifier(n.expression) &&
+          n.expression.text === "require" &&
+          ts.isStringLiteral(n.arguments[0])
+        ) {
+          // Binding name validated by caller via enclosing variable; this
+          // coarse pass only resolves relative modules.
+          specifier = n.arguments[0].text;
+          exportName = "module";
+        }
+        ts.forEachChild(n, walk);
+      };
+      walk(child);
+    });
+  }
+
+  if (!specifier || !specifier.startsWith(".")) return null;
+
+  const resolved = ts.resolveModuleName
+    ? ts.resolveModuleName(specifier, sourceFile.fileName, program.getCompilerOptions(), ts.sys)
+        ?.resolvedModule?.resolvedFileName
+    : undefined;
+  if (!resolved) return null;
+  const target = program.getSourceFile(resolved);
+  if (!target || !analysis.isProjectFile(resolved)) return null;
+
+  if (exportName === "module") {
+    // module.exports = <ident>
+    let routerName: string | undefined;
+    target.forEachChild((child: any) => {
+      if (
+        ts.isExpressionStatement(child) &&
+        ts.isBinaryExpression(child.expression) &&
+        ts.isPropertyAccessExpression(child.expression.left) &&
+        child.expression.left.expression.getText(target) === "module" &&
+        child.expression.left.name.text === "exports" &&
+        ts.isIdentifier(child.expression.right)
+      ) {
+        routerName = child.expression.right.text;
+      }
+    });
+    if (routerName) exportName = routerName;
+  }
+
+  return { file: target, exportName };
+}
+
+function mergeFields(fields: CollectedField[]): JsonSchema | undefined {
+  if (!fields.length) return undefined;
+  const properties: Record<string, JsonSchema> = {};
+  for (const field of fields) {
+    properties[field.name] = field.schema ?? {};
+  }
+  return { type: "object", properties };
+}
+
+function responseKey(status: string, mediaType: string): string {
+  return `${status}:${mediaType}`;
+}
+
+/**
+ * Analyzes a resolved request handler for parameters, request body, responses
+ * and SSE event streams. Type information wins; syntactic signals fill gaps
+ * and never fabricate shapes.
+ */
+export function analyzeHandler(
+  analysis: TsAnalysis,
+  file: any,
+  handler: any,
+  origin: SourceLocation,
+  context: {
+    pathParams: Set<string>;
+    validators: ValidatedField[];
+    bodyReferencedHint?: boolean;
+  },
+): HandlerFacts {
+  const { ts, checker } = analysis;
+  const gaps = new Set<GapCode>();
+  const parameters: RouteParameter[] = [];
+  const paramNames = new Map<string, RouteParameter>();
+
+  const reqName = handler.parameters?.[0]?.name?.getText?.(file) ?? "req";
+  const resName = handler.parameters?.[1]?.name?.getText?.(file) ?? "res";
+
+  const addParam = (
+    location: RouteParameter["in"],
+    name: string,
+    schema?: JsonSchema,
+    confidence: Confidence = "medium",
+    required = location === "path",
+  ) => {
+    const key = `${location}:${name}`;
+    if (paramNames.has(key)) {
+      const existing = paramNames.get(key)!;
+      if (schema && (!existing.schema || !Object.keys(existing.schema).length)) {
+        existing.schema = schema;
+        existing.confidence = confidence;
+      }
+      return;
+    }
+    const param: RouteParameter = {
+      name,
+      in: location,
+      required,
+      ...(schema && Object.keys(schema).length ? { schema } : {}),
+      confidence,
+    };
+    paramNames.set(key, param);
+    parameters.push(param);
+  };
+
+  // ---- Express generics: Request<P, ResBody, ReqBody, ReqQuery> ----
+  let genericBody: JsonSchema | undefined;
+  let genericQuery: JsonSchema | undefined;
+  let genericResponse: JsonSchema | undefined;
+  const reqType = handler.parameters?.[0]?.type;
+  const resType = handler.parameters?.[1]?.type;
+  if (reqType && ts.isTypeReferenceNode(reqType) && reqType.typeArguments?.length) {
+    const [p, resBody, reqBody, reqQuery] = reqType.typeArguments;
+    if (p) applyGenericParams(p, "path");
+    if (reqBody) genericBody = genericSchema(reqBody);
+    if (reqQuery) genericQuery = genericSchema(reqQuery);
+    if (resBody) genericResponse = genericSchema(resBody);
+  }
+  if (
+    resType &&
+    ts.isTypeReferenceNode(resType) &&
+    resType.typeArguments?.[0]
+  ) {
+    genericResponse ??= genericSchema(resType.typeArguments[0]);
+  }
+
+  function genericSchema(node: any): JsonSchema | undefined {
+    try {
+      const type = checker.getTypeFromTypeNode(node);
+      const schema = typeToSchema(type, analysis.schemaContext);
+      return schema && Object.keys(schema).length ? schema : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function applyGenericParams(node: any, location: RouteParameter["in"]) {
+    try {
+      const type = checker.getTypeFromTypeNode(node);
+      for (const prop of type.getProperties()) {
+        const propType = checker.getTypeOfSymbolAtLocation(prop, node);
+        const schema = typeToSchema(propType, analysis.schemaContext);
+        addParam(location, prop.name, schema, "high");
+      }
+    } catch {
+      // Generic unresolvable; syntactic pass below still finds accesses.
+    }
+  }
+
+  const queryFields: CollectedField[] = [];
+  const headerFields: CollectedField[] = [];
+  const cookieFields: CollectedField[] = [];
+  const bodyFields: CollectedField[] = [];
+  let bodyReferenced = Boolean(context.bodyReferencedHint);
+  let zodBody: { schema: JsonSchema; confidence: Confidence } | undefined;
+
+  // ---- express-validator middleware chains ----
+  for (const validator of context.validators) {
+    const location =
+      validator.location === "params"
+        ? "path"
+        : validator.location === "cookies"
+          ? "cookie"
+          : validator.location;
+    addParam(
+      location as RouteParameter["in"],
+      validator.name,
+      validator.schema,
+      "high",
+      validator.required || location === "path",
+    );
+  }
+
+  if (genericQuery) {
+    for (const [name, schema] of Object.entries(genericQuery.properties ?? {})) {
+      queryFields.push({ name, schema });
+    }
+  }
+
+  // ---- response collection ----
+  const responses = new Map<string, DiscoveredResponse>();
+  let sseSignaled = false;
+  const sseEvents = new Map<string, JsonSchema | undefined>();
+  let ssePayload: { schema?: JsonSchema; typed: boolean } | undefined;
+  let hasResponseSite = false;
+
+  function recordResponse(
+    status: string,
+    mediaType: string,
+    schema: JsonSchema | undefined,
+    confidence: Confidence,
+  ) {
+    hasResponseSite = true;
+    const key = responseKey(status, mediaType);
+    const existing = responses.get(key);
+    const media: DiscoveredMediaType = { mediaType };
+    if (schema && Object.keys(schema).length) media.schema = schema;
+    if (existing) {
+      const existingMedia = existing.content?.find((m) => m.mediaType === mediaType);
+      if (existingMedia && !existingMedia.schema && media.schema) {
+        existingMedia.schema = media.schema;
+      }
+      if (confidence === "high") existing.confidence = "high";
+    } else {
+      responses.set(key, {
+        statusCode: status,
+        description: "",
+        confidence,
+        content: [media],
+      });
+    }
+  }
+
+  function collectDestructure(
+    accessNode: any,
+    target: CollectedField[],
+    marksBody = false,
+  ) {
+    const declaration = accessNode.parent;
+    const pattern = declaration?.name;
+    if (!ts.isVariableDeclaration(declaration) || !ts.isObjectBindingPattern(pattern)) return;
+    for (const element of pattern.elements) {
+      if (!ts.isBindingElement(element) || !ts.isIdentifier(element.name)) continue;
+      let schema: JsonSchema | undefined;
+      try {
+        const type = checker.getTypeAtLocation(element.name);
+        if (type && !(type.flags & ts.TypeFlags.Any)) {
+          schema = typeToSchema(type, analysis.schemaContext);
+        }
+      } catch {
+        // no type info
+      }
+      target.push({ name: element.name.text, schema });
+      if (marksBody) bodyReferenced = true;
+    }
+  }
+
+  const visit = (node: any) => {
+    // Property access on req / res.
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const root = rootIdentifier(ts, node);
+      if (root === reqName) {
+        const fullText = node.getText(file);
+        const member = ts.isPropertyAccessExpression(node)
+          ? node.name.text
+          : ts.isStringLiteralLike(node.argumentExpression)
+            ? node.argumentExpression.text
+            : undefined;
+
+        if (member || /^req\.(params|query|body)$/.test(fullText)) {
+          let schema: JsonSchema | undefined;
+          try {
+            const type = checker.getTypeAtLocation(node);
+            if (type && !(type.flags & ts.TypeFlags.Any)) {
+              schema = typeToSchema(type, analysis.schemaContext);
+            }
+          } catch {
+            // no type info
+          }
+          const destructured =
+            ts.isVariableDeclaration(node.parent) &&
+            ts.isObjectBindingPattern(node.parent.name);
+          if (/^req\.params(\.|\[|$)/.test(fullText)) {
+            if (fullText === "req.params" && destructured) {
+              const pathFields: CollectedField[] = [];
+              collectDestructure(node, pathFields);
+              for (const field of pathFields) {
+                addParam("path", field.name, field.schema, field.schema ? "high" : "low");
+              }
+            } else if (member && member !== "params") {
+              addParam("path", member, schema, schema ? "high" : "low");
+            }
+          } else if (/^req\.query(\.|\[|$)/.test(fullText)) {
+            if (fullText === "req.query" && destructured) {
+              collectDestructure(node, queryFields);
+            } else if (member && member !== "query") {
+              queryFields.push({ name: member, schema });
+            }
+          } else if (/^req\.headers(\.|\[|$)/.test(fullText)) {
+            if (member && member !== "headers") {
+              headerFields.push({ name: member, schema });
+            }
+          } else if (/^req\.cookies(\.|\[|$)/.test(fullText)) {
+            if (member && member !== "cookies") {
+              cookieFields.push({ name: member, schema });
+            }
+          } else if (/^req\.body(\.|\[|$)/.test(fullText)) {
+            bodyReferenced = true;
+            if (fullText === "req.body" && destructured) {
+              collectDestructure(node, bodyFields, true);
+            } else if (member && member !== "body") {
+              bodyFields.push({ name: member, schema });
+            }
+          }
+        }
+      }
+    }
+
+    // req.get('X') / req.header('X')
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      rootIdentifier(ts, node.expression.expression) === reqName &&
+      ["get", "header"].includes(node.expression.name.text) &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      headerFields.push({ name: node.arguments[0].text.toLowerCase() });
+    }
+
+    // zod: schema.parse(req.body) / schema.safeParse(req.body)
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ["parse", "safeParse"].includes(node.expression.name.text) &&
+      node.arguments.some(
+        (arg: any) => arg.getText(file).replace(/\s+$/, "") === `${reqName}.body`,
+      )
+    ) {
+      const schemaNode = node.expression.expression;
+      const resolveBinding = (name: string, fromFile: any): any => {
+        const imported = resolveImportedFile(analysis, fromFile, name);
+        const searchFile = imported?.file ?? fromFile;
+        let initializer: any;
+        searchFile.forEachChild((child: any) => {
+          if (initializer || !ts.isVariableStatement(child)) return;
+          for (const decl of child.declarationList.declarations) {
+            if (ts.isIdentifier(decl.name) && decl.name.text === (imported?.exportName ?? name)) {
+              initializer = decl.initializer;
+            }
+          }
+        });
+        return initializer ?? null;
+      };
+      const schema = convertZodNode(schemaNode, {
+        ts,
+        sourceFile: file,
+        resolveSchemaBinding: (name, from) => resolveBinding(name, from ?? file),
+      });
+      if (schema) zodBody = { schema, confidence: "high" };
+    }
+
+    // res.* chains
+    if (ts.isCallExpression(node)) {
+      const chain: Array<{ name: string; args: any[] }> = [];
+      let cur: any = node;
+      let chainRoot: string | undefined;
+      while (
+        cur &&
+        ts.isCallExpression(cur) &&
+        ts.isPropertyAccessExpression(cur.expression)
+      ) {
+        chain.unshift({ name: cur.expression.name.text, args: [...cur.arguments] });
+        chainRoot = rootIdentifier(ts, cur.expression.expression);
+        cur = cur.expression.expression;
+      }
+      if (chainRoot === resName) handleResChain(chain);
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  function handleResChain(chain: Array<{ name: string; args: any[] }>) {
+    let status = "200";
+    let sse = false;
+    for (const step of chain) {
+      if (step.name === "status") {
+        const raw = step.args[0]?.getText(file);
+        if (raw && HTTP_VERB_LITERAL.test(raw)) status = raw;
+      }
+      if (step.name === "sendStatus") {
+        const raw = step.args[0]?.getText(file);
+        if (raw && HTTP_VERB_LITERAL.test(raw)) {
+          status = raw;
+          recordResponse(status, "application/json", undefined, "medium");
+        }
+        return;
+      }
+      if (step.name === "redirect") {
+        recordResponse("302", "text/html", undefined, "medium");
+        return;
+      }
+      if (step.name === "end") {
+        recordResponse("204", "application/json", undefined, "medium");
+        return;
+      }
+      if (
+        (step.name === "setHeader" || step.name === "header") &&
+        step.args[0]?.getText(file)?.replace(/['"]/g, "").toLowerCase() === "content-type" &&
+        step.args[1]?.getText(file)?.includes("text/event-stream")
+      ) {
+        sse = true;
+      }
+      if (step.name === "type" && step.args[0]?.getText(file)?.includes("event-stream")) {
+        sse = true;
+      }
+      if (step.name === "writeHead") {
+        const headersArg = step.args.find((arg) => ts.isObjectLiteralExpression(arg));
+        if (headersArg) {
+          for (const prop of headersArg.properties) {
+            if (
+              ts.isPropertyAssignment(prop) &&
+              prop.name.getText(file).replace(/['"]/g, "").toLowerCase() === "content-type" &&
+              prop.initializer.getText(file).includes("event-stream")
+            ) {
+              sse = true;
+            }
+          }
+        }
+        const code = step.args[0]?.getText(file);
+        if (code && HTTP_VERB_LITERAL.test(code)) status = code;
+      }
+      if (step.name === "write" && (sseSignaled || sse)) {
+        collectSseWrite(step.args[0]);
+      }
+      if (step.name === "json" || step.name === "send") {
+        const arg = step.args[0];
+        if (sse) {
+          sseSignaled = true;
+          return;
+        }
+        if (arg) {
+          const { schema, typed } = schemaFromNode(analysis, arg);
+          const isString =
+            ts.isStringLiteralLike(arg) ||
+            (() => {
+              try {
+                const t = checker.getTypeAtLocation(arg);
+                return t.flags & ts.TypeFlags.StringLike;
+              } catch {
+                return false;
+              }
+            })();
+          const mediaType =
+            step.name === "send" && isString ? "text/html" : "application/json";
+          recordResponse(status, mediaType, schema, typed ? "high" : "medium");
+        } else {
+          recordResponse(status, "application/json", undefined, "medium");
+        }
+      }
+    }
+    if (sse) sseSignaled = true;
+  }
+
+  function collectSseWrite(arg: any) {
+    if (!arg) return;
+    // res.write(JSON.stringify(payload))
+    if (
+      ts.isCallExpression(arg) &&
+      ts.isPropertyAccessExpression(arg.expression) &&
+      arg.expression.name.text === "stringify" &&
+      arg.expression.expression.getText(file) === "JSON"
+    ) {
+      ssePayload = schemaFromNode(analysis, arg.arguments[0]);
+      return;
+    }
+    // Template/string with "event: name"
+    const asText = (n: any): string | null => {
+      if (ts.isStringLiteralLike(n)) return n.text;
+      if (ts.isNoSubstitutionTemplateLiteral(n)) return n.text;
+      if (ts.isTemplateExpression(n)) return n.head.text;
+      return null;
+    };
+    const text = asText(arg);
+    if (text) {
+      const match = text.match(/event:\s*([A-Za-z0-9_.-]+)/);
+      if (match) sseEvents.set(match[1], undefined);
+    }
+  }
+
+  if (handler.body) visit(handler.body);
+
+  // ---- assemble parameters ----
+  for (const field of queryFields) {
+    addParam("query", field.name, field.schema, field.schema ? "high" : "low", false);
+  }
+  for (const field of headerFields) {
+    addParam("header", field.name, field.schema, field.schema ? "high" : "low", false);
+  }
+  for (const field of cookieFields) {
+    addParam("cookie", field.name, field.schema, field.schema ? "high" : "low", false);
+  }
+  // Path params declared by the route must always exist.
+  for (const name of context.pathParams) {
+    if (!parameters.some((p) => p.in === "path" && p.name === name)) {
+      addParam("path", name, { type: "string" }, "low");
+    }
+  }
+
+  // ---- request body ----
+  let requestBody: HandlerFacts["requestBody"];
+  if (zodBody) {
+    const schema = zodBody.schema;
+    requestBody = {
+      required: true,
+      content: [{ mediaType: "application/json", schema }],
+      confidence: "high",
+    };
+  } else if (genericBody) {
+    requestBody = {
+      required: true,
+      content: [{ mediaType: "application/json", schema: genericBody }],
+      confidence: "high",
+    };
+  } else if (bodyReferenced) {
+    const schema = mergeFields(bodyFields);
+    if (schema && Object.keys(schema.properties ?? {}).length) {
+      requestBody = {
+        required: true,
+        content: [{ mediaType: "application/json", schema }],
+        confidence: "medium",
+      };
+      if (bodyFields.some((f) => !f.schema)) gaps.add("body-schema-unknown");
+    } else {
+      gaps.add("body-schema-unknown");
+    }
+  }
+
+  if (
+    queryFields.some((f) => !f.schema) &&
+    !genericQuery
+  ) {
+    gaps.add("query-unknown");
+  }
+
+  // ---- SSE response ----
+  if (sseSignaled) {
+    let itemSchema: JsonSchema = {};
+    if (ssePayload?.schema) {
+      itemSchema = ssePayload.schema;
+    } else if (sseEvents.size) {
+      itemSchema = {
+        oneOf: [...sseEvents.keys()].map((name) => ({
+          type: "object",
+          properties: { event: { type: "string", const: name }, data: {} },
+          required: ["event"],
+        })),
+      };
+    } else {
+      gaps.add("sse-events-unknown");
+    }
+    responses.clear();
+    responses.set("200:text/event-stream", {
+      statusCode: "200",
+      description: "Server-sent events",
+      confidence: ssePayload?.typed ? "high" : "medium",
+      content: [{ mediaType: "text/event-stream", itemSchema }],
+    });
+  } else {
+    if (genericResponse) {
+      // The declared Response<T> generic is authoritative for success
+      // responses; complete empty observed shapes (e.g. res.json([])) or
+      // replace lossy medium-confidence literals on 2xx. Error branches keep
+      // their observed status-specific literals.
+      let filled = false;
+      const simpleNamed =
+        genericResponse.$ref ||
+        (genericResponse.type === "array" &&
+          (genericResponse.items as JsonSchema | undefined)?.$ref);
+      for (const [key, response] of responses) {
+        if (!response.content) continue;
+        const status = key.split(":")[0] ?? response.statusCode;
+        const success = /^(2\d\d|2XX|default)$/.test(status);
+        for (const media of response.content) {
+          if (media.mediaType !== "application/json") continue;
+          const empty = !media.schema || isEmptyishSchema(media.schema);
+          // A single declared named type is authoritative for success
+          // responses; unions (e.g. UserDetail | ErrorBody) keep the
+          // status-specific observed literal.
+          const namedWins = success && Boolean(simpleNamed);
+          const lossyLiteral =
+            success && response.confidence !== "high" && !schemaHasRef(media.schema);
+          if (empty || namedWins || lossyLiteral) {
+            media.schema = genericResponse;
+            media.confidence = "high";
+            response.confidence = "high";
+            filled = true;
+          }
+        }
+      }
+      if (!filled && responses.size === 0) {
+        recordResponse("200", "application/json", genericResponse, "high");
+      }
+    }
+    if (!hasResponseSite) {
+      gaps.add("response-unknown");
+    } else if (
+      [...responses.values()].some(
+        (r) => !r.content || r.content.some((m) => !m.schema && !m.itemSchema),
+      )
+    ) {
+      gaps.add("response-schema-unknown");
+    }
+  }
+
+  return {
+    parameters,
+    ...(requestBody ? { requestBody } : {}),
+    responses: [...responses.values()],
+    gaps: [...gaps],
+    sse: sseSignaled,
+  };
+}

@@ -1,0 +1,10 @@
+{
+  "name": "fixture-api",
+  "version": "2.3.4",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^4.19.0",
+    "zod": "^3.23.0"
+  }
+}

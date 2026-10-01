@@ -1,0 +1,346 @@
+import type { JsonSchema } from "../../core/types.js";
+
+/**
+ * Minimal structural surface we need from the TypeScript compiler API.
+ * The real module is an optional peer dependency loaded lazily; these types
+ * are structural so this file compiles without `typescript` installed.
+ */
+export interface TsShim {
+  SyntaxKind: Record<string, number>;
+  ScriptKind: Record<string, number>;
+  sys: unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
+}
+
+export interface SchemaContext {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ts: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  checker: any;
+  /** Canonical component name -> schema. */
+  components: Map<string, JsonSchema>;
+  /** Symbol key -> component name, for reuse. */
+  symbolToComponent: Map<string, string>;
+  /** Files belonging to the scanned project (never node_modules / lib). */
+  isProjectFile: (fileName: string) => boolean;
+  /** Cycle guard, keyed by component name. */
+  inProgress: Set<string>;
+}
+
+let componentCounter = 0;
+
+function uniqueName(base: string, taken: Set<string>): string {
+  const clean = base.replace(/[^A-Za-z0-9_$]/g, "_") || "Schema";
+  if (!taken.has(clean)) return clean;
+  let suffix = 2;
+  while (taken.has(`${clean}${suffix}`)) suffix += 1;
+  return `${clean}${suffix}`;
+}
+
+function declarationInProject(ctx: SchemaContext, symbol: any): boolean {
+  const declarations = symbol?.declarations ?? [];
+  return declarations.some((d: any) => {
+    const source = d.getSourceFile?.();
+    return source && ctx.isProjectFile(source.fileName);
+  });
+}
+
+function isNamedUserDeclaration(ctx: SchemaContext, symbol: any): boolean {
+  if (!symbol?.declarations || !declarationInProject(ctx, symbol)) return false;
+  const { ts } = ctx;
+  return symbol.declarations.some((d: any) =>
+    [
+      ts.SyntaxKind.InterfaceDeclaration,
+      ts.SyntaxKind.ClassDeclaration,
+      ts.SyntaxKind.TypeAliasDeclaration,
+      ts.SyntaxKind.EnumDeclaration,
+    ].includes(d.kind),
+  );
+}
+
+function ref(name: string): JsonSchema {
+  return { $ref: `#/components/schemas/${name}` };
+}
+
+function literalSchema(value: unknown): JsonSchema | undefined {
+  if (typeof value === "string") return { type: "string", const: value };
+  if (typeof value === "number")
+    return { type: Number.isInteger(value) ? "integer" : "number", const: value };
+  if (typeof value === "boolean") return { type: "boolean", const: value };
+  return undefined;
+}
+
+/**
+ * Converts a ts.Type to a JSON Schema. Named user declarations are hoisted
+ * into components.schemas and referenced via $ref; anonymous types inline.
+ */
+export function typeToSchema(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type: any,
+  ctx: SchemaContext,
+  hintName?: string,
+): JsonSchema {
+  const { ts, checker } = ctx;
+
+  // Unwrap Promise<T> and PromiseLike<T>.
+  const promiseType = type.aliasSymbol?.name === "Promise" || type.symbol?.name === "Promise"
+    ? type
+    : undefined;
+  if (promiseType) {
+    const arg = checker.getTypeArguments?.(type)?.[0];
+    if (arg) return typeToSchema(arg, ctx, hintName);
+  }
+
+  const flags = type.flags ?? 0;
+  const flag = (name: string) =>
+    Boolean(flags & (ts.TypeFlags[name] ?? 0));
+
+  // Literals first (string/number/boolean literal flags).
+  if (flag("StringLiteral")) {
+    const value =
+      typeof type.value === "string"
+        ? type.value
+        : checker.typeToString(type).replace(/^['"]|['"]$/g, "");
+    return { type: "string", const: value };
+  }
+  if (flag("NumberLiteral")) {
+    const value =
+      typeof type.value === "number"
+        ? type.value
+        : Number(checker.typeToString(type).replace(/_/g, ""));
+    return { type: Number.isInteger(value) ? "integer" : "number", const: value };
+  }
+  if (flag("BooleanLiteral"))
+    return literalSchema(checker.typeToString(type) === "true") ?? { type: "boolean" };
+  if (flag("String")) return { type: "string" };
+  if (flag("Number")) return { type: "number" };
+  if (flag("Boolean")) return { type: "boolean" };
+  if (flag("BigInt")) return { type: "integer", format: "int64" };
+  if (flag("Null")) return { type: "null" };
+  if (flag("Undefined") || flag("Void")) return {};
+  if (flag("Any") || flag("Unknown")) return {};
+  if (flag("StringMapping")) return { type: "string" };
+
+  // Enum-like unions of literals.
+  if (flag("Union") || type.isUnion?.()) {
+    return unionSchema(type, ctx, hintName);
+  }
+
+  const symbol = type.getSymbol?.() ?? type.aliasSymbol;
+  const namePath = checker.typeToString
+    ? checker.typeToString(type)
+    : String(symbol?.name ?? hintName ?? "");
+
+  // Well-known structural types.
+  if (symbol?.name === "Date") return { type: "string", format: "date-time" };
+  if (["Buffer", "Uint8Array", "ArrayBuffer", "Blob"].includes(symbol?.name))
+    return { type: "string", format: "binary" };
+  if (symbol?.name === "Map" || type.aliasSymbol?.name === "Record") {
+    return recordSchema(type, ctx);
+  }
+
+  // Tuples.
+  if (checker.isTupleType?.(type)) {
+    const elements = checker.getTypeArguments?.(type) ?? [];
+    const schemas = elements.map((t: any) => typeToSchema(t, ctx));
+    const kinds = [...new Set(schemas.map((s: JsonSchema) => String(s.type ?? "object")))];
+    return {
+      type: "array",
+      prefixItems: schemas,
+      items:
+        kinds.length === 1 ? { type: kinds[0] } : {},
+      minItems: schemas.length,
+    };
+  }
+
+  // Arrays.
+  if (checker.isArrayType?.(type) || symbol?.name === "Array" || /\[\]$/.test(namePath)) {
+    const numberIndex = checker.getIndexTypeOfType?.(type, ts.IndexKind.Number);
+    const item = numberIndex ?? checker.getTypeArguments?.(type)?.[0];
+    return { type: "array", items: item ? typeToSchema(item, ctx) : {} };
+  }
+
+  // Named user declaration -> hoist as component.
+  if (symbol && isNamedUserDeclaration(ctx, symbol)) {
+    return hoistComponent(type, symbol, ctx, hintName);
+  }
+
+  // Object shapes (including mapped Pick/Omit/Partial resolve here).
+  const properties = type.getProperties?.() ?? [];
+  const stringIndex = checker.getIndexTypeOfType?.(type, ts.IndexKind.String);
+  if (properties.length > 0 || stringIndex) {
+    return objectSchema(type, properties, stringIndex, ctx, symbol);
+  }
+
+  // Fallback: trust the apparent type once, otherwise leave open.
+  const apparent = checker.getApparentType?.(type);
+  if (apparent && apparent !== type) return typeToSchema(apparent, ctx, hintName);
+  return {};
+}
+
+function unionSchema(type: any, ctx: SchemaContext, hintName?: string): JsonSchema {
+  const members = (type.types ?? []).filter((t: any) => {
+    const flags = t.flags ?? 0;
+    return !(
+      flags &
+      (ctx.ts.TypeFlags.Undefined |
+        ctx.ts.TypeFlags.Void |
+        ctx.ts.TypeFlags.Never)
+    );
+  });
+
+  const includesNull = members.some((t: any) =>
+    Boolean(t.flags & ctx.ts.TypeFlags.Null),
+  );
+  const nonNull = members.filter((t: any) => !(t.flags & ctx.ts.TypeFlags.Null));
+
+  // Optional property (T | undefined) collapses back to T.
+  if (!includesNull && nonNull.length === 1) {
+    return typeToSchema(nonNull[0], ctx, hintName);
+  }
+
+  // Single non-null member + null -> nullable scalar/object.
+  if (includesNull && nonNull.length === 1) {
+    const inner = typeToSchema(nonNull[0], ctx, hintName);
+    if (inner.$ref) return { oneOf: [inner, { type: "null" }] };
+    const types = inner.type
+      ? Array.isArray(inner.type)
+        ? [...inner.type, "null"]
+        : [inner.type, "null"]
+      : undefined;
+    return types ? { ...inner, type: types } : { oneOf: [inner, { type: "null" }] };
+  }
+
+  // Pure literal enum.
+  const literals = nonNull.filter(
+    (t: any) =>
+      t.flags &
+      (ctx.ts.TypeFlags.StringLiteral | ctx.ts.TypeFlags.NumberLiteral),
+  );
+  if (literals.length === nonNull.length && literals.length > 0) {
+    const values = literals.map((t: any) => {
+      const v = ctx.checker.typeToString(t);
+      return t.flags & ctx.ts.TypeFlags.NumberLiteral ? Number(v.replace(/_/g, "")) : v;
+    });
+    const typeName = typeof values[0] === "number" ? "number" : "string";
+    return { type: typeName, enum: values };
+  }
+
+  return { oneOf: nonNull.map((t: any) => typeToSchema(t, ctx)) };
+}
+
+function recordSchema(type: any, ctx: SchemaContext): JsonSchema {
+  const args = ctx.checker.getTypeArguments?.(type) ?? [];
+  const valueType = args[1] ?? ctx.checker.getIndexTypeOfType?.(type, ctx.ts.IndexKind.String);
+  return {
+    type: "object",
+    additionalProperties: valueType ? typeToSchema(valueType, ctx) : {},
+  };
+}
+
+function objectSchema(
+  type: any,
+  properties: any[],
+  stringIndex: any,
+  ctx: SchemaContext,
+  symbol: any,
+): JsonSchema {
+  const out: Record<string, JsonSchema> = {};
+  const required: string[] = [];
+
+  for (const prop of properties) {
+    if (prop.flags & ctx.ts.SymbolFlags.Method) continue;
+    const declaration = prop.valueDeclaration ?? prop.declarations?.[0];
+    let propType: any;
+    try {
+      propType = declaration
+        ? ctx.checker.getTypeOfSymbolAtLocation(prop, declaration)
+        : undefined;
+    } catch {
+      propType = undefined;
+    }
+    if (!propType) continue;
+    const includesUndefined = Boolean(
+      propType.flags & ctx.ts.TypeFlags.Undefined ||
+        propType.isUnion?.() &&
+          propType.types?.some((t: any) => t.flags & ctx.ts.TypeFlags.Undefined),
+    );
+    const optional = Boolean(declaration?.questionToken) || includesUndefined;
+    if (!optional) required.push(prop.name);
+    out[prop.name] = typeToSchema(propType, ctx, prop.name);
+  }
+
+  const schema: JsonSchema = {
+    type: "object",
+    ...(Object.keys(out).length ? { properties: out } : {}),
+    ...(required.length ? { required } : {}),
+  };
+  if (stringIndex) {
+    schema.additionalProperties = typeToSchema(stringIndex, ctx);
+  }
+  if (symbol?.name === "Partial" || type.aliasSymbol?.name === "Partial") {
+    delete schema.required;
+  }
+  return schema;
+}
+
+function hoistComponent(
+  type: any,
+  symbol: any,
+  ctx: SchemaContext,
+  hintName?: string,
+): JsonSchema {
+  const key = String(symbol.id ?? symbol.name);
+  const existing = ctx.symbolToComponent.get(key);
+  if (existing) return ref(existing);
+
+  const baseName = hintName ?? symbol.name;
+  const name = uniqueName(baseName, new Set(ctx.components.keys()));
+  ctx.symbolToComponent.set(key, name);
+  ctx.inProgress.add(name);
+
+  // Enums.
+  if (symbol.declarations?.some((d: any) => d.kind === ctx.ts.SyntaxKind.EnumDeclaration)) {
+    const literals = (type.types ?? []).map((t: any) =>
+      ctx.checker.typeToString(t),
+    );
+    const numeric = literals.every((v: string) => /^-?\d+$/.test(v));
+    ctx.components.set(name, {
+      type: numeric ? "number" : "string",
+      ...(literals.length ? { enum: numeric ? literals.map(Number) : literals } : {}),
+    });
+  } else {
+    const properties = type.getProperties?.() ?? [];
+    const stringIndex = ctx.checker.getIndexTypeOfType?.(
+      type,
+      ctx.ts.IndexKind.String,
+    );
+    ctx.components.set(name, objectSchema(type, properties, stringIndex, ctx, symbol));
+  }
+
+  ctx.inProgress.delete(name);
+  componentCounter += 1;
+  return ref(name);
+}
+
+/** Creates the shared schema conversion context for one scan. */
+export function createSchemaContext(
+  ts: TsShim,
+  checker: any,
+  isProjectFile: (fileName: string) => boolean,
+): SchemaContext {
+  return {
+    ts,
+    checker,
+    components: new Map(),
+    symbolToComponent: new Map(),
+    isProjectFile,
+    inProgress: new Set(),
+  };
+}
+
+/** Clones a component map for per-handler isolation. */
+export function forkComponentCollector(ctx: SchemaContext): Map<string, JsonSchema> {
+  return new Map(ctx.components);
+}

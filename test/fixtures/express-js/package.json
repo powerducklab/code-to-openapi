@@ -1,0 +1,9 @@
+{
+  "name": "fixture-js",
+  "version": "0.4.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}
