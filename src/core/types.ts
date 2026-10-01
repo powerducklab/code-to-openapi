@@ -146,6 +146,8 @@ export interface ScanOptions {
   frameworks?: readonly string[];
   /** File size cap per source file, bytes. Default 2 MiB. */
   maxFileBytes?: number;
+  /** Progress sink for host UIs (indexing, extraction, AI gap fills). */
+  onProgress?: (phase: string, detail?: string) => void;
   /** AI gap resolver; absent means deterministic-only output. */
   gapResolver?: import("../ai/gapResolver.js").GapResolver;
 }

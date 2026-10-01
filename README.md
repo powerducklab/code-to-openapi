@@ -105,43 +105,75 @@ await scanProject({
   includeTests: false, // include test and fixture files (default: false)
   frameworks: ["express"], // restrict framework packs
   maxFileBytes: 2 * 1024 * 1024, // per-file cap (default 2 MiB)
+  onProgress: (phase, detail) => console.log(phase, detail ?? ""),
   gapResolver, // optional; omit for fully deterministic output
 });
 ```
 
 ## Optional AI gap resolver
 
-The scanning package never calls a model vendor itself. Wire your own provider
-(the desktop app does this behind an explicit opt-in):
+The scanning package never calls a model vendor itself. It ships the prompt
+contract and a strict response validator; the host performs the HTTP call
+(the desktop app does this behind an explicit opt-in, using the user's own
+model configuration):
 
 ```ts
-import type { GapResolver } from "@powerduck/code-to-openapi";
-import { gapCacheKey } from "@powerduck/code-to-openapi";
+import {
+  buildGapMessages,
+  parseGapResolution,
+  gapCacheKey,
+  GAP_PROMPT_VERSION,
+  scanProject,
+  type GapResolver,
+} from "@powerduck/code-to-openapi";
+
+const cache = new Map<string, unknown>();
 
 const resolver: GapResolver = {
-  id: "my-provider",
+  id: "openai-compatible-host",
   async resolve(request) {
-    // request.gaps names the missing pieces, request.handlerSource is a
-    // small handler slice, request.known lists what AST already proved.
-    // Return only the fragments you can justify from the slice.
-    return {
-      bodySchema: {
-        type: "object",
-        properties: { name: { type: "string" } },
-        required: ["name"],
+    // Reuse resolutions for unchanged handler slices.
+    const key = gapCacheKey(request, GAP_PROMPT_VERSION);
+    const cached = cache.get(key);
+    if (cached) return cached as never;
+
+    const response = await fetch("https://your-model-host/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.MODEL_API_KEY}`,
       },
-      confidence: "medium",
-      rationale: "Handler validates req.body.name before persisting.",
+      body: JSON.stringify({
+        model: "your-model",
+        messages: buildGapMessages(request),
+        temperature: 0,
+        max_tokens: 4096,
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!response.ok) return null; // a failed fill is never fatal to the scan
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
     };
+    const content = data.choices?.[0]?.message?.content ?? "";
+    const resolution = parseGapResolution(content); // clamps to a safe subset
+    if (resolution) cache.set(key, resolution);
+    return resolution; // null leaves the gap visible in the report
   },
 };
 
-// Cache per handler so unchanged code consumes zero tokens:
-const key = gapCacheKey(request, "prompt-v1");
+const result = await scanProject({ root: "./api", gapResolver: resolver });
 ```
 
-Gap codes include `query-unknown`, `body-schema-unknown`,
-`response-schema-unknown` and `sse-events-unknown`.
+The model receives only the small handler slice for routes that actually have
+gaps — never whole files — and its answer is clamped to a JSON Schema subset
+(no `$ref`, bounded depth and property counts). The resolver can fill query
+parameters, headers, the request body, status-keyed response schemas and SSE
+event payloads; it can never invent a route, method or path.
+
+Gap codes include `path-dynamic`, `path-param-untyped`, `query-unknown`,
+`header-unknown`, `body-unknown`, `body-schema-unknown`, `response-unknown`,
+`response-schema-unknown`, `auth-unknown` and `sse-events-unknown`.
 
 ## Incremental rescans
 

@@ -30,6 +30,13 @@ export {
   type GapResolver,
   gapCacheKey,
 } from "./ai/gapResolver.js";
+export {
+  GAP_PROMPT_VERSION,
+  buildGapMessages,
+  parseGapResolution,
+  sanitizeSchema,
+  type GapPromptMessage,
+} from "./ai/prompt.js";
 export type {
   ExtractionResult,
   FileEntry,

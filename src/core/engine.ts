@@ -13,6 +13,7 @@ import { indexProject } from "./indexer.js";
 import { probeManifest } from "./probe.js";
 import { buildSidecar } from "./sidecar.js";
 import type {
+  Confidence,
   ExtractionResult,
   FileIndex,
   FrameworkPack,
@@ -115,12 +116,59 @@ async function applyAiGaps(
       }
     }
   }
+  if (resolution.headerSchema) {
+    for (const [name, schema] of Object.entries(
+      resolution.headerSchema.properties ?? {},
+    ) as Array<[string, JsonSchema]>) {
+      if (!next.parameters.some((p) => p.in === "header" && p.name === name)) {
+        next.parameters.push({
+          name,
+          in: "header",
+          required:
+            (resolution.headerSchema.required as string[] | undefined)?.includes(
+              name,
+            ) ?? false,
+          schema,
+          confidence: resolution.confidence,
+        });
+      }
+    }
+  }
   if (resolution.bodySchema && !next.requestBody) {
     next.requestBody = {
       required: true,
       confidence: resolution.confidence,
       content: [{ mediaType: "application/json", schema: resolution.bodySchema }],
     };
+  }
+  if (resolution.sseEvents?.length) {
+    const stream = next.responses.find((response) =>
+      response.content?.some((media) => media.mediaType === "text/event-stream"),
+    );
+    const media = stream?.content?.find(
+      (item) => item.mediaType === "text/event-stream",
+    );
+    if (stream && media) {
+      media.itemSchema =
+        resolution.sseEvents.length === 1
+          ? (resolution.sseEvents[0]!.dataSchema ?? {
+              type: "object",
+              properties: {
+                event: { const: resolution.sseEvents[0]!.name },
+              },
+            })
+          : {
+              oneOf: resolution.sseEvents.map((event) => ({
+                type: "object",
+                properties: {
+                  event: { const: event.name },
+                  ...(event.dataSchema ? { data: event.dataSchema } : {}),
+                },
+                required: ["event"],
+              })),
+            };
+      media.confidence = resolution.confidence;
+    }
   }
   for (const [status, schema] of Object.entries(
     resolution.responseSchemas ?? {},
@@ -143,11 +191,29 @@ async function applyAiGaps(
 
   next.gaps = next.gaps.filter((gap) => {
     if (gap === "query-unknown" && resolution.querySchema) return false;
-    if (gap === "body-schema-unknown" && resolution.bodySchema) return false;
-    if (gap === "response-schema-unknown" && resolution.responseSchemas) return false;
+    if (gap === "header-unknown" && resolution.headerSchema) return false;
+    if (
+      (gap === "body-schema-unknown" || gap === "body-unknown") &&
+      resolution.bodySchema
+    )
+      return false;
+    if (
+      (gap === "response-schema-unknown" || gap === "response-unknown") &&
+      resolution.responseSchemas
+    )
+      return false;
     if (gap === "sse-events-unknown" && resolution.sseEvents?.length) return false;
     return true;
   });
+
+  // The completeness gate only downgrades confidence, so re-rank here once AI
+  // evidence has closed gaps: a fully resolved route is at least medium, and
+  // "high" is kept only when the model explicitly grounded every fragment.
+  if (next.gaps.length === 0) {
+    const floor: Confidence = resolution.confidence === "high" ? "high" : "medium";
+    const rank: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
+    next.confidence = rank[next.confidence] >= rank[floor] ? next.confidence : floor;
+  }
 
   ctx.onProgress?.("ai-gap", `${candidate.method} ${candidate.fullPath}`);
   return next;
@@ -187,6 +253,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     root,
     index,
     manifest,
+    onProgress: options.onProgress,
     report: (message) => diagnostics.push(message),
   };
 
