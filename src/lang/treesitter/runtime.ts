@@ -9,14 +9,17 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
+// Anchor module resolution at this file so the external web-tree-sitter
+// runtime and grammar WASMs load from node_modules in both ESM and CJS
+// bundles. A bare `typeof require` probe is unreliable after bundling:
+// bundlers inject a callable require shim even in ESM output, so require.resolve
+// must be present before trusting it; otherwise anchor createRequire at the
+// module URL (CJS output keeps a native require and never hits this branch).
+/* eslint-disable @typescript-eslint/no-explicit-any */
 const nodeRequire: NodeRequire =
-  typeof require === "function"
+  typeof require === "function" && typeof (require as any).resolve === "function"
     ? require
-    : createRequire(
-        typeof __filename !== "undefined"
-          ? `file://${__filename}`
-          : import.meta.url,
-      );
+    : createRequire(import.meta.url);
 
 export type GrammarName =
   | "python"
@@ -65,8 +68,10 @@ const parserCache = new Map<GrammarName, Promise<TreeParser>>();
 async function loadRuntime(): Promise<WtModule> {
   if (!wtPromise) {
     wtPromise = (async () => {
+      // Load through the anchored require so the same package instance and
+      // export shape is used regardless of ESM/CJS interop or hoisting.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const wt: any = await import("web-tree-sitter");
+      const wt: any = nodeRequire("web-tree-sitter");
       const Parser = wt.Parser ?? wt.default?.Parser;
       const Language = wt.Language ?? wt.Parser?.Language;
       if (!Parser || !Language) {
