@@ -176,11 +176,14 @@ function groupPrefixChain(call: TsNode): string {
 function findEnclosingGroupCall(closure: TsNode): TsNode | null {
   let current: TsNode | null = closure.parent ?? null;
   while (current) {
-    if (
-      current.type === "scoped_call_expression" &&
-      (routeCallName(current) === "group" || routeCallName(current) === "prefix")
-    ) {
-      return current;
+    if (current.type === "scoped_call_expression") {
+      const method = routeCallName(current);
+      if (method === "group" || method === "prefix") return current;
+    }
+    if (current.type === "member_call_expression") {
+      // Route::prefix('v1')->middleware('api')->group(closure)
+      const method = current.namedChildren.find((c) => c.type === "name")?.text;
+      if (method === "group" || method === "prefix") return current;
     }
     current = current.parent ?? null;
   }
@@ -188,14 +191,42 @@ function findEnclosingGroupCall(closure: TsNode): TsNode | null {
 }
 
 function groupOptionsPrefix(groupCall: TsNode): string {
+  // Chained form: Route::prefix('v1')->...->group(closure). Walk the receiver
+  // chain outward collecting prefix() arguments in outer-to-inner order.
+  const prefixes: string[] = [];
+  let cursor: TsNode | null = groupCall;
+  while (cursor) {
+    let scoped: TsNode | null = null;
+    if (cursor.type === "scoped_call_expression") {
+      if (routeCallName(cursor) === "prefix") {
+        const arg = callArguments(cursor)[0];
+        const text = arg ? phpStringText(arg.type === "string" ? arg : arg.namedChildren.find((c) => c.type === "string")) : null;
+        if (text) prefixes.unshift(normalizeRoute(text));
+      }
+      scoped = null;
+    }
+    if (cursor.type === "member_call_expression") {
+      const method = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      if (method === "prefix") {
+        const args = cursor.namedChildren.find((c) => c.type === "arguments");
+        const arg = args ? childrenOfType(args, "argument")[0] : undefined;
+        const text = arg ? phpStringText(arg.type === "string" ? arg : arg.namedChildren.find((c) => c.type === "string")) : null;
+        if (text) prefixes.unshift(normalizeRoute(text));
+      }
+      scoped = cursor.namedChildren.find(
+        (c) => c.type === "member_call_expression" || c.type === "scoped_call_expression",
+      ) ?? null;
+    }
+    if (!scoped) break;
+    cursor = scoped;
+  }
+  if (prefixes.length) return prefixes.join("");
+
+  // Array form: Route::group(['prefix' => 'v1'], closure).
   const args = callArguments(groupCall);
-  const options =
-    groupCallNameIs(groupCall, "prefix")
-      ? args[0]
-      : args.find((a) => a.namedChildren.some((c) => c.type === "array_creation_expression"))
-        ?.namedChildren.find((c) => c.type === "array_creation_expression");
+  const options = args.find((a) => a.namedChildren.some((c) => c.type === "array_creation_expression"))
+    ?.namedChildren.find((c) => c.type === "array_creation_expression");
   if (!options) return "";
-  if (options.type === "string") return normalizeRoute(phpStringText(options) ?? "");
   for (const element of childrenOfType(options, "array_element_initializer")) {
     const strings = childrenOfType(element, "string");
     if (phpStringText(strings[0]) === "prefix") {
@@ -203,10 +234,6 @@ function groupOptionsPrefix(groupCall: TsNode): string {
     }
   }
   return "";
-}
-
-function groupCallNameIs(call: TsNode, expected: string): boolean {
-  return routeCallName(call) === expected;
 }
 
 function expandMatchVerbs(name: string, args: TsNode[]): string[] {
@@ -408,15 +435,21 @@ function collectParameters(
     const shortType = typeName.split("\\").pop()!;
     const cls = analysis.classes.get(shortType);
 
-    // FormRequest subclass -> JSON request body from rules().
+    // FormRequest subclass -> JSON or multipart request body from rules().
     if (cls && (cls.formRules.length || cls.extends?.endsWith("FormRequest"))) {
       const schema = cls.formRules.length
         ? formRulesToSchema(cls.formRules, model)
         : undefined;
       if (schema && Object.keys(schema.properties ?? {}).length) {
+        const fileFields = fileFieldsFromRules(cls.formRules);
+        const mediaType = fileFields.size ? "multipart/form-data" : "application/json";
+        const ruleProperties = schema.properties as Record<string, JsonSchema> | undefined;
+        for (const field of fileFields) {
+          if (ruleProperties) ruleProperties[field] = { type: "string", format: "binary" };
+        }
         requestBody = {
           required: true,
-          content: [{ mediaType: "application/json", schema }],
+          content: [{ mediaType, schema }],
           confidence: "high",
         };
         // Register the request as a component too, for references elsewhere.
@@ -439,9 +472,15 @@ function collectParameters(
       if (writesBody && inlineRules && !requestBody) {
         const schema = formRulesToSchema(inlineRules, model);
         if (Object.keys(schema.properties ?? {}).length) {
+          const fileFields = fileFieldsFromRules(inlineRules);
+          const mediaType = fileFields.size ? "multipart/form-data" : "application/json";
+          const ruleProperties = schema.properties as Record<string, JsonSchema> | undefined;
+          for (const field of fileFields) {
+            if (ruleProperties) ruleProperties[field] = { type: "string", format: "binary" };
+          }
           requestBody = {
             required: true,
-            content: [{ mediaType: "application/json", schema }],
+            content: [{ mediaType, schema }],
             confidence: "high",
           };
         }
@@ -477,6 +516,28 @@ function collectParameters(
   }
 
   return { parameters, ...(requestBody ? { requestBody } : {}), gaps };
+}
+
+/** Rule field names that carry an uploaded file (multipart, not JSON). */
+function fileFieldsFromRules(rules: { name: string; rules: string }[]): Set<string> {
+  const fields = new Set<string>();
+  for (const rule of rules) {
+    const field = rule.name.replace(/\.\*$/, "");
+    const tokens = rule.rules.split("|").map((t) => t.trim().toLowerCase());
+    if (
+      tokens.some(
+        (t) =>
+          t === "file" ||
+          t === "image" ||
+          t.startsWith("mimes:") ||
+          t.startsWith("mimetypes:") ||
+          t.startsWith("dimensions:"),
+      )
+    ) {
+      fields.add(field);
+    }
+  }
+  return fields;
 }
 
 function camelBinding(variable: string): string {
@@ -519,13 +580,23 @@ function collectRequestCalls(
       addParam("header", key, { type: "string" }, "high", false);
     } else if (method === "cookie" && key) {
       addParam("cookie", key, { type: "string" }, "high", false);
-    } else if (method === "input" && key) {
+    } else if ((method === "input" || method === "get" || method === "post" || method === "json") && key) {
       if (writesBody) {
         bodyKeys.push({ name: key, schema: { type: "string" } });
       } else {
         addParam("query", key, { type: "string" }, "medium", false);
       }
-    } else if (method === "all" || method === "validated" || method === "only") {
+    } else if (method === "only") {
+      // $request->only('a', 'b'): explicit key list usable on either side.
+      const keyArgs = args ? childrenOfType(args, "argument") : [];
+      for (const arg of keyArgs) {
+        const literal = arg.type === "string" ? arg : arg.namedChildren.find((c) => c.type === "string");
+        const text = literal ? phpStringText(literal) : null;
+        if (!text) continue;
+        if (writesBody) bodyKeys.push({ name: text, schema: { type: "string" } });
+        else addParam("query", text, { type: "string" }, "medium", false);
+      }
+    } else if (method === "all" || method === "validated") {
       seesAll = true;
     }
   }
@@ -590,6 +661,17 @@ function interpretResponse(
 ): DiscoveredResponse | null {
   // response()->json($data, 201)
   if (expression.type === "member_call_expression") {
+    // (new ProductResource($model))->response()->setStatusCode(201)
+    const chained = chainedResourceResponse(expression, model);
+    if (chained) {
+      return {
+        statusCode: chained.statusCode,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema: chained.schema }],
+      };
+    }
+
     const method = expression.namedChildren.find((c) => c.type === "name")?.text;
     const args = expression.namedChildren.find((c) => c.type === "arguments");
     const argNodes = args ? childrenOfType(args, "argument") : [];
@@ -602,18 +684,6 @@ function interpretResponse(
     if (method === "redirect" || method === "redirectRoute" || method === "redirectGuest") {
       const status = integerText(argNodes[1]) ?? "302";
       return { statusCode: status, description: "", confidence: "high" };
-    }
-
-    if (method === "download" || method === "streamDownload") {
-      const status = integerText(argNodes[2]) ?? "200";
-      return {
-        statusCode: status,
-        description: "",
-        confidence: "high",
-        content: [
-          { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
-        ],
-      };
     }
 
     if (method === "download") {
@@ -644,7 +714,7 @@ function interpretResponse(
           statusCode: status,
           description: "Server-sent events",
           confidence: "medium",
-          content: [{ mediaType: "text/event-stream" }],
+          content: [{ mediaType: "text/event-stream", itemSchema: {} }],
         };
       }
       if (method === "streamDownload") {
@@ -758,6 +828,19 @@ function inferVariableModel(
       const name = creation.namedChildren.find((c) => c.type === "name")?.text;
       if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? undefined;
     }
+    // $path = $request->file('image')->store('products') — uploaded file paths.
+    const memberCall = findFirst(assignment, (c) => c.type === "member_call_expression");
+    if (memberCall) {
+      const callMethod = memberCall.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+      if (callMethod && ["store", "storeas", "path", "url", "getclientoriginalname"].includes(callMethod)) {
+        return { type: "string" };
+      }
+      if (["input", "query", "get", "post", "json", "route"].includes(callMethod ?? "")) {
+        return { type: "string" };
+      }
+      if (callMethod === "boolean" || callMethod === "has") return { type: "boolean" };
+      if (callMethod === "integer") return { type: "integer" };
+    }
   }
   // Typed model parameter, e.g. function update(Order $order).
   for (const param of formalParameters(handler)) {
@@ -790,14 +873,164 @@ function inferValueSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode):
     if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? {};
   }
   if (inner.type === "array_creation_expression") {
-    // Associative arrays cannot be typed without analyzing values; emit an
-    // object and let AI gap resolution fill properties.
-    return { type: "object" };
+    return inferArraySchema(inner, model, handler);
   }
   if (inner.type === "variable_name" && handler) {
     return inferVariableModel(handler, inner, model);
   }
   return undefined;
+}
+
+/**
+ * Resolve a response()->json([...]) payload table. Keyed arrays become objects
+ * with per-value inference; positional homogeneous arrays become array schemas.
+ */
+function inferArraySchema(
+  array: TsNode,
+  model: PhpModelIndex,
+  handler?: TsNode,
+  depth = 0,
+): JsonSchema | undefined {
+  if (depth > 5) return { type: "object" };
+  const elements = childrenOfType(array, "array_element_initializer");
+  if (elements.length === 0) return { type: "object" };
+
+  // A keyed element (`'key' => $value`) carries two named children, the key and
+  // the value; a positional element carries a single child, the value. String
+  // values share the "string" node type with string keys, so the two kinds are
+  // split by child count rather than by node type (otherwise literal string
+  // values were mistaken for keys and the property silently dropped).
+  const keyed = elements.filter((element) => element.namedChildren.length === 2);
+  if (keyed.length === 0) {
+    const itemSchemas = elements.map((element) =>
+      inferArrayValue(element.namedChildren[0], model, handler, depth + 1),
+    );
+    const first = itemSchemas[0];
+    if (first && itemSchemas.every((s) => s && JSON.stringify(s) === JSON.stringify(first))) {
+      return { type: "array", items: first };
+    }
+    return { type: "array", items: {} };
+  }
+
+  const properties: Record<string, JsonSchema> = {};
+  for (const element of keyed) {
+    const [keyNode, valueNode] = element.namedChildren;
+    const key = keyNode?.type === "string" ? phpStringText(keyNode) : null;
+    if (!key || !valueNode) continue;
+    const schema = inferArrayValue(valueNode, model, handler, depth + 1);
+    if (schema && Object.keys(schema).length) properties[key] = schema;
+  }
+  return { type: "object", properties };
+}
+
+function inferArrayValue(
+  node: TsNode | undefined,
+  model: PhpModelIndex,
+  handler: TsNode | undefined,
+  depth: number,
+): JsonSchema | undefined {
+  if (!node) return undefined;
+  if (node.type === "string") return { type: "string" };
+  if (node.type === "integer") return { type: "integer" };
+  if (node.type === "float") return { type: "number" };
+  if (node.type === "boolean" || node.type === "true" || node.type === "false") return { type: "boolean" };
+  if (node.type === "null") return { type: "null" };
+  if (node.type === "array_creation_expression") return inferArraySchema(node, model, handler, depth);
+  if (node.type === "object_creation_expression") {
+    const name = node.namedChildren.find((c) => c.type === "name")?.text;
+    if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? {};
+  }
+  if (node.type === "scoped_call_expression") return inferStaticModel(node, model);
+  if (node.type === "member_call_expression") {
+    const method = node.namedChildren.find((c) => c.type === "name")?.text;
+    // $request->input/query/get/post('key') and $request->file('x')->store(...)
+    const receiver = node.namedChildren.find((c) => c.type === "variable_name");
+    if (receiver?.text === "$request" || receiver?.text === "$this->request") {
+      if (["input", "query", "get", "post", "json", "route"].includes(method ?? "")) {
+        return { type: "string" };
+      }
+      if (method === "boolean" || method === "has") return { type: "boolean" };
+      if (method === "integer") return { type: "integer" };
+      if (method === "store" || method === "storeAs" || method === "path") return { type: "string" };
+    }
+    if (method === "store" || method === "storeAs" || method === "url" || method === "path") {
+      return { type: "string" };
+    }
+    const chained = inferChainedModel(node, model);
+    if (chained) return chained;
+  }
+  if (node.type === "member_access_expression") {
+    const prop = node.namedChildren.filter((c) => c.type === "name").pop()?.text ?? "";
+    return heuristicPropertySchema(prop);
+  }
+  if (node.type === "variable_name" && handler) {
+    return inferVariableModel(handler, node, model);
+  }
+  return undefined;
+}
+
+/** Conservative scalar inference for common Laravel property names. */
+function heuristicPropertySchema(prop: string): JsonSchema {
+  if (/^(id|.*_id)$/.test(prop) || /(count|total|quantity|size|age)$/.test(prop)) {
+    return { type: "integer" };
+  }
+  if (/^(is_|has_|should_)/.test(prop) || /^(active|enabled|deleted|archived)$/.test(prop)) {
+    return { type: "boolean" };
+  }
+  if (/(price|amount|cost|fee|balance|total)$/.test(prop)) return { type: "number" };
+  if (/(url|uri|path|link|href)$/.test(prop)) return { type: "string", format: "uri" };
+  if (/(at)$/.test(prop)) return { type: "string", format: "date-time" };
+  if (/(name|title|sku|slug|email|phone|token|key|status|type|description|caption|filename|file_name)$/.test(prop)) {
+    return { type: "string" };
+  }
+  return {};
+}
+
+/**
+ * Detect `(new XResource($model))->response()->setStatusCode(201)` chains and
+ * return the resource component reference plus the declared status code.
+ */
+function chainedResourceResponse(
+  expression: TsNode,
+  model: PhpModelIndex,
+): { statusCode: string; schema: JsonSchema } | null {
+  let statusCode = "200";
+  let cursor: TsNode | null = expression;
+  let sawResponse = false;
+  for (let depth = 0; depth < 6 && cursor; depth += 1) {
+    if (cursor.type === "member_call_expression") {
+      const method = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      if (method === "setStatusCode") {
+        const args = cursor.namedChildren.find((c) => c.type === "arguments");
+        const first = args ? childrenOfType(args, "argument")[0] : undefined;
+        const code = integerText(first);
+        if (code) statusCode = code;
+      }
+      if (method === "response") sawResponse = true;
+      let next: TsNode | null =
+        cursor.namedChildren.find(
+          (c) =>
+            c.type === "member_call_expression" ||
+            c.type === "object_creation_expression" ||
+            c.type === "parenthesized_expression",
+        ) ?? null;
+      if (next?.type === "parenthesized_expression") {
+        next = next.namedChildren[0] ?? null;
+      }
+      cursor = next;
+      continue;
+    }
+    if (cursor.type === "object_creation_expression") {
+      const name = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      if (name && /Resource$/.test(name) && model.analysis.classes.has(name)) {
+        const ref = ensurePhpComponent(name, model);
+        if (ref) return { statusCode: sawResponse || statusCode !== "200" ? statusCode : "201", schema: ref };
+      }
+      return null;
+    }
+    break;
+  }
+  return null;
 }
 
 function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | undefined {
@@ -811,6 +1044,11 @@ function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | unde
       ? names[names.length - 2]?.text
       : undefined;
   if (!modelName || !model.analysis.classes.has(modelName)) return undefined;
+  // Query-builder aggregates return scalars, not model instances.
+  if (method === "count" || method === "exists") return { type: method === "exists" ? "boolean" : "integer" };
+  if (method === "sum" || method === "avg" || method === "average" || method === "max" || method === "min") {
+    return { type: "number" };
+  }
   const ref = ensurePhpComponent(modelName, model);
   if (!ref) return undefined;
   if (method && COLLECTION_METHODS.has(method)) return { type: "array", items: ref };
@@ -830,6 +1068,12 @@ function inferChainedModel(call: TsNode, model: PhpModelIndex): JsonSchema | und
   const ref = ensurePhpComponent(modelName, model);
   if (!ref) return undefined;
   const method = call.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+  if (method === "count" || method === "exists") {
+    return { type: method === "exists" ? "boolean" : "integer" };
+  }
+  if (method === "sum" || method === "avg" || method === "average" || method === "max" || method === "min") {
+    return { type: "number" };
+  }
   return method && ITEM_METHODS.has(method) ? ref : { type: "array", items: ref };
 }
 
@@ -874,6 +1118,13 @@ function parseResourceCall(
     const cls = controller ? analysis.classes.get(controller) : null;
     const methodNode = cls?.methods.get(method) ?? null;
     const gaps: GapCode[] = [];
+    // update() serves both PUT and PATCH; keep operationIds unique and explicit.
+    const operationId =
+      controller && method === "update"
+        ? `${controller}.update_${verb.toUpperCase()}`
+        : controller
+          ? `${controller}.${method}`
+          : null;
     const declaredPathParams = new Set(
       [...path.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!),
     );
@@ -895,7 +1146,7 @@ function parseResourceCall(
       method: verb,
       path,
       fullPath: path,
-      ...(controller ? { operationId: `${controller}.${method}` } : {}),
+      ...(operationId ? { operationId } : {}),
       origin: { file: rel, line: 0 },
       parameters,
       ...(collected.requestBody ? { requestBody: collected.requestBody } : {}),

@@ -54,7 +54,7 @@ describe("FastAPI (Python) golden project", () => {
 
     const limit = byName(list.parameters, "limit");
     expect(limit.in).toBe("query");
-    expect(limit.schema).toEqual({ type: "integer" });
+    expect(limit.schema).toEqual({ type: "integer", default: 20 });
 
     const tenant = byName(list.parameters, "x-tenant");
     expect(tenant.in).toBe("header");

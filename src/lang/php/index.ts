@@ -30,6 +30,8 @@ export interface PhpClass {
   resourceKind: "json-resource" | "resource-collection" | null;
   /** Model class short name referenced by the resource @mixin docblock. */
   mixinModel: string | null;
+  /** Class-level @property docblock attributes (Eloquent models). */
+  docPropertyTypes: Map<string, string>;
 }
 
 export interface PhpEnum {
@@ -102,6 +104,14 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[]): Ph
   const classDoc = docblockAbove(lines, node.startPosition.row);
   const mixinMatch = classDoc.match(/@mixin\s+([\\\w]+)/);
   const mixinModel = mixinMatch ? mixinMatch[1]!.split("\\").pop()! : null;
+
+  // Eloquent models declare attributes through class-level @property tags.
+  const docPropertyTypes = new Map<string, string>();
+  for (const match of classDoc.matchAll(
+    /@(?:property|property-read|property-write)\s+([^\s*]+)\s+\$?(\w+)/g,
+  )) {
+    docPropertyTypes.set(match[2]!, match[1]!);
+  }
   const baseShort = extendsName?.split("\\").pop() ?? "";
   const resourceKind: PhpClass["resourceKind"] =
     baseShort === "JsonResource"
@@ -191,6 +201,7 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[]): Ph
     formRules,
     resourceKind,
     mixinModel,
+    docPropertyTypes,
   };
 }
 

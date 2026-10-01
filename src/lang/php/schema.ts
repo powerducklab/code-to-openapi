@@ -8,6 +8,7 @@
 
 import type { JsonSchema } from "../../core/types.js";
 import type { PhpAnalysis, PhpClass, PhpRule } from "./index.js";
+import { phpStringText } from "./index.js";
 import type { TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findAll, findFirst } from "../treesitter/ast.js";
 
@@ -127,6 +128,12 @@ function buildClassSchema(cls: PhpClass, index: PhpModelIndex, stack: Set<string
       : phpTypeToSchema(prop.typeNode, index, stack);
     if (!prop.nullable && !prop.hasDefault) required.push(prop.name);
   }
+  // Eloquent @property docblocks describe attributes without real properties.
+  for (const [name, docType] of cls.docPropertyTypes) {
+    if (!(name in properties)) {
+      properties[name] = docTypeToSchema(docType, index, stack);
+    }
+  }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;
   return schema;
@@ -145,6 +152,9 @@ function docTypeToSchema(docType: string, index: PhpModelIndex, stack: Set<strin
   }
   const short = type.split("\\").pop()!;
   if (SCALAR_NAMES[short]) return SCALAR_NAMES[short]!;
+  if (index.analysis.enums.has(short)) {
+    return ensurePhpComponent(short, index, stack) ?? { type: "string" };
+  }
   if (index.analysis.classes.has(short)) {
     return ensurePhpComponent(short, index, stack) ?? {};
   }
@@ -171,17 +181,40 @@ function phpLiteralSchema(node: TsNode): JsonSchema | null {
   return null;
 }
 
+const DATE_METHODS = new Set([
+  "toiso8601string",
+  "todatestring",
+  "tojson",
+  "format",
+  "todatetimestring",
+  "toimms3339string",
+]);
+
+function pascalize(word: string): string {
+  return word
+    .replace(/[-_]+/g, " ")
+    .replace(/(?:^\w|\s\w)/g, (c) => c.trim().toUpperCase());
+}
+
+function singularize(word: string): string {
+  if (word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.endsWith("ses")) return word.slice(0, -2);
+  if (word.endsWith("s")) return word.slice(0, -1);
+  return word;
+}
+
 /**
  * Resolve a value expression inside an API Resource toArray() table.
- * Covers `$this->field`, nested `new XResource(...)`, `XResource::collection()`,
- * literals, pagination getters and homogeneous arrays. Returns null when the
- * value cannot be statically typed, so callers can emit an honest gap.
+ * Covers `$this->field`, conditional `when`/`whenLoaded`, nested resources,
+ * `XResource::collection()`, literals, pagination getters and arrays.
+ * Returns null when the value cannot be statically typed (honest gap).
  */
 function resourceValueSchema(
   node: TsNode | undefined,
   index: PhpModelIndex,
   stack: Set<string>,
   mixinModel: PhpClass | null,
+  ownerClass: PhpClass | null,
   depth = 0,
 ): JsonSchema | null {
   if (!node || depth > 6) return null;
@@ -192,7 +225,7 @@ function resourceValueSchema(
   if (node.type === "conditional_expression") {
     const branches = node.namedChildren.filter((c) => c.type !== "else");
     for (const branch of branches.slice(1)) {
-      const schema = resourceValueSchema(branch, index, stack, mixinModel, depth + 1);
+      const schema = resourceValueSchema(branch, index, stack, mixinModel, ownerClass, depth + 1);
       if (schema && Object.keys(schema).length) return schema;
     }
     return null;
@@ -210,9 +243,9 @@ function resourceValueSchema(
 
   // ProductResource::collection($this->items)
   if (node.type === "scoped_call_expression") {
-    const scope = findFirst(node, (c) => c.type === "name" || c.type === "qualified_name");
-    const method = findAll(node, (c) => c.type === "name").map((c) => c.text).pop();
-    const scopeName = scope?.text.split("\\").pop();
+    const directNames = node.namedChildren.filter((c) => c.type === "name" || c.type === "qualified_name");
+    const scopeName = directNames[0]?.text.split("\\").pop();
+    const method = directNames[1]?.text;
     if (method === "collection" && scopeName && index.analysis.classes.has(scopeName)) {
       const ref = ensurePhpComponent(scopeName, index, stack);
       return ref ? { type: "array", items: ref } : null;
@@ -220,35 +253,96 @@ function resourceValueSchema(
     return null;
   }
 
-  // $this->currentPage() / $this->total()
-  if (node.type === "member_call_expression") {
-    const methodName = findAll(node, (c) => c.type === "name").map((c) => c.text).pop();
+  // Nullsafe calls: $this->created_at?->toIso8601String()
+  if (node.type === "nullsafe_member_call_expression" || node.type === "member_call_expression") {
+    const methodName = node.namedChildren.filter((c) => c.type === "name").pop()?.text;
+
+    // $this->when($condition, $value) / when($condition, $value, $default)
+    if (methodName === "when" || methodName === "unless") {
+      const args = node.namedChildren.find((c) => c.type === "arguments");
+      const argNodes = args ? childrenOfType(args, "argument") : [];
+      const candidates = methodName === "when"
+        ? [argNodes[1], argNodes[2]]
+        : [argNodes[1]];
+      for (const candidate of candidates) {
+        const inner = candidate?.namedChildren[0];
+        const schema = resourceValueSchema(inner, index, stack, mixinModel, ownerClass, depth + 1);
+        if (schema && Object.keys(schema).length) return schema;
+      }
+      return null;
+    }
+
+    // $this->whenLoaded('reviews', ReviewResource::collection(...))
+    if (methodName === "whenLoaded") {
+      const args = node.namedChildren.find((c) => c.type === "arguments");
+      const argNodes = args ? childrenOfType(args, "argument") : [];
+      const explicitValue = argNodes[1]?.namedChildren[0];
+      const explicit = resourceValueSchema(explicitValue, index, stack, mixinModel, ownerClass, depth + 1);
+      if (explicit && Object.keys(explicit).length) return explicit;
+      const relation = phpStringText(argNodes[0]?.namedChildren.find((c) => c.type === "string"));
+      if (relation) {
+        const guessed = `${pascalize(singularize(relation))}Resource`;
+        if (index.analysis.classes.has(guessed)) {
+          const ref = ensurePhpComponent(guessed, index, stack);
+          if (ref) return { type: "array", items: ref };
+        }
+        return { type: "array", items: {} };
+      }
+      return null;
+    }
+
+    if (methodName && DATE_METHODS.has(methodName.toLowerCase())) return { type: "string", format: "date-time" };
     if (methodName && PAGINATOR_INTEGER_METHODS.has(methodName)) return { type: "integer" };
     if (methodName === "toArray") return { type: "object" };
+    if (methodName === "collection") {
+      const paired = pairedResource(ownerClass, index);
+      return paired ? { type: "array", items: paired } : { type: "array", items: {} };
+    }
     return null;
   }
 
   // $this->name
-  if (node.type === "member_access_expression") {
+  if (node.type === "member_access_expression" || node.type === "nullsafe_member_access_expression") {
     const propName = node.namedChildren.filter((c) => c.type === "name").pop()?.text;
     if (!propName) return null;
+
+    // ResourceCollection's $this->collection is the wrapped resource list.
+    if (propName === "collection" && ownerClass?.resourceKind === "resource-collection") {
+      const paired = pairedResource(ownerClass, index);
+      return paired ? { type: "array", items: paired } : { type: "array", items: {} };
+    }
+
     const modelProp = mixinModel?.properties.find((p) => p.name === propName);
-    if (modelProp) {
-      const docType = mixinModel?.propertyDoc.get(propName);
+    if (modelProp && mixinModel) {
+      const docType = mixinModel.propertyDoc.get(propName) ?? mixinModel.docPropertyTypes.get(propName);
       return docType
         ? docTypeToSchema(docType, index, stack)
         : phpTypeToSchema(modelProp.typeNode, index, stack);
     }
-    return null;
+    if (mixinModel?.docPropertyTypes.has(propName)) {
+      return docTypeToSchema(mixinModel.docPropertyTypes.get(propName)!, index, stack);
+    }
+    return heuristicPropertySchema(propName);
   }
 
   if (node.type === "array_creation_expression") {
     const elements = childrenOfType(node, "array_element_initializer");
     if (elements.length === 0) return { type: "array", items: {} };
-    const itemSchemas = elements.map((element) => {
-      const value = element.namedChildren.find((c) => c.type !== "string") ?? element;
-      return resourceValueSchema(value, index, stack, mixinModel, depth + 1);
-    });
+    const keyed = elements.filter((element) => childrenOfType(element, "string")[0]);
+    if (keyed.length) {
+      const properties: Record<string, JsonSchema> = {};
+      for (const element of keyed) {
+        const key = phpStringText(childrenOfType(element, "string")[0]);
+        const valueNode = element.namedChildren.find((c) => c.type !== "string");
+        if (!key || !valueNode) continue;
+        const schema = resourceValueSchema(valueNode, index, stack, mixinModel, ownerClass, depth + 1);
+        if (schema && Object.keys(schema).length) properties[key] = schema;
+      }
+      return { type: "object", properties };
+    }
+    const itemSchemas = elements.map((element) =>
+      resourceValueSchema(element.namedChildren[0], index, stack, mixinModel, ownerClass, depth + 1),
+    );
     const first = itemSchemas[0];
     if (first && itemSchemas.every((s) => s && JSON.stringify(s) === JSON.stringify(first))) {
       return { type: "array", items: first };
@@ -256,6 +350,36 @@ function resourceValueSchema(
     return null;
   }
 
+  return null;
+}
+
+function pairedResource(
+  ownerClass: PhpClass | null,
+  index: PhpModelIndex,
+): JsonSchema | null {
+  if (!ownerClass) return null;
+  const base = ownerClass.name.replace(/Collection$/, "");
+  const candidate = `${base}Resource`;
+  if (index.analysis.classes.has(candidate)) {
+    return ensurePhpComponent(candidate, index) ?? null;
+  }
+  return null;
+}
+
+/** Conservative scalar inference for common Laravel property names. */
+function heuristicPropertySchema(prop: string): JsonSchema | null {
+  if (/^(id|.*_id)$/.test(prop) || /(count|quantity|size|age)$/.test(prop)) {
+    return { type: "integer" };
+  }
+  if (/^(is_|has_|should_)/.test(prop) || /^(active|enabled|deleted|archived)$/.test(prop)) {
+    return { type: "boolean" };
+  }
+  if (/(price|amount|cost|fee|balance|total)$/.test(prop)) return { type: "number" };
+  if (/(url|uri|link|href)$/.test(prop)) return { type: "string", format: "uri" };
+  if (/(at)$/.test(prop)) return { type: "string", format: "date-time" };
+  if (/(name|title|sku|slug|email|phone|token|key|status|type|description|caption|filename)$/.test(prop)) {
+    return { type: "string" };
+  }
   return null;
 }
 
@@ -271,6 +395,15 @@ function buildResourceSchema(
     if (cls.resourceKind === "json-resource" && mixinModel) {
       // A bare JsonResource serializes the underlying model attributes.
       return buildClassSchema(mixinModel, index, stack);
+    }
+    if (cls.resourceKind === "resource-collection") {
+      const paired = pairedResource(cls, index);
+      return {
+        type: "object",
+        properties: {
+          data: { type: "array", items: paired ?? {} },
+        },
+      };
     }
     return null;
   }
@@ -292,7 +425,7 @@ function buildResourceSchema(
       const valueNode = element.namedChildren.find(
         (c) => c.type !== "string" && c.type !== "string_content",
       );
-      const schema = resourceValueSchema(valueNode, index, stack, mixinModel);
+      const schema = resourceValueSchema(valueNode, index, stack, mixinModel, cls);
       if (schema && Object.keys(schema).length) {
         properties[key] = schema;
       }
@@ -341,6 +474,17 @@ export function formRulesToSchema(rules: PhpRule[], index: PhpModelIndex): JsonS
 
 function ruleStringToSchema(rules: string, _index: PhpModelIndex): JsonSchema {
   const tokens = rules.split("|").map((t) => t.trim().toLowerCase());
+  if (
+    tokens.some(
+      (t) =>
+        t === "file" ||
+        t === "image" ||
+        t.startsWith("mimes:") ||
+        t.startsWith("mimetypes:"),
+    )
+  ) {
+    return { type: "string", format: "binary" };
+  }
   if (tokens.includes("array")) return { type: "array", items: {} };
   if (tokens.some((t) => t.startsWith("exists:") || t === "string" || t.startsWith("string"))) {
     return { type: "string" };

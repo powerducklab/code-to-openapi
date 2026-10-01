@@ -114,6 +114,12 @@ function joinPrefix(...parts: Array<string | undefined>): string {
   return joined ? `/${joined}` : "/";
 }
 
+// FastAPI path converters look like {product_id:int}; OAS path templates only
+// carry the parameter name ({product_id}), so strip the converter segment.
+function normalizePath(raw: string): string {
+  return raw.replace(/\{([^{}:]+):[^{}]+\}/g, "{$1}");
+}
+
 function operationId(method: string, fullPath: string): string {
   const segments = fullPath
     .split("/")
@@ -150,6 +156,24 @@ function annotatedMetadata(param: PyParam): TsNode[] {
   return args.slice(1);
 }
 
+function annotatedInnerType(param: PyParam): TsNode | null {
+  if (!param.annotation) return null;
+  const generic =
+    param.annotation.type === "generic_type" || param.annotation.type === "subscript"
+      ? param.annotation
+      : null;
+  if (!generic) return null;
+  const name = generic.namedChildren[0]?.text.split(".").pop();
+  if (name !== "Annotated") return null;
+  const params = childrenOfType(generic, "type_parameter");
+  const args = params.flatMap((p) =>
+    p.namedChildren.map((child) =>
+      child.type === "type" ? child.namedChildren[0] ?? child : child,
+    ),
+  );
+  return args[0] ?? null;
+}
+
 function injectionKind(param: PyParam): { kind: string; call: TsNode } | null {
   for (const meta of annotatedMetadata(param)) {
     if (meta.type === "call") {
@@ -180,8 +204,82 @@ function injectionAlias(call: TsNode): string | null {
   return alias ? literalString(alias) : null;
 }
 
+// A Python-level default value (including "" or None) makes the binding
+// optional. The `= Query(...)` injection form keeps its own required logic.
+function bindingRequired(param: PyParam, call: TsNode): boolean {
+  if (param.default && param.default.type !== "call") return false;
+  return injectionRequired(call);
+}
+
 function headerName(paramName: string, call: TsNode): string {
   return injectionAlias(call) ?? paramName.replace(/_/g, "-");
+}
+
+// Scalar value of a Python literal default. `None` leaves an optional binding
+// with no serializable default, and containers / calls are not parameter
+// defaults we can express.
+function parameterDefault(param: PyParam, call: TsNode | null): { found: boolean; value: unknown } {
+  let node: TsNode | null = null;
+  if (param.default && param.default.type !== "call") {
+    node = param.default;
+  } else if (call) {
+    const explicit = keywordArgument(call, "default");
+    node = explicit ?? positionalArguments(call)[0] ?? null;
+  }
+  if (!node || node.type === "ellipsis" || node.type === "none") {
+    return { found: false, value: undefined };
+  }
+  if (node.type === "integer") return { found: true, value: literalInteger(node) };
+  if (node.type === "float") {
+    const value = Number.parseFloat(node.text);
+    return { found: Number.isFinite(value), value };
+  }
+  const str = literalString(node);
+  if (str !== null) return { found: true, value: str };
+  if (node.type === "true") return { found: true, value: true };
+  if (node.type === "false") return { found: true, value: false };
+  return { found: false, value: undefined };
+}
+
+function numericLiteral(node: TsNode | null): number | null {
+  if (!node) return null;
+  const integer = literalInteger(node);
+  if (integer !== null) return integer;
+  if (node.type === "float") {
+    const value = Number.parseFloat(node.text);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+// Fold a Query/Path/Header/Cookie validator's constraints and the binding's
+// scalar default into the schema derived from the annotation.
+function parameterSchema(
+  base: JsonSchemaLocal,
+  param: PyParam,
+  call: TsNode | null,
+): JsonSchemaLocal {
+  const schema: JsonSchemaLocal = { ...base };
+  if (call) {
+    const ge = numericLiteral(keywordArgument(call, "ge"));
+    const le = numericLiteral(keywordArgument(call, "le"));
+    const gt = numericLiteral(keywordArgument(call, "gt"));
+    const lt = numericLiteral(keywordArgument(call, "lt"));
+    if (ge !== null) schema.minimum = ge;
+    if (le !== null) schema.maximum = le;
+    if (gt !== null) schema.exclusiveMinimum = gt;
+    if (lt !== null) schema.exclusiveMaximum = lt;
+    const minLength = literalInteger(keywordArgument(call, "min_length"));
+    if (minLength !== null) schema.minLength = minLength;
+    const maxLength = literalInteger(keywordArgument(call, "max_length"));
+    if (maxLength !== null) schema.maxLength = maxLength;
+    const patternNode = keywordArgument(call, "pattern") ?? keywordArgument(call, "regex");
+    const pattern = patternNode ? literalString(patternNode) : null;
+    if (pattern !== null) schema.pattern = pattern;
+  }
+  const def = parameterDefault(param, call);
+  if (def.found) schema.default = def.value;
+  return schema;
 }
 
 function pathPlaceholders(rawPath: string): Array<{ name: string; converter: string }> {
@@ -240,6 +338,32 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
       }
     }
 
+    // Resolve a dotted module path against indexed files, trying both the
+    // full path and every suffix (packages share a common root directory).
+    const resolveModuleFile = (modulePath: string): string | undefined => {
+      const normalized = modulePath.replace(/^\.+/, "");
+      if (!normalized) return undefined;
+      return moduleToFile.get(normalized);
+    };
+
+    // Expand a possibly relative module descriptor (from .routers import x)
+    // into an absolute dotted module path, anchored at the importing file's
+    // package. __init__.py files anchor at their own package.
+    const resolveRelativeModule = (file: string, moduleText: string): string => {
+      const leadingDots = /^(\.*)/.exec(moduleText)?.[1]?.length ?? 0;
+      if (!leadingDots) return moduleText;
+      const noExt = file.replace(/\.pyi?$/, "").replace(/\\/g, "/");
+      const segments = noExt.split("/");
+      const isInit = segments[segments.length - 1] === "__init__";
+      // Regular module a/b/c.py: one dot anchors at package a/b (strip the
+      // module name plus one level per extra dot). __init__.py anchors at its
+      // own package (strip dots minus one).
+      const strip = isInit ? Math.max(0, leadingDots - 1) : leadingDots;
+      const base = segments.slice(0, segments.length - strip);
+      const suffix = moduleText.replace(/^\.+/, "");
+      return [...base, ...(suffix ? [suffix] : [])].join(".");
+    };
+
     const resolveRouterRef = (file: string, node: TsNode): RouterInstance | null => {
       if (node.type !== "identifier" && node.type !== "attribute") return null;
       if (node.type === "identifier") {
@@ -248,21 +372,43 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         const pyFile = analysis.files.get(file);
         const imported = pyFile?.imports.get(node.text);
         if (imported?.importedName) {
-          const targetFile = moduleToFile.get(imported.module);
+          // from pkg.mod import router
+          const absolute = resolveRelativeModule(file, imported.module);
+          const targetFile =
+            resolveModuleFile(absolute) ??
+            moduleToFile.get(imported.importedName) ??
+            null;
           if (targetFile) {
             return routerById(targetFile, imported.importedName) ?? null;
           }
         }
         return null;
       }
-      // module.router style: import app.routers.items as items_module
+      // module.router style: import app.routers.items as items_module, or
+      // from .routers import items followed by items.router.
       const receiver = node.namedChildren[0];
       const attr = node.namedChildren[1];
       const pyFile = analysis.files.get(file);
       if (!receiver || !attr || !pyFile) return null;
       const imported = pyFile.imports.get(receiver.text);
       if (!imported) return null;
-      const targetFile = moduleToFile.get(imported.module);
+      let targetFile: string | undefined;
+      if (imported.importedName && imported.importedName !== receiver.text) {
+        // from <package> import <submodule> aliased at import site
+        const absolute = resolveRelativeModule(file, imported.module);
+        targetFile =
+          resolveModuleFile(`${absolute}.${imported.importedName}`) ??
+          resolveModuleFile(absolute);
+      } else {
+        // The binding may be a name re-exported by the package or a submodule
+        // of the same name (from .routers import products -> products.py);
+        // prefer the submodule match, then the package __init__.
+        const absolute = resolveRelativeModule(file, imported.module);
+        const importedName = imported.importedName ?? receiver.text;
+        targetFile =
+          resolveModuleFile(`${absolute}.${importedName}`) ??
+          resolveModuleFile(absolute);
+      }
       return targetFile ? routerById(targetFile, attr.text) ?? null : null;
     };
 
@@ -444,7 +590,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         continue;
       }
       const mount = chain ?? { prefix: "", tags: [] };
-      const candidate = buildRoute(site, joinPrefix(mount.prefix, site.rawPath), mount.tags, analysis, modelIndex, securityBindings);
+      const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings);
       routes.push(candidate);
     }
 
@@ -555,6 +701,60 @@ function buildRoute(
   const formFields = new Map<string, { node: TsNode | null; kind: "form" | "file"; required: boolean }>();
   const security: Array<Record<string, string[]>> = [];
 
+  // Expand dependency callables (Depends(CommonParams) / Depends(get_pagination)):
+  // FastAPI treats each parameter of the dependency as a parameter of the route,
+  // so query/header/path annotations on the dependency must surface here too.
+  const expandedParams: Array<{ param: PyParam; ownerFile: string }> = [];
+  const expandDependency = (
+    depName: string,
+    ownerFile: string,
+    seen: Set<string>,
+    depth: number,
+  ): void => {
+    if (depth > 4 || seen.has(depName)) return;
+    seen.add(depName);
+    const cls = analysis.classes.find(
+      (candidate) => candidate.name === depName && candidate.file === ownerFile,
+    ) ?? analysis.classes.find((candidate) => candidate.name === depName);
+    if (cls) {
+      const init = analysis.functions.find(
+        (candidate) => candidate.name === "__init__" && candidate.file === cls.file,
+      );
+      const owner = cls.file;
+      for (const depParam of init?.params ?? []) {
+        if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
+        const nested = injectionKind(depParam);
+        if (nested?.kind === "Depends") {
+          const nestedArg = positionalArguments(nested.call)[0];
+          if (nestedArg?.type === "identifier") {
+            expandDependency(nestedArg.text, owner, seen, depth + 1);
+          }
+          continue;
+        }
+        expandedParams.push({ param: depParam, ownerFile: owner });
+      }
+      return;
+    }
+    const depFn =
+      analysis.functions.find(
+        (candidate) => candidate.name === depName && candidate.file === ownerFile,
+      ) ?? analysis.functions.find((candidate) => candidate.name === depName);
+    if (depFn) {
+      for (const depParam of depFn.params) {
+        if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
+        const nested = injectionKind(depParam);
+        if (nested?.kind === "Depends") {
+          const nestedArg = positionalArguments(nested.call)[0];
+          if (nestedArg?.type === "identifier") {
+            expandDependency(nestedArg.text, depFn.file, seen, depth + 1);
+          }
+          continue;
+        }
+        expandedParams.push({ param: depParam, ownerFile: depFn.file });
+      }
+    }
+  };
+
   for (const param of fn.params) {
     if (["self", "cls"].includes(param.name) || param.kind !== "plain") continue;
     if (isRequestParam(param)) continue;
@@ -564,53 +764,72 @@ function buildRoute(
 
     if (kind === "Depends") {
       if (!injection) continue;
-      const depArg = positionalArguments(injection.call)[0];
+      let depArg = positionalArguments(injection.call)[0];
+      // Annotated[Pagination, Depends()]: the dependency is the annotated type.
+      if (!depArg) {
+        const inner = annotatedInnerType(param);
+        if (inner?.type === "identifier") depArg = inner;
+      }
       if (depArg?.type === "identifier") {
         const binding = securityBindings.find(
           (candidate) => candidate.file === file && candidate.name === depArg.text,
         );
         if (binding) security.push({ [binding.schemeName]: [] });
+        expandDependency(depArg.text, file, new Set(), 0);
       }
       continue;
     }
+    expandedParams.push({ param, ownerFile: file });
+  }
+
+  for (const { param, ownerFile } of expandedParams) {
+    const injection = injectionKind(param);
+    const kind = injection?.kind;
 
     if (placeholderNames.has(param.name) || kind === "Path") {
       const placeholder = placeholders.find((p) => p.name === param.name);
-      const schema = param.annotation
+      const base = param.annotation
         ? annotationToSchema(param.annotation, modelIndex)
         : null;
+      const schema = parameterSchema(
+        base ?? PATH_CONVERTERS[placeholder?.converter ?? "str"] ?? { type: "string" },
+        param,
+        kind === "Path" ? injection!.call : null,
+      );
       parameters.push({
         name: param.name,
         in: "path",
         required: true,
-        schema: schema ?? PATH_CONVERTERS[placeholder?.converter ?? "str"] ?? { type: "string" },
-        confidence: schema ? "high" : "medium",
+        schema,
+        confidence: base ? "high" : "medium",
       });
-      if (!schema) gaps.add("path-param-untyped");
+      if (!base) gaps.add("path-param-untyped");
       continue;
     }
 
     if (kind === "Header") {
-      const schema = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
+      const base = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
+      const schema = parameterSchema(base ?? { type: "string" }, param, injection!.call);
       parameters.push({
         name: headerName(param.name, injection!.call),
         in: "header",
-        required: injectionRequired(injection!.call) && param.default?.type !== "none",
-        schema: schema ?? { type: "string" },
-        confidence: schema ? "high" : "medium",
+        required: bindingRequired(param, injection!.call),
+        schema,
+        confidence: base ? "high" : "medium",
       });
-      if (!schema) gaps.add("header-unknown");
+      if (!base) gaps.add("header-unknown");
       continue;
     }
 
     if (kind === "Cookie") {
-      const schema = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
+      const base = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
+      const schema = parameterSchema(base ?? { type: "string" }, param, injection!.call);
       parameters.push({
         name: injectionAlias(injection!.call) ?? param.name,
         in: "cookie",
-        required: injectionRequired(injection!.call) && param.default?.type !== "none",
-        schema: schema ?? { type: "string" },
-        confidence: schema ? "high" : "medium",
+        required: bindingRequired(param, injection!.call),
+        schema,
+        confidence: base ? "high" : "medium",
       });
       continue;
     }
@@ -619,7 +838,7 @@ function buildRoute(
       formFields.set(param.name, {
         node: param.annotation,
         kind: "file",
-        required: injectionRequired(injection!.call) && param.default?.type !== "none",
+        required: bindingRequired(param, injection!.call),
       });
       continue;
     }
@@ -628,14 +847,15 @@ function buildRoute(
       formFields.set(param.name, {
         node: param.annotation,
         kind: "form",
-        required: injectionRequired(injection!.call) && param.default?.type !== "none",
+        required: bindingRequired(param, injection!.call),
       });
       continue;
     }
 
     // Pydantic model parameter is the JSON body.
+    const innerType = (kind === "Body" ? annotatedInnerType(param) : null) ?? param.annotation;
     const annotationName =
-      param.annotation?.type === "identifier" ? param.annotation.text : null;
+      innerType?.type === "identifier" ? innerType.text : null;
     if (!kind && /\bUploadFile\b/.test(param.annotation?.text ?? "")) {
       formFields.set(param.name, {
         node: null,
@@ -650,39 +870,49 @@ function buildRoute(
       modelIndex.pydanticNames.has(annotationName)
     ) {
       bodyModelName = annotationName;
-      bodyModelNode = param.annotation;
+      bodyModelNode = innerType;
       continue;
     }
 
     if (kind === "Body") {
       if (
-        param.annotation?.type === "identifier" &&
-        (modelIndex.pydanticNames.has(param.annotation.text) ||
-          modelIndex.enumNames.has(param.annotation.text))
+        innerType?.type === "identifier" &&
+        (modelIndex.pydanticNames.has(innerType.text) ||
+          modelIndex.enumNames.has(innerType.text))
       ) {
-        bodyModelName = param.annotation.text;
-        bodyModelNode = param.annotation;
+        bodyModelName = innerType.text;
+        bodyModelNode = innerType;
       } else {
-        bodyScalarFields.set(param.name, param.annotation);
+        bodyScalarFields.set(param.name, innerType);
       }
       continue;
     }
 
     if (kind === "Query" || (!kind && param.annotation)) {
-      const schema = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
+      const base = param.annotation ? annotationToSchema(param.annotation, modelIndex) : null;
       const required =
         kind === "Query"
-          ? injectionRequired(injection!.call) && param.default?.type !== "none"
+          ? bindingRequired(param, injection!.call)
           : !kind && param.default === null && !isOptional(param.annotation);
+      const schema = parameterSchema(base ?? { type: "string" }, param, kind === "Query" ? injection!.call : null);
       parameters.push({
         name: injection && kind === "Query" ? injectionAlias(injection.call) ?? param.name : param.name,
         in: "query",
         required,
-        schema: schema ?? { type: "string" },
-        confidence: schema ? "high" : "medium",
+        schema,
+        confidence: base ? "high" : "medium",
       });
-      if (!schema) gaps.add("query-unknown");
+      if (!base) gaps.add("query-unknown");
     }
+  }
+
+  // Deduplicate parameters (dependency expansion can restate the same query
+  // or path binding); the first, usually most specific, declaration wins.
+  const parameterKeys = new Set<string>();
+  for (let i = parameters.length - 1; i >= 0; i--) {
+    const key = `${parameters[i]!.in}:${parameters[i]!.name}`;
+    if (parameterKeys.has(key)) parameters.splice(i, 1);
+    else parameterKeys.add(key);
   }
 
   // Request body.
@@ -745,7 +975,7 @@ function buildRoute(
 
   return {
     method: site.method,
-    path: site.rawPath,
+    path: normalizePath(site.rawPath),
     fullPath,
     operationId: operationId(site.method, fullPath),
     origin,
@@ -778,6 +1008,83 @@ function boundedSource(node: TsNode): string {
   return text.length > 8192 ? `${text.slice(0, 8192)}\n# ... truncated` : text;
 }
 
+const STRING_SUFFIX_PROPERTIES = new Set([
+  "filename", "name", "url", "uri", "path", "key", "token", "content_type",
+  "contentType", "caption", "title", "idempotency_key",
+]);
+const INTEGER_SUFFIX_PROPERTIES = new Set(["size", "count", "total", "length"]);
+
+/** Infer the schema of a dict/list value expression returned by a handler. */
+function responseValueSchema(
+  node: TsNode,
+  fn: PyFunction,
+  modelIndex: ModelIndex,
+  depth = 0,
+): JsonSchemaLocal | null {
+  if (!node || depth > 6) return {};
+  const literal = literalToSchema(node, depth + 1);
+  // An empty {} carries no evidence; fall through to identifier/attribute
+  // inference instead of accepting it as a concrete schema.
+  if (literal && Object.keys(literal).length > 0 && !isLooseLiteralSchema(literal)) {
+    return literal;
+  }
+
+  if (node.type === "identifier") {
+    const param = fn.params.find((candidate) => candidate.name === node.text);
+    if (param?.annotation) {
+      return annotationToSchema(param.annotation, modelIndex) ?? {};
+    }
+    return {};
+  }
+
+  if (node.type === "attribute") {
+    const prop = node.namedChildren[1]?.text ?? "";
+    if (STRING_SUFFIX_PROPERTIES.has(prop)) return { type: "string" };
+    if (INTEGER_SUFFIX_PROPERTIES.has(prop)) return { type: "integer" };
+    return {};
+  }
+
+  if (node.type === "call") {
+    const name = callName(node.namedChildren[0] ?? null);
+    const short = name?.split(".").pop();
+    if (short && (modelIndex.pydanticNames.has(short) || modelIndex.enumNames.has(short))) {
+      ensureComponent(short, modelIndex);
+      return { $ref: `#/components/schemas/${short}` };
+    }
+    return {};
+  }
+
+  if (node.type === "dictionary") {
+    const properties: Record<string, JsonSchemaLocal> = {};
+    for (const pair of childrenOfType(node, "pair")) {
+      const [key, value] = pair.namedChildren;
+      const keyText = key ? literalString(key) : null;
+      if (!keyText || !value) continue;
+      properties[keyText] = responseValueSchema(value, fn, modelIndex, depth + 1) ?? {};
+    }
+    return { type: "object", properties };
+  }
+
+  if (node.type === "list") {
+    const first = node.namedChildren[0];
+    return {
+      type: "array",
+      items: first ? responseValueSchema(first, fn, modelIndex, depth + 1) ?? {} : {},
+    };
+  }
+
+  return literal ?? {};
+}
+
+/** Dict/list literal response, enriched with handler parameter evidence. */
+function responseLiteralSchema(
+  node: TsNode,
+  fn: PyFunction,
+  modelIndex: ModelIndex,
+): JsonSchemaLocal {
+  return responseValueSchema(node, fn, modelIndex) ?? {};
+}
+
 function buildResponses(
   site: RouteSite,
   modelIndex: ModelIndex,
@@ -789,26 +1096,40 @@ function buildResponses(
   const statusNode = keywordArgument(decoratorCall, "status_code");
   const successStatus = statusNode ? String(literalInteger(statusNode) ?? 200) : "200";
 
+  // 204 No Content: explicitly empty success response.
+  if (successStatus === "204") {
+    responses.push({
+      statusCode: "204",
+      description: "No Content",
+      confidence: "high",
+      content: [],
+    });
+  }
+
   // SSE first: streaming responses never carry a JSON body schema.
   if (detectSse(fn)) {
-    responses.push({
-      statusCode: successStatus === "200" ? "200" : successStatus,
-      description: "Server-Sent Events stream",
-      confidence: "medium",
-      content: [{ mediaType: "text/event-stream", itemSchema: {}, confidence: "medium" }],
-    });
+    if (!responses.some((r) => r.statusCode === successStatus)) {
+      responses.push({
+        statusCode: successStatus,
+        description: "Server-Sent Events stream",
+        confidence: "medium",
+        content: [{ mediaType: "text/event-stream", itemSchema: {}, confidence: "medium" }],
+      });
+    }
     gaps.add("sse-events-unknown");
     return responses;
   }
 
   const responseModelNode = keywordArgument(decoratorCall, "response_model");
-  let successSchema = responseModelNode
-    ? annotationToSchema(responseModelNode, modelIndex)
-    : fn.returnType
-      ? annotationToSchema(fn.returnType, modelIndex)
-      : null;
+  let successSchema = successStatus === "204"
+    ? null
+    : responseModelNode
+      ? annotationToSchema(responseModelNode, modelIndex)
+      : fn.returnType
+        ? annotationToSchema(fn.returnType, modelIndex)
+        : null;
 
-  if (!successSchema && fn.body) {
+  if (!successSchema && fn.body && successStatus !== "204") {
     const returned = findFirst(fn.body, (node) => node.type === "return_statement");
     const value = returned?.namedChildren[0];
     if (value) {
@@ -820,7 +1141,7 @@ function buildResponses(
         }
       }
       if (!successSchema && (value.type === "dictionary" || value.type === "list")) {
-        const literal = literalToSchema(value);
+        const literal = responseLiteralSchema(value, fn, modelIndex);
         if (literal) {
           successSchema = literal;
           if (isLooseLiteralSchema(literal)) gaps.add("response-schema-unknown");
@@ -836,7 +1157,7 @@ function buildResponses(
       confidence: "high",
       content: [{ mediaType: "application/json", schema: successSchema }],
     });
-  } else {
+  } else if (successStatus !== "204") {
     gaps.add("response-unknown");
   }
 

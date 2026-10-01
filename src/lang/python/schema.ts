@@ -154,6 +154,26 @@ function isNoneNode(node: TsNode | null | undefined): boolean {
   return !!node && node.type === "none";
 }
 
+function isBareRef(schema: JsonSchema | null | undefined): boolean {
+  return !!schema && typeof schema.$ref === "string" && Object.keys(schema).length === 1;
+}
+
+// Nullable shorthand for a single non-null variant. When the variant is a type
+// variable bound through generic specialization (Optional[T] with T a model),
+// emit the bare component $ref: the substitution fixes the contract and
+// sibling keywords are not portable on a $ref. Direct optional model fields
+// (Optional[ConcreteModel]) keep the established `{ $ref, nullable }` shorthand.
+function nullableSchema(
+  schema: JsonSchema,
+  origin: TsNode | null,
+  subst: Map<string, TsNode>,
+): JsonSchema {
+  if (isBareRef(schema) && origin?.type === "identifier" && subst.has(origin.text)) {
+    return schema;
+  }
+  return { ...schema, nullable: true };
+}
+
 export function annotationToSchema(
   node: TsNode | null,
   index: ModelIndex,
@@ -177,7 +197,7 @@ export function annotationToSchema(
       .filter((schema): schema is JsonSchema => schema !== null);
     if (!schemas.length) return nullable ? { type: "null" } : null;
     if (schemas.length === 1) {
-      return nullable ? { ...schemas[0], nullable: true } : schemas[0];
+      return nullable ? nullableSchema(schemas[0]!, variants[0] ?? null, subst) : schemas[0];
     }
     const union: JsonSchema = { anyOf: schemas };
     return nullable ? { ...union, nullable: true } : union;
@@ -206,7 +226,7 @@ export function annotationToSchema(
     }
     if (name === "Optional" && generic.args[0]) {
       const inner = annotationToSchema(generic.args[0], index, depth + 1, subst);
-      return inner ? { ...inner, nullable: true } : null;
+      return inner ? nullableSchema(inner, generic.args[0] ?? null, subst) : null;
     }
     if (name === "Union") {
       const variants = generic.args.filter((arg) => !isNoneNode(arg));
@@ -214,7 +234,7 @@ export function annotationToSchema(
       const schemas = variants
         .map((arg) => annotationToSchema(arg, index, depth + 1, subst))
         .filter((schema): schema is JsonSchema => schema !== null);
-      if (schemas.length === 1) return nullable ? { ...schemas[0], nullable: true } : schemas[0];
+      if (schemas.length === 1) return nullable ? nullableSchema(schemas[0]!, variants[0] ?? null, subst) : schemas[0];
       if (schemas.length > 1) {
         const union: JsonSchema = { anyOf: schemas };
         return nullable ? { ...union, nullable: true } : union;
