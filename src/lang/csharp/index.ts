@@ -16,6 +16,8 @@ export interface CsField {
   name: string;
   typeNode: TsNode;
   required: boolean;
+  /** Explicit JSON name from [JsonPropertyName] / [JsonProperty]. */
+  jsonName?: string;
 }
 
 export type CsTypeKind = "class" | "record" | "enum";
@@ -25,6 +27,10 @@ export interface CsTypeDef {
   name: string;
   fields: CsField[];
   enumValues: string[];
+  /** Declared generic parameters, e.g. ["T"] for Result<T>. */
+  typeParameters: string[];
+  /** base_list node (base class and interfaces), if declared. */
+  baseList: TsNode | null;
 }
 
 export interface CsFile {
@@ -51,6 +57,24 @@ function hasRequiredAttribute(node: TsNode): boolean {
   return /Required|JsonRequired/.test(list.text);
 }
 
+/** Explicit JSON property name from [JsonPropertyName("x")] or [JsonProperty("x")]. */
+function jsonPropertyName(node: TsNode): string | undefined {
+  for (const list of childrenOfType(node, "attribute_list")) {
+    for (const attr of childrenOfType(list, "attribute")) {
+      const id = attr.namedChildren.find((c) => c.type === "identifier");
+      if (!id || !/^JsonProperty(Name)?$/.test(id.text)) continue;
+      const args = attr.namedChildren.find((c) => c.type === "attribute_argument_list");
+      const literal = args ? findFirst(args, (c) => c.type === "string_literal") : null;
+      if (literal) {
+        const fragment = literal.namedChildren.find((c) => c.type === "string_fragment");
+        if (fragment?.text) return fragment.text;
+        return literal.text.replace(/^["']|["']$/g, "");
+      }
+    }
+  }
+  return undefined;
+}
+
 function isOptionalMember(typeNode: TsNode, node: TsNode): boolean {
   if (typeNode.type === "nullable_type") return true;
   if (findFirst(node, (c) => c.type === "equals_value_clause")) return true;
@@ -69,7 +93,7 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
           (m) => m.namedChildren.find((c) => c.type === "identifier")?.text ?? "",
         ).filter(Boolean)
       : [];
-    return { kind: "enum", name, fields: [], enumValues };
+    return { kind: "enum", name, fields: [], enumValues, typeParameters: [], baseList: null };
   }
 
   const fields: CsField[] = [];
@@ -93,6 +117,7 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
           name: lowerFirst(fieldName.text),
           typeNode,
           required: hasRequiredAttribute(param) || !isOptionalMember(typeNode, param),
+          jsonName: jsonPropertyName(param),
         });
       }
     }
@@ -103,7 +128,26 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
     if (body) {
       for (const prop of childrenOfType(body, "property_declaration")) {
         if (hasStaticModifier(prop)) continue;
-        const fieldName = prop.namedChildren.find((c) => c.type === "identifier");
+        // The property name is the last identifier before the accessor list,
+        // initializer or expression body. Type identifiers (e.g. Guid Id) come
+        // earlier; accessor/initializer expressions must not be mistaken for
+        // the name.
+        const terminator = prop.namedChildren.find(
+          (c) =>
+            c.type === "accessor_list" ||
+            c.type === "equals_value_clause" ||
+            c.type === "expression_body",
+        );
+        const beforeTerminator = (c: typeof terminator) =>
+          !terminator ||
+          !c ||
+          c.startPosition.row < terminator.startPosition.row ||
+          (c.startPosition.row === terminator.startPosition.row &&
+            c.startPosition.column < terminator.startPosition.column);
+        const nameCandidates = prop.namedChildren.filter(
+          (c) => c.type === "identifier" && beforeTerminator(c),
+        );
+        const fieldName = nameCandidates.pop();
         const typeNode = prop.namedChildren.find(
           (c) =>
             c.type === "predefined_type" ||
@@ -115,9 +159,10 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
         );
         if (!fieldName || !typeNode) continue;
         fields.push({
-          name: fieldName.text,
+          name: lowerFirst(fieldName.text),
           typeNode,
           required: hasRequiredAttribute(prop) || !isOptionalMember(typeNode, prop),
+          jsonName: jsonPropertyName(prop),
         });
       }
     }
@@ -128,7 +173,17 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
     name,
     fields,
     enumValues: [],
+    typeParameters: collectTypeParameters(node),
+    baseList: node.namedChildren.find((c) => c.type === "base_list") ?? null,
   };
+}
+
+function collectTypeParameters(node: TsNode): string[] {
+  const list = node.namedChildren.find((c) => c.type === "type_parameter_list");
+  if (!list) return [];
+  return childrenOfType(list, "type_parameter")
+    .map((p) => p.namedChildren.find((c) => c.type === "identifier")?.text)
+    .filter((x): x is string => Boolean(x));
 }
 
 function lowerFirst(value: string): string {
