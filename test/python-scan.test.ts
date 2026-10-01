@@ -126,16 +126,17 @@ describe("Flask (Python) golden project", () => {
     const paths = Object.keys(doc.paths).sort();
     expect(paths).toEqual(
       [
-        "/api/users",
-        "/api/users/{uid}",
+        "/api",
+        "/api/{uid}",
         "/health",
         "/stream",
         "/upload",
       ].sort(),
     );
 
-    // Registration prefix precedes blueprint prefix.
-    const detail = doc.paths["/api/users/{uid}"].get;
+    // A url_prefix passed at registration overrides the blueprint's own
+    // url_prefix (verified against real Flask routing).
+    const detail = doc.paths["/api/{uid}"].get;
     const uid = detail.parameters.find((p: any) => p.name === "uid");
     expect(uid.in).toBe("path");
     expect(uid.required).toBe(true);
@@ -150,7 +151,7 @@ describe("Flask (Python) golden project", () => {
     });
 
     // JSON body gap plus 201 tuple and abort(400).
-    const create = doc.paths["/api/users"].post;
+    const create = doc.paths["/api"].post;
     expect(create.requestBody.content["application/json"].schema).toEqual({});
     expect(create.responses["201"].content["application/json"].schema.properties.created).toEqual({
       type: "boolean",

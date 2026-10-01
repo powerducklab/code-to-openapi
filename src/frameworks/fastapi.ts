@@ -647,7 +647,7 @@ function buildRoute(
     if (
       !kind &&
       annotationName &&
-      (modelIndex.pydanticNames.has(annotationName) || modelIndex.enumNames.has(annotationName))
+      modelIndex.pydanticNames.has(annotationName)
     ) {
       bodyModelName = annotationName;
       bodyModelNode = param.annotation;
@@ -840,6 +840,37 @@ function buildResponses(
     gaps.add("response-unknown");
   }
 
+  // raise HTTPException(status_code=404, detail="...") proves error responses.
+  for (const raiseNode of findAll(fn.node, (n) => n.type === "raise_statement")) {
+    const excCall = findFirst(raiseNode, (n) => n.type === "call");
+    if (!excCall) continue;
+    const excName = callName(excCall.namedChildren[0] ?? null);
+    if (excName !== "HTTPException") continue;
+    const statusKw = keywordArgument(excCall, "status_code");
+    const statusNode = statusKw ?? positionalArguments(excCall)[0] ?? null;
+    const status = statusNode ? literalInteger(statusNode) : null;
+    if (!status || status < 400) continue;
+    const statusKey = String(status);
+    if (responses.some((r) => r.statusCode === statusKey)) continue;
+    const detailNode = keywordArgument(excCall, "detail");
+    const detailSchema = detailNode ? literalErrorSchema(detailNode) : null;
+    responses.push({
+      statusCode: statusKey,
+      description: "",
+      confidence: "high",
+      content: [
+        {
+          mediaType: "application/json",
+          schema: detailSchema ?? {
+            type: "object",
+            properties: { detail: {} },
+            required: ["detail"],
+          },
+        },
+      ],
+    });
+  }
+
   // Explicit responses={404: {"model": Error}} mapping.
   const responsesKw = keywordArgument(decoratorCall, "responses");
   if (responsesKw?.type === "dictionary") {
@@ -855,7 +886,7 @@ function buildResponses(
         : null;
       const modelNode = modelPair?.namedChildren[1] ?? null;
       const schema = modelNode ? annotationToSchema(modelNode, modelIndex) : null;
-      if (schema) {
+      if (schema && !responses.some((r) => r.statusCode === status)) {
         responses.push({
           statusCode: status,
           description: "",
@@ -867,4 +898,22 @@ function buildResponses(
   }
 
   return responses;
+}
+
+function literalErrorSchema(detailNode: TsNode): Record<string, unknown> | null {
+  if (detailNode.type === "string" || detailNode.type === "string_start") {
+    return {
+      type: "object",
+      properties: { detail: { type: "string" } },
+      required: ["detail"],
+    };
+  }
+  if (detailNode.type === "integer") {
+    return {
+      type: "object",
+      properties: { detail: { type: "integer" } },
+      required: ["detail"],
+    };
+  }
+  return null;
 }

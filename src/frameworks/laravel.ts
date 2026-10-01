@@ -25,7 +25,7 @@ import type {
   ScanContext,
 } from "../core/types.js";
 import type { PhpAnalysis } from "../lang/php/index.js";
-import { phpStringText } from "../lang/php/index.js";
+import { phpStringText, parseRulesMethod } from "../lang/php/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
@@ -97,7 +97,14 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
         const name = routeCallName(call)!;
         const args = callArguments(call);
         if (RESOURCE_VERBS.has(name)) {
-          const resource = parseResourceCall(args, name === "resource", analysis, model, rel);
+          const resource = parseResourceCall(
+            args,
+            name === "resource",
+            analysis,
+            model,
+            rel,
+            joinRoute(groupPrefixChain(call), ""),
+          );
           candidates.push(...resource);
           continue;
         }
@@ -421,7 +428,34 @@ function collectParameters(
 
     // Generic Illuminate Request: inspect ->query()/->input()/->all().
     if (shortType === "Request") {
-      collectRequestCalls(handler, variable.text, verb, addParam, gaps);
+      const { bodyKeys, seesAll, inlineRules } = collectRequestCalls(
+        handler,
+        variable.text,
+        verb,
+        addParam,
+        gaps,
+      );
+      const writesBody = ["post", "put", "patch"].includes(verb);
+      if (writesBody && inlineRules && !requestBody) {
+        const schema = formRulesToSchema(inlineRules, model);
+        if (Object.keys(schema.properties ?? {}).length) {
+          requestBody = {
+            required: true,
+            content: [{ mediaType: "application/json", schema }],
+            confidence: "high",
+          };
+        }
+      } else if (writesBody && bodyKeys.length && !requestBody) {
+        const properties: Record<string, JsonSchema> = {};
+        for (const key of bodyKeys) properties[key.name] = key.schema;
+        requestBody = {
+          required: true,
+          content: [{ mediaType: "application/json", schema: { type: "object", properties } }],
+          confidence: "medium",
+        };
+      } else if (writesBody && seesAll && !requestBody) {
+        gaps.push("body-schema-unknown");
+      }
       continue;
     }
 
@@ -455,32 +489,47 @@ function collectRequestCalls(
   variableText: string,
   verb: string,
   addParam: (
-    location: "query" | "header" | "path",
+    location: "query" | "header" | "path" | "cookie",
     name: string,
     schema: JsonSchema | undefined,
     confidence: Confidence,
     required: boolean,
   ) => void,
   gaps: GapCode[],
-): void {
+): { bodyKeys: { name: string; schema: JsonSchema }[]; seesAll: boolean; inlineRules: Parameters<typeof formRulesToSchema>[0] | null } {
   let seesAll = false;
+  const bodyKeys: { name: string; schema: JsonSchema }[] = [];
+  let inlineRules: Parameters<typeof formRulesToSchema>[0] | null = null;
+  const writesBody = ["post", "put", "patch"].includes(verb);
   for (const call of findAll(handler, (n) => n.type === "member_call_expression")) {
     const receiver = call.namedChildren.find((c) => c.type === "variable_name");
     if (receiver?.text !== variableText) continue;
     const method = call.namedChildren.find((c) => c.type === "name")?.text;
     const args = call.namedChildren.find((c) => c.type === "arguments");
-    const firstArg = args ? childrenOfType(args, "argument")[0] : null;
+    const firstArg = args ? childrenOfType(args, "argument")[0] ?? null : null;
     const key = firstArg ? phpStringText(firstArg.namedChildren.find((c) => c.type === "string")) : null;
+    if (writesBody && method === "validate") {
+      const rules = parseRulesMethod(call);
+      if (rules.length) inlineRules = rules;
+      continue;
+    }
     if ((method === "query" || method === "boolean") && key) {
       addParam("query", key, method === "boolean" ? { type: "boolean" } : { type: "string" }, "high", false);
+    } else if (method === "header" && key) {
+      addParam("header", key, { type: "string" }, "high", false);
+    } else if (method === "cookie" && key) {
+      addParam("cookie", key, { type: "string" }, "high", false);
     } else if (method === "input" && key) {
-      const location = ["post", "put", "patch"].includes(verb) ? "query" : "query";
-      addParam(location, key, { type: "string" }, "medium", false);
+      if (writesBody) {
+        bodyKeys.push({ name: key, schema: { type: "string" } });
+      } else {
+        addParam("query", key, { type: "string" }, "medium", false);
+      }
     } else if (method === "all" || method === "validated" || method === "only") {
       seesAll = true;
     }
   }
-  if (seesAll && ["post", "put", "patch"].includes(verb)) gaps.push("body-schema-unknown");
+  return { bodyKeys, seesAll, inlineRules };
 }
 
 function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
@@ -492,12 +541,24 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
       (c) =>
         c.type === "member_call_expression" ||
         c.type === "scoped_call_expression" ||
+        c.type === "function_call_expression" ||
         c.type === "object_creation_expression" ||
         c.type === "variable_name" ||
         c.type === "array_creation_expression",
     );
     if (!expression) continue;
-    const response = interpretResponse(expression, model, gaps);
+    let response = interpretResponse(expression, model, gaps, handler);
+    if (!response && expression.type === "variable_name") {
+      const schema = inferVariableModel(handler, expression, model);
+      if (schema) {
+        response = {
+          statusCode: "200",
+          description: "",
+          confidence: "medium",
+          content: [{ mediaType: "application/json", schema }],
+        };
+      }
+    }
     if (response) responses.push(response);
   }
 
@@ -525,6 +586,7 @@ function interpretResponse(
   expression: TsNode,
   model: PhpModelIndex,
   gaps: GapCode[],
+  handler: TsNode,
 ): DiscoveredResponse | null {
   // response()->json($data, 201)
   if (expression.type === "member_call_expression") {
@@ -535,6 +597,35 @@ function interpretResponse(
     if (method === "noContent" || method === "noContent") {
       const status = integerText(argNodes[0]) ?? "204";
       return { statusCode: status, description: "", confidence: "high" };
+    }
+
+    if (method === "redirect" || method === "redirectRoute" || method === "redirectGuest") {
+      const status = integerText(argNodes[1]) ?? "302";
+      return { statusCode: status, description: "", confidence: "high" };
+    }
+
+    if (method === "download" || method === "streamDownload") {
+      const status = integerText(argNodes[2]) ?? "200";
+      return {
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [
+          { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+        ],
+      };
+    }
+
+    if (method === "download") {
+      const status = integerText(argNodes[2]) ?? "200";
+      return {
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [
+          { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+        ],
+      };
     }
 
     if (method === "stream" || method === "streamDownload") {
@@ -556,13 +647,23 @@ function interpretResponse(
           content: [{ mediaType: "text/event-stream" }],
         };
       }
+      if (method === "streamDownload") {
+        return {
+          statusCode: "200",
+          description: "",
+          confidence: "medium",
+          content: [
+            { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+          ],
+        };
+      }
       return { statusCode: status, description: "", confidence: "low" };
     }
 
     if (method === "json") {
       const status = integerText(argNodes[1]) ?? "200";
       const payload = argNodes[0];
-      const schema = payload ? inferValueSchema(payload, model) : undefined;
+      const schema = payload ? inferValueSchema(payload, model, handler) : undefined;
       if (!schema || !Object.keys(schema).length) {
         gaps.push("response-schema-unknown");
         return {
@@ -591,6 +692,17 @@ function interpretResponse(
           content: [{ mediaType: "application/json", schema }],
         };
       }
+    }
+  }
+
+  // Global helper redirect('/path', 301).
+  if (expression.type === "function_call_expression") {
+    const fnName = expression.namedChildren.find((c) => c.type === "name")?.text;
+    if (fnName === "redirect") {
+      const args = expression.namedChildren.find((c) => c.type === "arguments");
+      const argNodes = args ? childrenOfType(args, "argument") : [];
+      const status = integerText(argNodes[1]) ?? "302";
+      return { statusCode: status, description: "", confidence: "high" };
     }
   }
 
@@ -626,7 +738,42 @@ function interpretResponse(
   return null;
 }
 
-function inferValueSchema(node: TsNode, model: PhpModelIndex): JsonSchema | undefined {
+function inferVariableModel(
+  handler: TsNode,
+  variable: TsNode,
+  model: PhpModelIndex,
+): JsonSchema | undefined {
+  const varText = variable.text;
+  // $x = Model::findOrFail(...) / Model::where(...)->first() / new Model().
+  for (const assignment of findAll(handler, (n) => n.type === "assignment_expression")) {
+    const lhs = assignment.namedChildren.find((c) => c.type === "variable_name");
+    if (lhs?.text !== varText) continue;
+    const scoped = findFirst(assignment, (c) => c.type === "scoped_call_expression");
+    if (scoped) {
+      const schema = inferStaticModel(scoped, model);
+      if (schema) return schema;
+    }
+    const creation = findFirst(assignment, (c) => c.type === "object_creation_expression");
+    if (creation) {
+      const name = creation.namedChildren.find((c) => c.type === "name")?.text;
+      if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? undefined;
+    }
+  }
+  // Typed model parameter, e.g. function update(Order $order).
+  for (const param of formalParameters(handler)) {
+    const paramVar = param.namedChildren.find((c) => c.type === "variable_name");
+    if (paramVar?.text !== varText) continue;
+    const typeName = param.namedChildren
+      .find((c) => c.type === "named_type")
+      ?.namedChildren.find((c) => c.type === "name")?.text;
+    if (typeName && model.analysis.classes.has(typeName)) {
+      return ensurePhpComponent(typeName, model) ?? undefined;
+    }
+  }
+  return undefined;
+}
+
+function inferValueSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode): JsonSchema | undefined {
   const inner = node.namedChildren[0] ?? node;
 
   if (inner.type === "scoped_call_expression") {
@@ -647,14 +794,22 @@ function inferValueSchema(node: TsNode, model: PhpModelIndex): JsonSchema | unde
     // object and let AI gap resolution fill properties.
     return { type: "object" };
   }
-  if (inner.type === "variable_name") return undefined;
+  if (inner.type === "variable_name" && handler) {
+    return inferVariableModel(handler, inner, model);
+  }
   return undefined;
 }
 
 function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | undefined {
   const names = childrenOfType(call, "name");
-  const modelName = names[0]?.text;
+  const qualified = call.namedChildren.find((c) => c.type === "qualified_name");
+  // Qualified calls (\App\Models\Order::all) carry a qualified_name scope.
   const method = names[names.length - 1]?.text.toLowerCase();
+  const modelName = qualified
+    ? qualified.text.split("\\").filter(Boolean).pop()
+    : names.length >= 2
+      ? names[names.length - 2]?.text
+      : undefined;
   if (!modelName || !model.analysis.classes.has(modelName)) return undefined;
   const ref = ensurePhpComponent(modelName, model);
   if (!ref) return undefined;
@@ -666,7 +821,11 @@ function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | unde
 function inferChainedModel(call: TsNode, model: PhpModelIndex): JsonSchema | undefined {
   const scoped = findFirst(call, (n) => n.type === "scoped_call_expression");
   if (!scoped) return undefined;
-  const modelName = childrenOfType(scoped, "name")[0]?.text;
+  const qualified = scoped.namedChildren.find((c) => c.type === "qualified_name");
+  const names = childrenOfType(scoped, "name");
+  const modelName = qualified
+    ? qualified.text.split("\\").filter(Boolean).pop()
+    : names[0]?.text;
   if (!modelName || !model.analysis.classes.has(modelName)) return undefined;
   const ref = ensurePhpComponent(modelName, model);
   if (!ref) return undefined;
@@ -686,10 +845,11 @@ function parseResourceCall(
   analysis: PhpAnalysis,
   model: PhpModelIndex,
   rel: string,
+  groupPrefix: string,
 ): RouteCandidate[] {
   const pathArg = args[0]?.namedChildren.find((c) => c.type === "string");
   const handlerArg = args[1];
-  const basePath = normalizeRoute(phpStringText(pathArg) ?? "");
+  const basePath = joinRoute(groupPrefix, normalizeRoute(phpStringText(pathArg) ?? ""));
   const handler = resolveHandler(handlerArg, analysis);
   const controller = handler?.controller ?? resourceControllerName(handlerArg);
   const binding = singular(basePath.split("/").pop() ?? "resource");
@@ -714,9 +874,18 @@ function parseResourceCall(
     const cls = controller ? analysis.classes.get(controller) : null;
     const methodNode = cls?.methods.get(method) ?? null;
     const gaps: GapCode[] = [];
-    const parameters: RouteParameter[] = ["show", "update", "destroy"].includes(method)
-      ? [{ name: binding, in: "path", required: true, schema: { type: "string" }, confidence: "medium" }]
-      : [];
+    const declaredPathParams = new Set(
+      [...path.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!),
+    );
+    const collected = methodNode
+      ? collectParameters(methodNode, analysis, model, verb, declaredPathParams)
+      : { parameters: [], requestBody: undefined, gaps: [] as GapCode[] };
+    const parameters = collected.parameters;
+    if (methodNode && ["show", "update", "destroy"].includes(method) &&
+        !parameters.some((p) => p.in === "path" && p.name === binding)) {
+      parameters.push({ name: binding, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
+    }
+    gaps.push(...collected.gaps);
     const responses: DiscoveredResponse[] = methodNode
       ? collectResponses(methodNode, model, gaps)
       : [{ statusCode: "200", description: "", confidence: "low" }];
@@ -729,11 +898,18 @@ function parseResourceCall(
       ...(controller ? { operationId: `${controller}.${method}` } : {}),
       origin: { file: rel, line: 0 },
       parameters,
+      ...(collected.requestBody ? { requestBody: collected.requestBody } : {}),
       responses,
       tags: [controller ? controller.replace(/Controller$/, "").replace(/^./, (c) => c.toLowerCase()) : "resource"],
+      ...(responses.some((r) =>
+        r.content?.some((media) => media.mediaType === "text/event-stream"),
+      )
+        ? { extensions: { "x-protocol": "sse" } }
+        : {}),
       confidence: methodNode ? ("medium" as Confidence) : ("low" as Confidence),
       gaps,
       components: [],
+      handlerSource: methodNode?.text.slice(0, 8192),
     } satisfies RouteCandidate;
   });
 }
@@ -796,8 +972,8 @@ function detectServers(ctx: ScanContext): DiscoveredServer[] {
       const match = /^APP_URL=(.+)$/m.exec(content);
       if (match) {
         const url = match[1]!.trim().replace(/^["']|["']$/g, "");
-        if (url && !/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(url)) {
-          urls.add(url);
+        if (url && /^https?:\/\/\S+$/.test(url)) {
+          urls.add(url.replace(/\/+$/, ""));
         }
       }
     } catch {

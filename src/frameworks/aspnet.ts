@@ -61,6 +61,8 @@ const MINIMAL_VERB_METHODS = new Map<string, string>([
   ["MapMethods", "methods"],
 ]);
 
+const HTTP_VERB_SET = new Set(["get", "post", "put", "delete", "patch", "head", "options"]);
+
 const INJECTED_PARAMETER_TYPES = new Set([
   "CancellationToken",
   "HttpContext",
@@ -297,7 +299,14 @@ function parseProducesAttribute(
     const typeOf = findFirst(arg, (n) => n.type === "type_of_expression");
     if (typeOf) {
       const typeNode = typeOf.namedChildren[0];
-      if (typeNode) schema = csTypeToSchema(typeNode, model);
+      if (typeNode) {
+        const typeText = typeNode.text;
+        if (/File(Result|StreamResult|ContentResult)?$|^byte\[\]$/.test(typeText) && /File|byte/.test(typeText)) {
+          schema = { type: "string", format: "binary" };
+        } else {
+          schema = csTypeToSchema(typeNode, model);
+        }
+      }
       continue;
     }
     const numeric = /\b(2\d{2}|4\d{2}|5\d{2})\b/.exec(arg.text);
@@ -314,6 +323,16 @@ function parseProducesAttribute(
     if (stringLit && /\//.test(stringLit.text)) {
       mediaType = stringLit.text.replace(/^[@$]?"/, "").replace(/"$/, "");
     }
+  }
+
+  // Non-JSON media (binary downloads, PDFs, images) always carries a binary
+  // schema even when the declared CLR type cannot be resolved.
+  if (
+    (!schema || !Object.keys(schema).length) &&
+    mediaType !== "application/json" &&
+    mediaType !== "text/event-stream"
+  ) {
+    schema = { type: "string", format: "binary" };
   }
 
   const response: DiscoveredResponse = {
@@ -337,7 +356,31 @@ function mergeResponses(responses: DiscoveredResponse[]): DiscoveredResponse[] {
       byStatus.set(response.statusCode, response);
       continue;
     }
-    existing.content = existing.content ?? response.content;
+    const existingSse = existing.content?.some((m) => m.mediaType === "text/event-stream");
+    const incomingSse = response.content?.some((m) => m.mediaType === "text/event-stream");
+    if (existingSse || incomingSse) {
+      // Pair [Produces("text/event-stream")] with [ProducesResponseType(typeof(T))]:
+      // the typed schema describes the SSE event payload.
+      const sseBase = existingSse ? existing : response;
+      const typed = existingSse ? response : existing;
+      const typedSchema = typed.content?.find((m) => m.schema)?.schema;
+      sseBase.content = [
+        {
+          mediaType: "text/event-stream",
+          ...(typedSchema ? { itemSchema: typedSchema } : {}),
+        },
+      ];
+      sseBase.confidence = typedSchema ? "high" : "medium";
+      byStatus.set(response.statusCode, sseBase);
+      continue;
+    }
+    if (!existing.content && response.content) {
+      existing.content = response.content;
+    } else if (existing.content && response.content) {
+      const existingHasSchema = existing.content.some((m) => m.schema || m.itemSchema);
+      const incomingHasSchema = response.content.some((m) => m.schema || m.itemSchema);
+      if (incomingHasSchema && !existingHasSchema) existing.content = response.content;
+    }
     existing.confidence =
       existing.confidence === "high" || response.confidence === "high" ? "high" : "medium";
   }
@@ -367,15 +410,26 @@ function extractMinimalApis(
     if (!args) continue;
     const argumentNodes = childrenOfType(args, "argument");
     const routeArg = argumentNodes[0];
-    const handlerArg = argumentNodes[1];
     const routeText = routeTextFromArg(routeArg);
-    if (routeText === null || !handlerArg) continue;
+    if (routeText === null) continue;
 
-    let verb = MINIMAL_VERB_METHODS.get(methodName)!;
-    if (verb === "methods") {
-      const methodsLiteral = argumentNodes[1]?.text ?? "";
-      verb = /"POST"/i.test(methodsLiteral) ? "post" : "get";
+    let verbs: string[];
+    let handlerArg: TsNode | undefined;
+    if (methodName === "MapMethods") {
+      // MapMethods(route, new[] { "GET", "POST" }, handler)
+      const methods: string[] = [];
+      for (const lit of findAll(argumentNodes[1] ?? args, (n) => n.type === "string_literal")) {
+        const verb = lit.text.replace(/^[@$]?"/, "").replace(/"$/, "").toLowerCase();
+        if (HTTP_VERB_SET.has(verb)) methods.push(verb);
+      }
+      if (!methods.length) continue;
+      verbs = methods;
+      handlerArg = argumentNodes[2];
+    } else {
+      verbs = [MINIMAL_VERB_METHODS.get(methodName)!];
+      handlerArg = argumentNodes[1];
     }
+    if (!handlerArg) continue;
 
     const lambda = findFirst(handlerArg, (n) => n.type === "lambda_expression") ?? handlerArg;
     const paramsNode = lambda.namedChildren.find((c) => c.type === "parameter_list");
@@ -399,22 +453,24 @@ function extractMinimalApis(
       r.content?.some((media) => media.mediaType === "text/event-stream"),
     );
 
-    out.push({
-      method: verb,
-      path: fullPath,
-      fullPath,
-      ...(withName ? { operationId: withName } : {}),
-      origin,
-      parameters,
-      ...(requestBody ? { requestBody } : {}),
-      responses,
-      tags: [],
-      ...(isSse ? { extensions: { "x-protocol": "sse" } } : {}),
-      confidence: gaps.length ? "medium" : "high",
-      gaps,
-      components: [],
-      handlerSource: sliceNode(invocation),
-    });
+    for (const verb of verbs) {
+      out.push({
+        method: verb,
+        path: fullPath,
+        fullPath,
+        ...(withName ? { operationId: withName } : {}),
+        origin,
+        parameters,
+        ...(requestBody ? { requestBody } : {}),
+        responses,
+        tags: [],
+        ...(isSse ? { extensions: { "x-protocol": "sse" } } : {}),
+        confidence: gaps.length ? "medium" : "high",
+        gaps,
+        components: [],
+        handlerSource: sliceNode(invocation),
+      });
+    }
   }
 }
 
@@ -449,7 +505,12 @@ function inferMinimalResponses(
       name === "NoContent" ||
       name === "Json" ||
       name === "Accepted" ||
-      name === "Stream"
+      name === "Stream" ||
+      name === "Redirect" ||
+      name === "RedirectPermanent" ||
+      name === "File" ||
+      name === "Bytes" ||
+      name === "FileStream"
     );
   });
 
@@ -491,6 +552,37 @@ function inferMinimalResponses(
 
     if (name === "NoContent") {
       responses.push({ statusCode: "204", description: "", confidence: "high" });
+      continue;
+    }
+    if (name === "Redirect") {
+      responses.push({ statusCode: "302", description: "", confidence: "high" });
+      continue;
+    }
+    if (name === "RedirectPermanent") {
+      responses.push({ statusCode: "301", description: "", confidence: "high" });
+      continue;
+    }
+    if (name === "File" || name === "Bytes" || name === "FileStream") {
+      const args = callArgs ? childrenOfType(callArgs, "argument") : [];
+      // Results.File(bytes, contentType, fileName) / Results.Bytes(bytes, contentType):
+      // the content type is the first string argument containing a slash.
+      const contentTypeArg = args
+        .map((a) => findFirst(a, (n) => n.type === "string_literal"))
+        .find((n) => n && /\//.test(n.text));
+      const mediaType = contentTypeArg
+        ? contentTypeArg.text.replace(/^[@$]?"/, "").replace(/"$/, "")
+        : "application/octet-stream";
+      responses.push({
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [
+          {
+            mediaType: mediaType === "application/json" ? "application/octet-stream" : mediaType,
+            schema: { type: "string", format: "binary" },
+          },
+        ],
+      });
       continue;
     }
     if (name === "Created" || name === "CreatedAtRoute" || name === "CreatedAtAction" || name === "Accepted") {
@@ -547,6 +639,26 @@ function inferExpressionSchema(
     );
     const schema = typeNode ? csTypeToSchema(typeNode, model) : undefined;
     if (schema && Object.keys(schema).length) return schema;
+  }
+  // Anonymous objects: new { status = "ok", count = 3 } -> object schema with
+  // literal-typed properties.
+  const anonymous = findFirst(
+    node,
+    (n) => n.type === "anonymous_object_creation_expression",
+  );
+  if (anonymous) {
+    const properties: Record<string, JsonSchema> = {};
+    let currentName: string | null = null;
+    for (const child of anonymous.namedChildren) {
+      if (child.type === "name_equals") {
+        currentName = child.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
+      } else if (currentName) {
+        const literal = literalValueSchema(child);
+        if (literal) properties[currentName] = literal;
+        currentName = null;
+      }
+    }
+    if (Object.keys(properties).length) return { type: "object", properties };
   }
   // Bare identifier referencing a handler parameter, e.g. Results.Created(uri, product).
   const identifier =
@@ -654,6 +766,32 @@ function collectParameters(
     const nameNode = param.namedChildren.filter((c) => c.type === "identifier").pop();
     const name = nameNode?.text;
     if (!typeNode || !name) continue;
+
+    // File uploads bind as multipart/form-data request bodies.
+    if (/^(?:IFormFile|IFormFileCollection|IFormCollection)$/.test(typeNode.text.replace(/\?.*$/, ""))) {
+      const collection = typeNode.text.includes("Collection") || typeNode.text.includes("IFormCollection");
+      requestBody = {
+        required: !param.namedChildren.some((c) => c.type === "equals_value_clause"),
+        content: [
+          {
+            mediaType: "multipart/form-data",
+            schema: collection
+              ? {
+                  type: "object",
+                  properties: { files: { type: "array", items: { type: "string", format: "binary" } } },
+                }
+              : {
+                  type: "object",
+                  properties: { [name]: { type: "string", format: "binary" } },
+                  required: [name],
+                },
+          },
+        ],
+        confidence: "high",
+      };
+      continue;
+    }
+
     if (isInjectedService(typeNode)) continue;
 
     const fromRoute = findAttribute(param, new Set(["FromRoute"]));
@@ -677,7 +815,7 @@ function collectParameters(
     }
     if (fromHeader) {
       const explicit = attributeStringArg(fromHeader);
-      addParam("header", (explicit ?? name).toLowerCase(), schema, "high", !optional);
+      addParam("header", explicit ?? name.toLowerCase(), schema, "high", !optional);
       continue;
     }
     if (fromBody) {
@@ -744,6 +882,15 @@ function isComplexType(typeNode: TsNode, model: CsModelIndex): boolean {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function literalValueSchema(node: TsNode): JsonSchema | null {
+  if (node.type === "string_literal") return { type: "string" };
+  if (node.type === "integer_literal") return { type: "integer" };
+  if (node.type === "boolean_literal") return { type: "boolean" };
+  if (node.type === "real_literal") return { type: "number" };
+  if (node.type === "null_literal") return { type: "null" };
+  return null;
+}
 
 function normalizeRoute(raw: string): string {
   if (!raw) return "";

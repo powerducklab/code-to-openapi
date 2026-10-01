@@ -132,6 +132,42 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
     const byVar = (file: string, name: string) =>
       instances.get(`${file}::${name}`);
 
+    // Map importable module paths ("api" / "app.routes") to indexed files so
+    // blueprints registered from another module resolve cross-file.
+    const moduleToFile = new Map<string, string>();
+    for (const pyFile of analysis.files.values()) {
+      const noExt = pyFile.path.replace(/\.pyi?$/, "").replace(/\\/g, "/");
+      const segments = noExt.split("/");
+      for (let i = 0; i < segments.length; i += 1) {
+        moduleToFile.set(segments.slice(i).join("."), pyFile.path);
+      }
+      if (segments[segments.length - 1] === "__init__") {
+        moduleToFile.set(segments.slice(0, -1).join("."), pyFile.path);
+      }
+    }
+    const resolveInstanceRef = (file: string, node: TsNode): FlaskInstance | null => {
+      if (node.type !== "identifier" && node.type !== "attribute") return null;
+      if (node.type === "identifier") {
+        const local = byVar(file, node.text);
+        if (local) return local;
+        const pyFile = analysis.files.get(file);
+        const imported = pyFile?.imports.get(node.text);
+        if (imported?.importedName) {
+          const targetFile = moduleToFile.get(imported.module);
+          if (targetFile) return byVar(targetFile, imported.importedName) ?? null;
+        }
+        return null;
+      }
+      const receiver = node.namedChildren[0];
+      const attr = node.namedChildren[1];
+      const pyFile = analysis.files.get(file);
+      if (!receiver || !attr || !pyFile) return null;
+      const imported = pyFile.imports.get(receiver.text);
+      if (!imported) return null;
+      const targetFile = moduleToFile.get(imported.module);
+      return targetFile ? byVar(targetFile, attr.text) ?? null : null;
+    };
+
     for (const file of analysis.files.values()) {
       for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
         const target = assignment.namedChildren[0];
@@ -164,7 +200,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
         if (mc.method === "register_blueprint") {
           const app = byVar(file.path, mc.receiver.text);
           const childArg = positionalArguments(call)[0];
-          const blueprint = childArg?.type === "identifier" ? byVar(file.path, childArg.text) : null;
+          const blueprint = childArg ? resolveInstanceRef(file.path, childArg) : null;
           if (app?.kind === "app" && blueprint?.kind === "blueprint") {
             const prefixNode = keywordArgument(call, "url_prefix");
             registrations.push({
@@ -190,11 +226,11 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
     for (const registration of registrations) {
       const blueprint = instances.get(registration.blueprint);
       if (!blueprint) continue;
+      // A url_prefix passed at registration overrides the blueprint's own
+      // url_prefix; otherwise the blueprint prefix applies.
       reachablePrefix.set(
         registration.blueprint,
-        registration.prefix
-          ? joinPrefix(registration.prefix, blueprint.prefix)
-          : blueprint.prefix,
+        registration.prefix || blueprint.prefix,
       );
     }
 
@@ -294,6 +330,22 @@ function chainText(node: TsNode | null): string {
   return node ? node.text : "";
 }
 
+// When code is guarded by `if request.method == "POST":`, evidence inside the
+// branch belongs only to that HTTP method. Returns the guarded lowercase
+// method, or null when the node is shared by every method of the view.
+function guardedMethod(node: TsNode): string | null {
+  let cur: TsNode | null = node.parent ?? null;
+  while (cur) {
+    if (cur.type === "if_statement" || cur.type === "elif_clause") {
+      const test = cur.type === "if_statement" ? cur.namedChildren[0] : cur.namedChildren[0];
+      const match = test?.text.match(/request\.method\s*==\s*["']([A-Z]+)["']/);
+      if (match) return match[1]!.toLowerCase();
+    }
+    cur = cur.parent ?? null;
+  }
+  return null;
+}
+
 function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): RouteCandidate {
   const { fn, file } = site;
   const parameters = flaskPathParams(site.rawPath);
@@ -305,6 +357,8 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
     for (const call of findAll(body, (n) => n.type === "call")) {
       const mc = methodCall(call);
       if (!mc) continue;
+      // Evidence inside `if request.method == "POST"` only applies to POST.
+      if (guardedMethod(call) && guardedMethod(call) !== method) continue;
       const chain = chainText(mc.receiver);
       const arg = positionalArguments(call)[0];
       const name = arg ? literalString(arg) : null;
@@ -343,6 +397,7 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
 
     // Bracket access: request.args["name"].
     for (const subscript of findAll(body, (n) => n.type === "subscript")) {
+      if (guardedMethod(subscript) && guardedMethod(subscript) !== method) continue;
       const value = subscript.namedChildren[0];
       const key = subscript.namedChildren[1];
       const name = key ? literalString(key) : null;
@@ -358,36 +413,46 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
     }
   }
 
-  // Request body evidence.
+  // Request body evidence, attributed per HTTP method via request.method guards.
   let requestBody: RouteCandidate["requestBody"];
-  const bodyText = body?.text ?? "";
-  if (/request\.get_json\s*\(/.test(bodyText) || /request\.json\b/.test(bodyText)) {
-    requestBody = {
-      required: true,
-      confidence: "medium",
-      content: [{ mediaType: "application/json", schema: {} }],
+  if (body) {
+    const evidenceForMethod = (chain: string): boolean => {
+      const pattern = new RegExp(`request\\.${chain.replace(".", "\\.")}`);
+      for (const node of findAll(body, (n) => n.type === "call" || n.type === "subscript" || n.type === "attribute")) {
+        if (!pattern.test(node.text)) continue;
+        const guard = guardedMethod(node);
+        if (!guard || guard === method) return true;
+      }
+      return false;
     };
-    gaps.add("body-schema-unknown");
-  } else if (/request\.files\b/.test(bodyText)) {
-    requestBody = {
-      required: true,
-      confidence: "medium",
-      content: [{ mediaType: "multipart/form-data", schema: { type: "object" } }],
-    };
-    gaps.add("body-schema-unknown");
-  } else if (/request\.form\b/.test(bodyText)) {
-    requestBody = {
-      required: true,
-      confidence: "medium",
-      content: [{ mediaType: "application/x-www-form-urlencoded", schema: { type: "object" } }],
-    };
-    gaps.add("body-schema-unknown");
-  } else if (/request\.data\b/.test(bodyText)) {
-    gaps.add("body-unknown");
+    if (evidenceForMethod("get_json") || evidenceForMethod("json")) {
+      requestBody = {
+        required: true,
+        confidence: "medium",
+        content: [{ mediaType: "application/json", schema: {} }],
+      };
+      gaps.add("body-schema-unknown");
+    } else if (evidenceForMethod("files")) {
+      requestBody = {
+        required: true,
+        confidence: "medium",
+        content: [{ mediaType: "multipart/form-data", schema: { type: "object" } }],
+      };
+      gaps.add("body-schema-unknown");
+    } else if (evidenceForMethod("form")) {
+      requestBody = {
+        required: true,
+        confidence: "medium",
+        content: [{ mediaType: "application/x-www-form-urlencoded", schema: { type: "object" } }],
+      };
+      gaps.add("body-schema-unknown");
+    } else if (evidenceForMethod("data")) {
+      gaps.add("body-unknown");
+    }
   }
 
   // Responses.
-  const responses = buildFlaskResponses(fn, gaps);
+  const responses = buildFlaskResponses(fn, gaps, method);
   const isSse = responses.some((r) =>
     r.content?.some((m) => m.mediaType === "text/event-stream"),
   );
@@ -419,6 +484,7 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
 function buildFlaskResponses(
   fn: PyFunction,
   gaps: Set<string>,
+  method: string,
 ): RouteCandidate["responses"] {
   const responses: RouteCandidate["responses"] = [];
   if (!fn.body) {
@@ -448,6 +514,7 @@ function buildFlaskResponses(
   const returns = findAll(fn.body, (node) => node.type === "return_statement");
   let proven = false;
   for (const returned of returns) {
+    if (guardedMethod(returned) && guardedMethod(returned) !== method) continue;
     let value = returned.namedChildren[0] ?? null;
     let status = 200;
     // Tuple return: (payload, status) — parenthesized tuples use "tuple",
@@ -484,13 +551,35 @@ function buildFlaskResponses(
       if (name === "Response") {
         const mime = keywordArgument(value, "mimetype") ?? keywordArgument(value, "content_type");
         const mediaType = mime ? literalString(mime) : null;
+        const binary = mediaType === "application/octet-stream";
         responses.push({
           statusCode: String(status),
           description: "",
           confidence: "medium",
           ...(mediaType
-            ? { content: [{ mediaType, schema: {} }] }
+            ? {
+                content: [
+                  {
+                    mediaType,
+                    ...(binary
+                      ? { schema: { type: "string", format: "binary" } }
+                      : { schema: {} }),
+                  },
+                ],
+              }
             : {}),
+        });
+        if (mediaType && !binary) gaps.add("response-schema-unknown");
+        proven = true;
+        continue;
+      }
+      if (name === "redirect") {
+        const codeNode = keywordArgument(value, "code");
+        const redirectStatus = codeNode ? literalInteger(codeNode) : null;
+        responses.push({
+          statusCode: String(redirectStatus ?? 302),
+          description: "",
+          confidence: "high",
         });
         proven = true;
         continue;
@@ -516,6 +605,7 @@ function buildFlaskResponses(
 
   // abort(404) proves error statuses without bodies.
   for (const call of findAll(fn.body, (node) => node.type === "call")) {
+    if (guardedMethod(call) && guardedMethod(call) !== method) continue;
     const name = callName(call.namedChildren[0] ?? null);
     if (name !== "abort") continue;
     const statusNode = positionalArguments(call)[0];

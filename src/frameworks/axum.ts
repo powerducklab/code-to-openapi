@@ -26,6 +26,7 @@ import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   buildRustModelIndex,
+  ensureRustComponent,
   expandStructFields,
   functionParameters,
   rustTypeToSchema,
@@ -369,7 +370,16 @@ function collectHandlerParameters(
     const inner = genericArgs[0];
 
     if (extractor === "Path") {
-      if (inner && model.byName.has(typeIdName(inner))) {
+      const tupleArgs =
+        inner?.type === "tuple_type" ? inner.namedChildren.filter((c) => c.type !== ",") : [];
+      if (tupleArgs.length) {
+        // Path<(String, Uuid)> binds route parameters positionally.
+        const routeNames = [...pathParams];
+        tupleArgs.forEach((argType, index) => {
+          const name = routeNames[index] ?? binding ?? `param${index + 1}`;
+          addParam("path", name, rustTypeToSchema(argType, model), "high", true);
+        });
+      } else if (inner && model.byName.has(typeIdName(inner))) {
         for (const field of expandStructFields(inner, model)) {
           addParam("path", field.name, field.schema, "high", true);
         }
@@ -464,7 +474,12 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
   // Sse<T> stream.
   const sseType = unwrapNamedGeneric(returnType, "Sse");
   if (sseType) {
-    const itemSchema = sseEventType(sseType, model);
+    let itemSchema = sseEventType(sseType, model);
+    if (!itemSchema || !Object.keys(itemSchema).length) {
+      // Fall back to the payload constructed inside the handler, e.g.
+      // Event::default().json_data(OrderEvent { .. }).
+      itemSchema = ssePayloadFromBody(fn, model);
+    }
     if (!itemSchema || !Object.keys(itemSchema).length) gaps.push("sse-events-unknown");
     return [
       {
@@ -477,6 +492,19 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
             ...(itemSchema ? { itemSchema } : {}),
           },
         ],
+      },
+    ];
+  }
+
+  // axum::response::Redirect has no body. Redirect::to() answers 307 and
+  // Redirect::permanent() answers 308.
+  if (returnType.type === "type_identifier" && returnType.text === "Redirect") {
+    const permanent = /Redirect::permanent/.test(fn.text);
+    return [
+      {
+        statusCode: permanent ? "308" : "307",
+        description: "",
+        confidence: "high",
       },
     ];
   }
@@ -636,6 +664,28 @@ function sseEventType(node: TsNode, model: RustModelIndex): JsonSchema | undefin
   if (resultGeneric) {
     const args = genericArgumentsOf(resultGeneric);
     if (args[0]) return rustTypeToSchema(args[0], model);
+  }
+  return undefined;
+}
+
+function ssePayloadFromBody(fn: TsNode, model: RustModelIndex): JsonSchema | undefined {
+  // Event::default().json_data(Payload { .. }) or SseItem::new(Payload { .. }).
+  const jsonDataCalls = findAll(fn, (n) => {
+    if (n.type !== "call_expression") return false;
+    return /\.(json_data)\b/.test(n.text.slice(0, 200)) || /SseItem/.test(n.text.slice(0, 120));
+  });
+  for (const call of jsonDataCalls) {
+    for (const creation of findAll(call, (n) => n.type === "struct_expression")) {
+      const name = creation.namedChildren.find((c) => c.type === "type_identifier")?.text;
+      if (name) {
+        const ensured = ensureRustComponent(name, model);
+        if (ensured) return ensured;
+      }
+    }
+    for (const id of findAll(call, (n) => n.type === "identifier")) {
+      const ensured = ensureRustComponent(id.text, model);
+      if (ensured) return ensured;
+    }
   }
   return undefined;
 }

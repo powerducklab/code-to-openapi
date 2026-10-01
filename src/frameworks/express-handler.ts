@@ -521,6 +521,18 @@ export function analyzeHandler(
     }
   }
 
+  // Content type set on `res` persists until the response is sent, so a
+  // standalone res.type()/res.setHeader() applies to every later res.send().
+  let handlerContentType: string | undefined;
+  let handlerSse = false;
+  const captureContentTypeValue = (raw: string | undefined): string | undefined => {
+    if (!raw) return undefined;
+    const value = raw.replace(/['"]/g, "").trim().toLowerCase();
+    if (!value || value.includes("${")) return undefined;
+    // Keep only the media type, dropping charset/boundary parameters.
+    return value.split(";")[0]!.trim();
+  };
+
   const visit = (node: any) => {
     // Property access on req / res.
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
@@ -629,6 +641,32 @@ export function analyzeHandler(
 
     // res.* chains
     if (ts.isCallExpression(node)) {
+      // Standalone content-type setters: res.type("text/csv"),
+      // res.setHeader("Content-Type", ...), res.header("Content-Type", ...).
+      if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        rootIdentifier(ts, node.expression.expression) === resName
+      ) {
+        const setter = node.expression.name.text;
+        if (setter === "type") {
+          const captured = captureContentTypeValue(node.arguments[0]?.getText(file));
+          if (captured) {
+            handlerContentType = captured;
+            if (captured.includes("text/event-stream")) handlerSse = true;
+          }
+        } else if (
+          (setter === "setHeader" || setter === "header") &&
+          node.arguments[0]?.getText(file)?.replace(/['"]/g, "").toLowerCase() ===
+            "content-type"
+        ) {
+          const captured = captureContentTypeValue(node.arguments[1]?.getText(file));
+          if (captured) {
+            handlerContentType = captured;
+            if (captured.includes("text/event-stream")) handlerSse = true;
+          }
+        }
+      }
+
       const chain: Array<{ name: string; args: any[] }> = [];
       let cur: any = node;
       let chainRoot: string | undefined;
@@ -649,7 +687,14 @@ export function analyzeHandler(
 
   function handleResChain(chain: Array<{ name: string; args: any[] }>) {
     let status = "200";
-    let sse = false;
+    let sse = handlerSse;
+    let explicitType: string | undefined = handlerContentType;
+    const captureContentType = (raw: string | undefined) => {
+      const captured = captureContentTypeValue(raw);
+      if (!captured) return;
+      explicitType = captured;
+      if (captured.includes("text/event-stream")) sse = true;
+    };
     for (const step of chain) {
       if (step.name === "status") {
         const raw = step.args[0]?.getText(file);
@@ -673,13 +718,12 @@ export function analyzeHandler(
       }
       if (
         (step.name === "setHeader" || step.name === "header") &&
-        step.args[0]?.getText(file)?.replace(/['"]/g, "").toLowerCase() === "content-type" &&
-        step.args[1]?.getText(file)?.includes("text/event-stream")
+        step.args[0]?.getText(file)?.replace(/['"]/g, "").toLowerCase() === "content-type"
       ) {
-        sse = true;
+        captureContentType(step.args[1]?.getText(file));
       }
-      if (step.name === "type" && step.args[0]?.getText(file)?.includes("event-stream")) {
-        sse = true;
+      if (step.name === "type") {
+        captureContentType(step.args[0]?.getText(file));
       }
       if (step.name === "writeHead") {
         const headersArg = step.args.find((arg) => ts.isObjectLiteralExpression(arg));
@@ -687,10 +731,9 @@ export function analyzeHandler(
           for (const prop of headersArg.properties) {
             if (
               ts.isPropertyAssignment(prop) &&
-              prop.name.getText(file).replace(/['"]/g, "").toLowerCase() === "content-type" &&
-              prop.initializer.getText(file).includes("event-stream")
+              prop.name.getText(file).replace(/['"]/g, "").toLowerCase() === "content-type"
             ) {
-              sse = true;
+              captureContentType(prop.initializer.getText(file));
             }
           }
         }
@@ -718,11 +761,14 @@ export function analyzeHandler(
                 return false;
               }
             })();
-          const mediaType =
-            step.name === "send" && isString ? "text/html" : "application/json";
+          const mediaType = explicitType
+            ? explicitType
+            : step.name === "send" && isString
+              ? "text/html"
+              : "application/json";
           recordResponse(status, mediaType, schema, typed ? "high" : "medium");
         } else {
-          recordResponse(status, "application/json", undefined, "medium");
+          recordResponse(status, explicitType ?? "application/json", undefined, "medium");
         }
       }
     }

@@ -140,15 +140,32 @@ function parseClass(node: TsNode, namespace: string | null): PhpClass | null {
   };
 }
 
-function parseRulesMethod(method: TsNode): PhpRule[] {
+export function parseRulesMethod(method: TsNode): PhpRule[] {
   const rules: PhpRule[] = [];
-  for (const array of findAll(method, (n) => n.type === "array_creation_expression")) {
-    for (const element of childrenOfType(array, "array_element_initializer")) {
-      const strings = childrenOfType(element, "string");
-      const key = phpStringText(strings[0]);
-      const value = phpStringText(strings[1]);
-      if (key && value) rules.push({ name: key, rules: value });
+  // Only the returned top-level array defines rule entries; iterating every
+  // nested array would double-count array-form rule values.
+  const returned = findAll(method, (n) => n.type === "array_creation_expression");
+  const topLevel = returned[0];
+  if (!topLevel) return rules;
+  for (const element of childrenOfType(topLevel, "array_element_initializer")) {
+    const strings = childrenOfType(element, "string");
+    const key = phpStringText(strings[0]);
+    if (!key) continue;
+    // Rules accept both string pipes ('required|numeric') and arrays of
+    // strings (['required', 'numeric']); normalize to the pipe form.
+    const valueArray = element.namedChildren.find(
+      (c) => c.type === "array_creation_expression",
+    );
+    let value: string | null = null;
+    if (valueArray) {
+      value = findAll(valueArray, (n) => n.type === "string")
+        .map((s) => phpStringText(s))
+        .filter(Boolean)
+        .join("|");
+    } else {
+      value = phpStringText(strings[1]);
     }
+    if (value) rules.push({ name: key, rules: value });
   }
   return rules;
 }

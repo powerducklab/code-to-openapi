@@ -305,6 +305,8 @@ function collectParameters(
     const pathVar = annotations.find((a) => a.name === "PathVariable");
     const requestParam = annotations.find((a) => a.name === "RequestParam");
     const requestHeader = annotations.find((a) => a.name === "RequestHeader");
+    const cookieValue = annotations.find((a) => a.name === "CookieValue");
+    const requestPart = annotations.find((a) => a.name === "RequestPart");
     const modelAttr = annotations.find((a) => a.name === "ModelAttribute");
     const body = annotations.find((a) => a.name === "RequestBody");
 
@@ -343,18 +345,65 @@ function collectParameters(
     }
 
     if (requestHeader) {
-      const name =
-        annotationStringArg(requestHeader.node, new Set(["value", "name"])) ??
-        nameNode?.text;
+      const explicitName =
+        annotationStringArg(requestHeader.node, new Set(["value", "name"]));
+      const name = explicitName ?? nameNode?.text;
       if (name) {
         addParam(
           "header",
-          name.toLowerCase(),
+          // Keep an explicitly annotated header name verbatim; only fall back
+          // to the lowercased Java parameter name.
+          explicitName ? name : name.toLowerCase(),
           typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
           "high",
           !isRequiredFalse(requestHeader.node),
         );
       }
+      continue;
+    }
+
+    if (cookieValue) {
+      const name =
+        annotationStringArg(cookieValue.node, new Set(["value", "name"])) ??
+        nameNode?.text;
+      if (name) {
+        addParam(
+          "cookie",
+          name,
+          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          "high",
+          !isRequiredFalse(cookieValue.node),
+        );
+      }
+      continue;
+    }
+
+    if (requestPart) {
+      const partName =
+        annotationStringArg(requestPart.node, new Set(["value", "name"])) ??
+        nameNode?.text ??
+        "file";
+      const isFile = typeNode && /MultipartFile|Resource/.test(typeNode.text);
+      requestBody = {
+        required: !isRequiredFalse(requestPart.node),
+        content: [
+          {
+            mediaType: "multipart/form-data",
+            schema: {
+              type: "object",
+              properties: {
+                [partName]: isFile
+                  ? { type: "string", format: "binary" }
+                  : typeNode
+                    ? javaTypeToSchema(typeNode, model)
+                    : { type: "string" },
+              },
+              required: [partName],
+            },
+          },
+        ],
+        confidence: "high",
+      };
       continue;
     }
 
@@ -405,6 +454,17 @@ function typeNameOf(node: TsNode): string {
   return "";
 }
 
+function isBinaryReturn(node: TsNode | null): boolean {
+  if (!node) return false;
+  const text = node.text;
+  // org.springframework.core.io.Resource, byte[] and their ResponseEntity
+  // wrappers all stream binary payloads.
+  return (
+    /(^|[.\s<])Resource(\s*[>,)]|$)/.test(text) ||
+    /byte\s*\[\s*]/.test(text)
+  );
+}
+
 function collectJsonResponse(
   method: TsNode,
   mapping: TsNode,
@@ -413,10 +473,26 @@ function collectJsonResponse(
   model: JavaModelIndex,
   gaps: GapCode[],
 ): DiscoveredResponse[] {
-  const status = resolveStatus(method) ?? (verb === "post" ? "200" : "200");
+  const status = resolveStatus(method) ?? "200";
   void mapping;
+  void verb;
   if (!returnType || returnType.type === "void_type") {
     return [{ statusCode: status, description: "", confidence: "high" }];
+  }
+  if (isBinaryReturn(returnType)) {
+    return [
+      {
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [
+          {
+            mediaType: "application/octet-stream",
+            schema: { type: "string", format: "binary" },
+          },
+        ],
+      },
+    ];
   }
   const schema = javaTypeToSchema(returnType, model);
   if (!schema || !Object.keys(schema).length) {

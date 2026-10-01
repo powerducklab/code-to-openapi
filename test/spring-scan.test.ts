@@ -73,7 +73,7 @@ describe("spring boot + Java golden project", () => {
     const page = search.parameters.find((p: any) => p.name === "page");
     expect(page.required).toBeFalsy();
     expect(page.schema).toEqual({ type: "integer", format: "int32" });
-    const trace = search.parameters.find((p: any) => p.name === "x-trace");
+    const trace = search.parameters.find((p: any) => p.name === "X-Trace");
     expect(trace.in).toBe("header");
     expect(trace.required).toBeFalsy();
 

@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "ShopEdge": {
+      "applicationUrl": "http://localhost:8094",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

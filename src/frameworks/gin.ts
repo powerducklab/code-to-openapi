@@ -276,6 +276,58 @@ function analyzeHandler(
         continue;
       }
 
+      if (method === "Cookie") {
+        const name = literalString(args[0]);
+        if (name && !parameters.some((p) => p.name === name && p.in === "cookie")) {
+          parameters.push({
+            name,
+            in: "cookie",
+            required: false,
+            schema: { type: "string" },
+            confidence: "high",
+          });
+        }
+        continue;
+      }
+
+      if (method === "Redirect") {
+        const status = statusCode(args[0]) ?? "302";
+        addResponse(status, { statusCode: status, description: "", confidence: "high" });
+        continue;
+      }
+
+      if (method === "Data") {
+        const status = statusCode(args[0]) ?? "200";
+        const mediaType = literalString(args[1]);
+        if (mediaType) {
+          const binary = mediaType !== "application/json";
+          addResponse(status, {
+            statusCode: status,
+            description: "",
+            confidence: "high",
+            content: [
+              {
+                mediaType,
+                ...(binary
+                  ? { schema: { type: "string", format: "binary" } }
+                  : { schema: {} }),
+                confidence: "high",
+              },
+            ],
+          });
+          if (!binary) gaps.add("response-schema-unknown");
+        }
+        continue;
+      }
+
+      if (method === "AbortWithStatus") {
+        const status = statusCode(args[0]);
+        if (status) {
+          addResponse(status, { statusCode: status, description: "", confidence: "high" });
+        }
+        continue;
+      }
+
       if ((method === "ShouldBindJSON" || method === "BindJSON" || method === "ShouldBind") && args[0]) {
         const typeNode = referencedVarType(args[0]);
         if (typeNode) {
@@ -334,10 +386,17 @@ function analyzeHandler(
         continue;
       }
 
-      if (method === "JSON" || method === "IndentedJSON" || method === "PureJSON") {
-        const status = statusCode(args[0]) ?? "200";
+      if (
+        method === "JSON" ||
+        method === "IndentedJSON" ||
+        method === "PureJSON" ||
+        method === "AbortWithStatusJSON"
+      ) {
+        const statusArg = method === "AbortWithStatusJSON" ? args[0] : args[0];
+        const payloadArg = method === "AbortWithStatusJSON" ? args[1] : args[1];
+        const status = statusCode(statusArg) ?? "200";
         let schema: JsonSchema | null = null;
-        const payload = args[1];
+        const payload = payloadArg;
         if (payload) {
           if (payload.type === "identifier") {
             const typeNode = resolveLocalType(body, payload.text);
@@ -354,7 +413,7 @@ function analyzeHandler(
             ? { content: [{ mediaType: "application/json", schema, confidence: schema ? "high" : "medium" }] }
             : {}),
         });
-        if (!schema) gaps.add("response-schema-unknown");
+        if (!schema || hasEmptyProperties(schema)) gaps.add("response-schema-unknown");
         continue;
       }
 
@@ -427,6 +486,23 @@ function isSseExtension(
 
 function responsesEmpty(responses: Map<string, unknown>): boolean {
   return responses.size === 0;
+}
+
+/**
+ * Literal gin.H maps built from local variables yield empty property schemas.
+ * Such a response is only partially proven, so it keeps an honest gap.
+ */
+function hasEmptyProperties(schema: JsonSchema | null | undefined): boolean {
+  if (!schema || typeof schema !== "object") return false;
+  if (schema.$ref) return false;
+  if (schema.type === "object" && schema.properties) {
+    const values = Object.values(schema.properties as Record<string, JsonSchema>);
+    if (values.some((value) => value && Object.keys(value).length === 0)) return true;
+  }
+  if (schema.type === "array") {
+    return hasEmptyProperties(schema.items as JsonSchema);
+  }
+  return false;
 }
 
 function operationId(method: string, path: string): string {

@@ -522,7 +522,9 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
           HTTP_METHODS.has(call.expression.name.text)
         ) {
           model.routes.push(
-            buildRoute(ts, model, router, call, call.expression.name.text, entry, origin),
+            // Verb calls on app.route(path) carry no path argument: every
+            // argument is a handler.
+            buildRoute(ts, model, router, call, call.expression.name.text, entry, origin, true),
           );
           parent = call.parent;
           continue;
@@ -595,12 +597,16 @@ function buildRoute(
   method: string,
   pathEntry: { raw: string; optional: Set<string> } | null,
   origin: SourceLocation,
+  pathAlreadyConsumed = false,
 ): RouteCall {
   const normalized = pathEntry
     ? normalizeExpressPath(pathEntry.raw)
     : { path: "", optional: new Set<string>(), dynamic: true };
 
-  const handlerArgs = call.arguments.slice(1);
+  // app.route(path).get(handler): the verb call has no path argument, so all
+  // arguments are handlers/middleware. Regular router.get(path, ...handlers)
+  // skips the leading path argument.
+  const handlerArgs = pathAlreadyConsumed ? call.arguments : call.arguments.slice(1);
   return {
     routerId: router.id,
     file: model.rel,

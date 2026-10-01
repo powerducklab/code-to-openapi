@@ -273,8 +273,11 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
           }
 
           if (sel.method === "Route" || sel.method === "Group") {
-            const nestedPrefix = literalString(args[0]);
             const funcLiteral = args.find((a) => a.type === "func_literal");
+            // Group blocks may be prefix-less: the first argument is then the
+            // function literal itself.
+            const prefixArg = args[0] && args[0].type !== "func_literal" ? args[0] : null;
+            const nestedPrefix = prefixArg ? literalString(prefixArg) : "";
             if (nestedPrefix === null || !funcLiteral) return;
             const innerParam = funcLiteral.namedChildren
               .find((c) => c.type === "parameter_list")
@@ -395,6 +398,25 @@ function buildRoute(
   const body = fn?.body ?? null;
 
   if (body) {
+    // Aliases such as `q := r.URL.Query()` — later q.Get("x") calls are query
+    // parameters even though the receiver is a local variable.
+    const queryAlias = new Set<string>();
+    for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+      const left = decl.namedChildren.find((c) => c.type === "expression_list");
+      const expressionLists = decl.namedChildren.filter((c) => c.type === "expression_list");
+      const right = expressionLists.length > 1
+        ? expressionLists[expressionLists.length - 1]
+        : undefined;
+      const hasQueryCall = findAll(right ?? decl, (c) => c.type === "call_expression").some(
+        (call) => call.text.includes(".URL.Query()"),
+      );
+      if (hasQueryCall && left) {
+        for (const id of left.namedChildren) {
+          if (id.type === "identifier") queryAlias.add(id.text);
+        }
+      }
+    }
+
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
       if (!sel) continue;
@@ -415,8 +437,12 @@ function buildRoute(
         continue;
       }
 
-      // r.URL.Query().Get("q")
-      if (sel.method === "Get" && call.text.includes(".URL.Query()")) {
+      // r.URL.Query().Get("q") or q.Get("q") with q aliasing URL.Query().
+      if (
+        sel.method === "Get" &&
+        (call.text.includes(".URL.Query()") ||
+          (sel.receiver.type === "identifier" && queryAlias.has(sel.receiver.text)))
+      ) {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name)) {
           parameters.push({
@@ -437,6 +463,21 @@ function buildRoute(
           parameters.push({
             name,
             in: "header",
+            required: false,
+            schema: { type: "string" },
+            confidence: "high",
+          });
+        }
+        continue;
+      }
+
+      // r.Cookie("session")
+      if (sel.method === "Cookie" && sel.receiver.type === "identifier") {
+        const name = literalString(args[0]);
+        if (name && !parameters.some((p) => p.name === name && p.in === "cookie")) {
+          parameters.push({
+            name,
+            in: "cookie",
             required: false,
             schema: { type: "string" },
             confidence: "high",
