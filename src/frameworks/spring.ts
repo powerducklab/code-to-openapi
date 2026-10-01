@@ -145,22 +145,28 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
           );
 
           const producesEventStream = annotationProducesEventStream(mapping.node);
-          const returnType = method.namedChildren.find(
-            (c) =>
-              c.type === "type_identifier" ||
-              c.type === "generic_type" ||
-              c.type === "void_type" ||
-              c.type === "array_type" ||
-              c.type === "scoped_identifier",
-          );
+          const returnType =
+            method.namedChildren.find(
+              (c) =>
+                c.type === "type_identifier" ||
+                c.type === "generic_type" ||
+                c.type === "void_type" ||
+                c.type === "array_type" ||
+                c.type === "scoped_identifier",
+            ) ?? null;
 
+          const isStreamingEmitter =
+            returnType !== null &&
+            /ResponseBodyEmitter|StreamingResponseBody/.test(returnType.text);
           const isSse =
             producesEventStream ||
-            (returnType && /SseEmitter|ServerSentEvent/.test(returnType.text));
+            (returnType && /SseEmitter|ServerSentEvent/.test(returnType.text)) ||
+            (isStreamingEmitter && /text\/event-stream/.test(method.text)) ||
+            (returnType === null && /text\/event-stream/.test(method.text));
 
           const responses = isSse
-            ? collectSseResponse(returnType ?? null, model, gaps)
-            : collectJsonResponse(method, mapping.node, verb, returnType ?? null, model, gaps);
+            ? collectSseResponse(returnType, model, gaps)
+            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps);
 
           const extensions = isSse ? { "x-protocol": "sse" } : undefined;
 

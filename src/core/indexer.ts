@@ -1,26 +1,22 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync, type Dirent } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from "node:fs";
+import { dirname, join, relative } from "node:path";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import ignoreFactory from "ignore";
 
 import type { FileEntry, FileIndex } from "./types.js";
 
+// Directory names that are always dependency or cache directories, never
+// source packages.
 const ALWAYS_IGNORE_DIRS = new Set([
   "node_modules",
   ".git",
-  "dist",
-  "build",
-  "out",
   ".next",
   ".nuxt",
   "coverage",
   ".turbo",
   ".cache",
   "vendor",
-  "target",
-  "bin",
-  "obj",
   "__pycache__",
   ".venv",
   "venv",
@@ -34,6 +30,68 @@ const ALWAYS_IGNORE_DIRS = new Set([
   "egg-info",
   ".gradle",
 ]);
+
+// Build-output directory names that can legitimately appear as source package
+// names (e.g. a Java package named "target"); only ignore them when build
+// markers prove they are generated output.
+const CONDITIONAL_BUILD_DIRS = new Set(["dist", "build", "out", "target", "bin", "obj"]);
+
+function hasEntry(dir: string, predicate: (name: string) => boolean): boolean {
+  try {
+    return readdirSync(dir).some(predicate);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Distinguish build output from source packages that share the same directory
+ * name. Maven compiles into ./target next to a pom.xml; Gradle next to
+ * build.gradle(.kts); .NET emits bin/obj next to a project file or with
+ * Debug/Release artifacts; JS/Python build dirs keep their conventional names.
+ */
+function isConditionalBuildOutput(absolute: string, name: string): boolean {
+  const parent = dirname(absolute);
+  if (name === "target") {
+    if (
+      existsSync(join(parent, "pom.xml")) ||
+      existsSync(join(parent, "build.gradle")) ||
+      existsSync(join(parent, "build.gradle.kts")) ||
+      existsSync(join(parent, "settings.gradle")) ||
+      existsSync(join(parent, "settings.gradle.kts"))
+    ) {
+      return true;
+    }
+    return hasEntry(absolute, (entry) =>
+      ["classes", "test-classes", "maven-status", "generated-sources", "generated-test-sources"].includes(entry),
+    );
+  }
+  if (name === "bin" || name === "obj") {
+    if (hasEntry(parent, (entry) => /\.(csproj|sln|fsproj|vbproj)$/.test(entry))) {
+      return true;
+    }
+    return hasEntry(
+      absolute,
+      (entry) =>
+        entry === "Debug" ||
+        entry === "Release" ||
+        /\.(dll|exe|pdb|cache)$/i.test(entry),
+    );
+  }
+  // dist/build/out: only treat as generated output next to a project manifest
+  // and with unmistakable build artifacts; a source package sharing the name
+  // must stay indexed.
+  const parentHasManifest =
+    existsSync(join(parent, "package.json")) ||
+    existsSync(join(parent, "pyproject.toml")) ||
+    existsSync(join(parent, "setup.py")) ||
+    existsSync(join(parent, "pom.xml")) ||
+    existsSync(join(parent, "build.gradle"));
+  if (!parentHasManifest) return false;
+  return hasEntry(absolute, (entry) =>
+    ["assets", "static", "lib", "bdist.linux-x86_64"].includes(entry),
+  ) || hasEntry(absolute, (entry) => /\.(map|whl|tar\.gz|egg)$/i.test(entry));
+}
 
 const TEST_FILE =
   /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|Test\.java$|Tests\.cs$|Test\.php$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
@@ -104,7 +162,14 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
       const rel = relative(root, absolute).split("\\").join("/");
 
       if (entry.isDirectory()) {
-        if (ALWAYS_IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (entry.name.startsWith(".")) continue;
+        if (ALWAYS_IGNORE_DIRS.has(entry.name)) continue;
+        if (
+          CONDITIONAL_BUILD_DIRS.has(entry.name) &&
+          isConditionalBuildOutput(absolute, entry.name)
+        ) {
+          continue;
+        }
         if (ig.ignores(`${rel}/`)) continue;
         walk(absolute);
         continue;

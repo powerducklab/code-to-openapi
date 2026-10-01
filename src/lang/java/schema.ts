@@ -7,7 +7,7 @@
  */
 
 import type { JsonSchema } from "@powerduck/x-to-openapi";
-import type { JavaAnalysis, JavaTypeDef } from "./index.js";
+import type { JavaAnalysis, JavaField, JavaTypeDef } from "./index.js";
 import type { TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findFirst } from "../treesitter/ast.js";
 
@@ -73,6 +73,12 @@ const COLLECTION_TYPES = new Set([
 /** Unwrapping wrappers expose their generic argument directly. */
 const WRAPPER_TYPES = new Set(["Mono", "ResponseEntity", "Optional"]);
 
+/**
+ * Maps a generic class's type parameter names to the concrete type nodes used at
+ * a particular instantiation, e.g. CommonResult<Foo> maps "T" to the Foo node.
+ */
+type Subst = Map<string, TsNode>;
+
 export interface JavaModelIndex {
   readonly byName: Map<string, JavaTypeDef>;
   readonly components: Map<string, JsonSchema>;
@@ -98,6 +104,67 @@ function genericArguments(node: TsNode): TsNode[] {
   return args ? args.namedChildren : [];
 }
 
+/** Resolve a type variable to its substituted node; pass other nodes through. */
+function resolveSubst(node: TsNode, subst?: Subst): TsNode {
+  if (node.type === "type_identifier" && subst?.has(node.text)) {
+    return subst.get(node.text)!;
+  }
+  return node;
+}
+
+/** Jackson camelCase to snake_case conversion used by SnakeCaseStrategy. */
+function toSnakeCase(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+function propertyName(field: JavaField, naming: JavaTypeDef["naming"]): string {
+  if (field.jsonName) return field.jsonName;
+  return naming === "snake_case" ? toSnakeCase(field.name) : field.name;
+}
+
+/**
+ * Deterministic, filesystem-safe key describing a concrete type argument, used
+ * to name specialized generic components such as CommonResult_Foo.
+ */
+function typeKey(node: TsNode, subst?: Subst): string {
+  const resolved = resolveSubst(node, subst);
+  if (resolved.type === "type_identifier") return resolved.text;
+  if (resolved.type === "scoped_identifier") return simpleTypeName(resolved) ?? "Object";
+  if (resolved.type === "integral_type") {
+    return resolved.text === "long" ? "Long" : resolved.text.charAt(0).toUpperCase() + resolved.text.slice(1);
+  }
+  if (resolved.type === "floating_point_type") {
+    return resolved.text === "double" ? "Double" : "Float";
+  }
+  if (resolved.type === "boolean_type") return "Boolean";
+  if (resolved.type === "array_type") {
+    const inner = resolved.namedChildren.find((c) => c.type === "type_identifier" || c.type === "generic_type");
+    return `${typeKey(inner ?? resolved, subst)}Array`;
+  }
+  if (resolved.type === "generic_type") {
+    const name = simpleTypeName(resolved) ?? "Object";
+    const args = genericArguments(resolved);
+    if (COLLECTION_TYPES.has(name)) {
+      return `${typeKey(args[0] ?? resolved, subst)}List`;
+    }
+    if (name === "Map") return `Map_${typeKey(args[1] ?? resolved, subst)}`;
+    return args.length
+      ? `${name}_${args.map((arg) => typeKey(arg, subst)).join("_")}`
+      : name;
+  }
+  return "Object";
+}
+
+function uniqueComponentName(base: string, index: JavaModelIndex): string {
+  if (!index.components.has(base) && !index.byName.has(base)) return base;
+  let suffix = 2;
+  while (index.components.has(`${base}_${suffix}`)) suffix += 1;
+  return `${base}_${suffix}`;
+}
+
 export function ensureJavaComponent(
   name: string,
   index: JavaModelIndex,
@@ -109,20 +176,144 @@ export function ensureJavaComponent(
   if (stack.has(name)) return;
   stack.add(name);
   index.components.set(name, {}); // reserve to break recursion
-  index.components.set(name, buildTypeSchema(def, index));
+  index.components.set(name, buildTypeSchema(def, index, undefined, 0));
   stack.delete(name);
 }
 
-function buildTypeSchema(def: JavaTypeDef, index: JavaModelIndex): JsonSchema {
+/**
+ * Build (once) a specialized component for a generic class instantiated with
+ * concrete type arguments, substituting its type parameters throughout the
+ * class hierarchy (including generic superclasses).
+ */
+function ensureSpecializedComponent(
+  def: JavaTypeDef,
+  index: JavaModelIndex,
+  subst: Subst,
+  args: TsNode[],
+  depth: number,
+): string {
+  const base = `${def.name}_${args.map((arg) => typeKey(arg, subst)).join("_")}`;
+  const name = uniqueComponentName(base, index);
+  if (index.components.has(name)) return name;
+  index.components.set(name, {}); // reserve to break recursion
+  const local = new Map(subst);
+  def.typeParameters.forEach((parameter, i) => {
+    if (args[i]) local.set(parameter, resolveSubst(args[i]!, subst));
+  });
+  index.components.set(name, buildTypeSchema(def, index, local, depth + 1));
+  return name;
+}
+
+interface ChainField {
+  field: JavaField;
+  subst?: Subst;
+}
+
+/**
+ * Collect fields from the full inheritance chain, most abstract first. The
+ * superclass's type parameters are mapped from the concrete type arguments used
+ * by each subclass (which may themselves be type variables).
+ */
+function collectChainFields(
+  def: JavaTypeDef,
+  index: JavaModelIndex,
+  subst: Subst | undefined,
+  depth: number,
+  guard: Set<string>,
+): ChainField[] {
+  if (depth > 6 || guard.has(def.name)) return [];
+  guard.add(def.name);
+  const out: ChainField[] = [];
+  if (def.superclass) {
+    const superNode = resolveSubst(def.superclass, subst);
+    const superName = simpleTypeName(superNode);
+    const superDef = superName ? index.byName.get(superName) : undefined;
+    if (superDef) {
+      const superSubst = new Map(subst ?? []);
+      if (superNode.type === "generic_type") {
+        const args = genericArguments(superNode);
+        superDef.typeParameters.forEach((parameter, i) => {
+          if (args[i]) superSubst.set(parameter, resolveSubst(args[i]!, subst));
+        });
+      }
+      out.push(
+        ...collectChainFields(superDef, index, superSubst, depth + 1, guard),
+      );
+    }
+  }
+  for (const field of def.fields) {
+    out.push({ field, subst });
+  }
+  return out;
+}
+
+/**
+ * Jackson naming strategies are inherited: @JsonNaming on a superclass also
+ * renames the properties it contributes to a subtype. Walk the superclass
+ * chain so subtype components serialize with the same property names.
+ */
+function effectiveNaming(
+  def: JavaTypeDef,
+  index: JavaModelIndex,
+): "snake_case" | "default" {
+  const guard = new Set<string>();
+  let current: JavaTypeDef | undefined = def;
+  for (let depth = 0; depth < 8 && current; depth++) {
+    if (current.naming === "snake_case") return "snake_case";
+    if (!current.superclass) break;
+    const superName = simpleTypeName(current.superclass);
+    if (!superName || guard.has(superName)) break;
+    guard.add(superName);
+    current = index.byName.get(superName);
+  }
+  return "default";
+}
+
+function buildTypeSchema(
+  def: JavaTypeDef,
+  index: JavaModelIndex,
+  subst?: Subst,
+  depth = 0,
+): JsonSchema {
   if (def.kind === "enum") {
     return def.enumValues.length ? { type: "string", enum: [...def.enumValues] } : { type: "string" };
   }
 
+  // Jackson @JsonTypeInfo(NAME) + @JsonSubTypes: emit a discriminated oneOf.
+  // Subtype components carry the inherited base fields through the normal
+  // superclass chain, so every member schema stays self-contained.
+  if (def.discriminator) {
+    const oneOf: JsonSchema[] = [];
+    const mapping: Record<string, string> = {};
+    for (const subtype of def.discriminator.subtypes) {
+      if (!index.byName.has(subtype.type)) continue;
+      ensureJavaComponent(subtype.type, index);
+      const ref = `#/components/schemas/${subtype.type}`;
+      oneOf.push({ $ref: ref });
+      mapping[subtype.name] = ref;
+    }
+    if (oneOf.length) {
+      return {
+        oneOf,
+        discriminator: {
+          propertyName: def.discriminator.property,
+          mapping,
+        },
+      };
+    }
+  }
+
+  // The inheritance chain gets its own cycle guard; it must not reuse the
+  // component-recursion stack, which already contains the root class name.
+  const chain = collectChainFields(def, index, subst, depth, new Set());
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
-  for (const field of def.fields) {
-    properties[field.name] = javaTypeToSchema(field.typeNode, index);
-    if (field.required) required.push(field.name);
+  const naming = effectiveNaming(def, index);
+  for (const { field, subst: fieldSubst } of chain) {
+    if (field.ignored) continue;
+    const name = propertyName(field, naming);
+    properties[name] = javaTypeToSchema(field.typeNode, index, depth + 1, fieldSubst);
+    if (field.required) required.push(name);
   }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;
@@ -133,8 +324,10 @@ export function javaTypeToSchema(
   node: TsNode,
   index: JavaModelIndex,
   depth = 0,
+  subst?: Subst,
 ): JsonSchema {
   if (depth > 6 || !node) return {};
+  node = resolveSubst(node, subst);
 
   if (node.type === "array_type") {
     const inner = node.namedChildren.find((c) =>
@@ -142,7 +335,7 @@ export function javaTypeToSchema(
     );
     return {
       type: "array",
-      items: inner ? javaTypeToSchema(inner, index, depth + 1) : {},
+      items: inner ? javaTypeToSchema(inner, index, depth + 1, subst) : {},
     };
   }
 
@@ -159,16 +352,21 @@ export function javaTypeToSchema(
     if (name && COLLECTION_TYPES.has(name)) {
       return {
         type: "array",
-        items: args[0] ? javaTypeToSchema(args[0], index, depth + 1) : {},
+        items: args[0] ? javaTypeToSchema(args[0], index, depth + 1, subst) : {},
       };
     }
     if (name && WRAPPER_TYPES.has(name) && args[0]) {
-      return javaTypeToSchema(args[0], index, depth + 1);
+      return javaTypeToSchema(args[0], index, depth + 1, subst);
     }
     if (name === "Map" && args[1]) {
-      return { type: "object", additionalProperties: javaTypeToSchema(args[1], index, depth + 1) };
+      return { type: "object", additionalProperties: javaTypeToSchema(args[1], index, depth + 1, subst) };
     }
     if (name && index.byName.has(name)) {
+      const def = index.byName.get(name)!;
+      if (def.typeParameters.length && args.length) {
+        const componentName = ensureSpecializedComponent(def, index, subst ?? new Map(), args, depth);
+        return { $ref: `#/components/schemas/${componentName}` };
+      }
       ensureJavaComponent(name, index);
       return { $ref: `#/components/schemas/${name}` };
     }
@@ -198,7 +396,8 @@ export function javaTypeToSchema(
     if (DATE_TIME_TYPES.has(name)) return { type: "string", format: "date-time" };
     if (DATE_TYPES.has(name)) return { type: "string", format: "date" };
     if (TIME_TYPES.has(name)) return { type: "string", format: "time" };
-    if (name === "Object" || name === "JsonObject" || name === "JsonNode") return { type: "object" };
+    if (name === "Object" || name === "JsonObject" || name === "JsonNode" || name === "ObjectNode" || name === "JsonElement" || name === "JsonValue") return { type: "object" };
+    if (name === "ArrayNode" || name === "JsonArray") return { type: "array", items: {} };
     if (index.byName.has(name)) {
       ensureJavaComponent(name, index);
       return { $ref: `#/components/schemas/${name}` };

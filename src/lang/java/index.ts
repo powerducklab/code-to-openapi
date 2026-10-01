@@ -12,8 +12,12 @@ import { childrenOfType, findAll, findFirst } from "../treesitter/ast.js";
 
 export interface JavaField {
   readonly name: string;
+  /** Explicit Jackson name from @JsonProperty, when present. */
+  readonly jsonName?: string;
   readonly typeNode: TsNode;
   readonly required: boolean;
+  /** Field is excluded from JSON output by @JsonIgnore. */
+  readonly ignored: boolean;
 }
 
 export interface JavaTypeDef {
@@ -23,6 +27,17 @@ export interface JavaTypeDef {
   readonly node: TsNode;
   readonly fields: JavaField[];
   readonly enumValues: string[];
+  /** Declared class/record type parameters, e.g. ["T"] for CommonResult<T>. */
+  readonly typeParameters: string[];
+  /** Superclass type node (generic_type or type_identifier), if any. */
+  readonly superclass: TsNode | null;
+  /** Jackson property naming strategy declared via @JsonNaming. */
+  readonly naming: "snake_case" | "default";
+  /** Jackson polymorphic types declared with @JsonTypeInfo/@JsonSubTypes. */
+  readonly discriminator?: {
+    readonly property: string;
+    readonly subtypes: ReadonlyArray<{ readonly name: string; readonly type: string }>;
+  };
 }
 
 export interface JavaFile {
@@ -71,6 +86,118 @@ function hasRequiredAnnotation(node: TsNode): boolean {
   });
 }
 
+function annotationNamed(node: TsNode, name: string): TsNode | null {
+  for (const mod of modifiersOf(node)) {
+    if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
+    const id = mod.namedChildren.find((c) => c.type === "identifier");
+    if (id && id.text === name) return mod;
+  }
+  return null;
+}
+
+/** Explicit @JsonProperty("name") value on a declaration. */
+function jsonPropertyName(node: TsNode): string | undefined {
+  const annotation = annotationNamed(node, "JsonProperty");
+  if (!annotation) return undefined;
+  const literal = findFirst(
+    annotation,
+    (n) => n.type === "string_literal",
+  );
+  if (!literal) return undefined;
+  const fragment = literal.namedChildren.find((c) => c.type === "string_fragment");
+  return fragment ? fragment.text : literal.text.replace(/^"|"$/g, "");
+}
+
+function hasJsonIgnore(node: TsNode): boolean {
+  return Boolean(annotationNamed(node, "JsonIgnore"));
+}
+
+function collectTypeParameters(node: TsNode): string[] {
+  const params = node.namedChildren.find((c) => c.type === "type_parameters");
+  if (!params) return [];
+  return childrenOfType(params, "type_parameter")
+    .map((p) => p.namedChildren.find((c) => c.type === "type_identifier")?.text)
+    .filter((x): x is string => Boolean(x));
+}
+
+function collectSuperclass(node: TsNode): TsNode | null {
+  const superNode = node.namedChildren.find((c) => c.type === "superclass");
+  if (!superNode) return null;
+  return (
+    superNode.namedChildren.find(
+      (c) =>
+        c.type === "generic_type" ||
+        c.type === "type_identifier" ||
+        c.type === "scoped_identifier",
+    ) ?? null
+  );
+}
+
+function classNamingStrategy(node: TsNode): "snake_case" | "default" {
+  const annotation = annotationNamed(node, "JsonNaming");
+  return annotation && /SnakeCaseStrategy/.test(annotation.text)
+    ? "snake_case"
+    : "default";
+}
+
+/**
+ * Reads Jackson polymorphism declared as
+ * `@JsonTypeInfo(use = Id.NAME, property = "x")` together with
+ * `@JsonSubTypes({ @Type(value = Sub.class, name = "x"), ... })`.
+ * Returns null unless both the discriminator property and at least one
+ * resolvable subtype are declared.
+ */
+function collectDiscriminator(
+  node: TsNode,
+): { property: string; subtypes: Array<{ name: string; type: string }> } | null {
+  const typeInfo = annotationNamed(node, "JsonTypeInfo");
+  const subTypes = annotationNamed(node, "JsonSubTypes");
+  if (!typeInfo || !subTypes) return null;
+
+  const propertyPair = findFirst(typeInfo, (n) => {
+    if (n.type !== "element_value_pair") return false;
+    const key = n.namedChildren.find((c) => c.type === "identifier");
+    return key?.text === "property";
+  });
+  const propertyLiteral = propertyPair
+    ? findFirst(propertyPair, (n) => n.type === "string_literal")
+    : null;
+  const property = propertyLiteral
+    ? (propertyLiteral.namedChildren.find((c) => c.type === "string_fragment")?.text ??
+      propertyLiteral.text.replace(/^"|"$/g, ""))
+    : null;
+  if (!property) return null;
+
+  const subtypes: Array<{ name: string; type: string }> = [];
+  for (const nested of findAll(subTypes, (n) => n.type === "annotation")) {
+    const nestedName = annotationName(nested);
+    if (!nestedName || !/(^|\.)Type$/.test(nestedName)) continue;
+    const valuePair = findFirst(nested, (n) => {
+      if (n.type !== "element_value_pair") return false;
+      const key = n.namedChildren.find((c) => c.type === "identifier");
+      return key?.text === "value";
+    });
+    const namePair = findFirst(nested, (n) => {
+      if (n.type !== "element_value_pair") return false;
+      const key = n.namedChildren.find((c) => c.type === "identifier");
+      return key?.text === "name";
+    });
+    const typeNode = valuePair
+      ? findFirst(valuePair, (n) => n.type === "type_identifier")
+      : null;
+    const nameLiteral = namePair
+      ? findFirst(namePair, (n) => n.type === "string_literal")
+      : null;
+    const name = nameLiteral
+      ? (nameLiteral.namedChildren.find((c) => c.type === "string_fragment")?.text ??
+        nameLiteral.text.replace(/^"|"$/g, ""))
+      : null;
+    if (typeNode && name) subtypes.push({ name, type: typeNode.text });
+  }
+
+  return subtypes.length ? { property, subtypes } : null;
+}
+
 function typeNodeOf(node: TsNode): TsNode | null {
   return (
     node.namedChildren.find((child) => TYPE_NODE_TYPES.has(child.type)) ?? null
@@ -79,7 +206,14 @@ function typeNodeOf(node: TsNode): TsNode | null {
 
 function annotationName(node: TsNode): string | null {
   const id = node.namedChildren.find((c) => c.type === "identifier");
-  return id ? id.text : null;
+  if (id) return id.text;
+  // Scoped names such as JsonSubTypes.Type end in a scoped_identifier whose
+  // last identifier child carries the simple name.
+  const scoped = node.namedChildren.find((c) => c.type === "scoped_identifier");
+  const tail = scoped
+    ? scoped.namedChildren.filter((c) => c.type === "identifier").pop()
+    : undefined;
+  return tail?.text ?? null;
 }
 
 function collectRecordParams(node: TsNode): JavaField[] {
@@ -92,8 +226,12 @@ function collectRecordParams(node: TsNode): JavaField[] {
     if (!typeNode || !nameNode) continue;
     fields.push({
       name: nameNode.text,
+      ...(jsonPropertyName(param)
+        ? { jsonName: jsonPropertyName(param) }
+        : {}),
       typeNode,
       required: hasRequiredAnnotation(param),
+      ignored: hasJsonIgnore(param),
     });
   }
   return fields;
@@ -108,13 +246,17 @@ function collectClassFields(node: TsNode): JavaField[] {
     if (mods && /\bstatic\b/.test(mods.text)) continue;
     const typeNode = typeNodeOf(field);
     if (!typeNode) continue;
+    const jsonName = jsonPropertyName(field);
+    const ignored = hasJsonIgnore(field);
     for (const declarator of findAll(field, (n) => n.type === "variable_declarator")) {
       const nameNode = declarator.namedChildren.find((c) => c.type === "identifier");
       if (!nameNode) continue;
       fields.push({
         name: nameNode.text,
+        ...(jsonName ? { jsonName } : {}),
         typeNode,
         required: hasRequiredAnnotation(field),
+        ignored,
       });
     }
   }
@@ -169,12 +311,16 @@ export async function createJavaAnalysis(
         node: record,
         fields: collectRecordParams(record),
         enumValues: [],
+        typeParameters: collectTypeParameters(record),
+        superclass: null,
+        naming: classNamingStrategy(record),
       });
     }
 
     for (const cls of findAll(root, (n) => n.type === "class_declaration")) {
       const name = declarationName(cls);
       if (!name) continue;
+      const discriminator = collectDiscriminator(cls);
       registerType({
         kind: "class",
         name,
@@ -182,6 +328,10 @@ export async function createJavaAnalysis(
         node: cls,
         fields: collectClassFields(cls),
         enumValues: [],
+        typeParameters: collectTypeParameters(cls),
+        superclass: collectSuperclass(cls),
+        naming: classNamingStrategy(cls),
+        ...(discriminator ? { discriminator } : {}),
       });
     }
 
@@ -195,6 +345,9 @@ export async function createJavaAnalysis(
         node: en,
         fields: [],
         enumValues: collectEnumValues(en),
+        typeParameters: [],
+        superclass: null,
+        naming: "default",
       });
     }
   }
