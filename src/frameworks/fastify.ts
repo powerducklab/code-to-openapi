@@ -34,9 +34,13 @@ interface RouteSite {
   url: string;
   /** Native JSON Schema node from route options (`schema`), when present. */
   schemaNode: any | null;
+  /** Route generic `app.get<{ Params; Querystring; Body; Headers }>`, when present. */
+  genericNode: any | null;
   /** Full route options text, used for auth hint matching. */
   optionsText: string;
   handler: any | null;
+  /** Name of a local handler factory call, e.g. `callback("google")`. */
+  handlerFactoryName: string | null;
   origin: SourceLocation;
 }
 
@@ -44,6 +48,8 @@ interface RegisterEdge {
   parent: string;
   /** Local plugin identifier, when the plugin is imported/defined by name. */
   pluginName: string | null;
+  /** Factory call whose callee name returns a plugin (e.g. `routes(deps)`). */
+  pluginCallName: string | null;
   /** Inline plugin function/arrow node, when registered directly. */
   inlineNode: any | null;
   prefix: string;
@@ -57,6 +63,8 @@ interface FileModel {
   /** Root instance variable names (Fastify() call). */
   roots: Set<string>;
   moduleBindings: Map<string, { specifier: string; exportName: string }>;
+  /** Bindings imported from external packages (middleware plugins, etc.). */
+  externalBindings: Set<string>;
   routes: RouteSite[];
   edges: RegisterEdge[];
   listenPorts: number[];
@@ -216,6 +224,117 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
       return param ? { file, node: target, instanceParam: param } : null;
     };
 
+    // Locate a function-like binding by name in a model's file or an imported
+    // module. Returns the raw function node (factory or plugin alike).
+    const locateFunction = (
+      model: FileModel,
+      name: string,
+    ): { file: any; node: any } | null => {
+      let local: any = null;
+      model.source.forEachChild((child: any) => {
+        if (local) return;
+        if (ts.isFunctionDeclaration(child) && child.name?.text === name) local = child;
+        if (ts.isVariableStatement(child)) {
+          for (const decl of child.declarationList.declarations) {
+            if (
+              ts.isIdentifier(decl.name) &&
+              decl.name.text === name &&
+              decl.initializer &&
+              (ts.isArrowFunction(decl.initializer) ||
+                ts.isFunctionExpression(decl.initializer))
+            ) {
+              local = decl.initializer;
+            }
+          }
+        }
+      });
+      if (local) return { file: model.source, node: local };
+
+      if (!model.moduleBindings.has(name)) return null;
+      const imported = resolveImportedFile(analysis, model.source, name);
+      if (!imported) return null;
+      const { file, exportName } = imported;
+      let target: any = null;
+      file.forEachChild((child: any) => {
+        if (target) return;
+        if (
+          (ts.isFunctionDeclaration(child) || ts.isArrowFunction(child) || ts.isFunctionExpression(child)) &&
+          (exportName === "default" || child.name?.text === exportName)
+        ) {
+          target = child;
+        }
+        if (ts.isVariableStatement(child)) {
+          for (const decl of child.declarationList.declarations) {
+            if (
+              ts.isIdentifier(decl.name) &&
+              decl.name.text === exportName &&
+              decl.initializer &&
+              (ts.isArrowFunction(decl.initializer) ||
+                ts.isFunctionExpression(decl.initializer))
+            ) {
+              target = decl.initializer;
+            }
+          }
+        }
+        if (ts.isExportAssignment(child)) {
+          if (
+            ts.isArrowFunction(child.expression) ||
+            ts.isFunctionExpression(child.expression)
+          ) {
+            target = child.expression;
+          } else if (ts.isIdentifier(child.expression)) {
+            const ownerRel = relOfSource(file, models);
+            const owner = ownerRel ? models.get(ownerRel) : undefined;
+            const nested = owner ? locateFunction(owner, child.expression.text) : null;
+            if (nested) target = nested.node;
+          }
+        }
+      });
+      return target ? { file, node: target } : null;
+    };
+
+    /**
+     * Resolve a plugin factory call (`app.register(buildRoutes(deps))`): the
+     * named function returns the plugin function/arrow; the plugin's first
+     * parameter is the Fastify instance.
+     */
+    const resolveReturnedPlugin = (
+      model: FileModel,
+      name: string,
+    ): { file: any; node: any; instanceParam: string } | null => {
+      const factory = locateFunction(model, name);
+      if (!factory) return null;
+      const { file, node: factoryNode } = factory;
+      let plugin: any = null;
+
+      // Concise arrow whose body is the plugin itself: `(deps) => async (app) => {}`
+      if (
+        ts.isArrowFunction(factoryNode) &&
+        factoryNode.body &&
+        !ts.isBlock(factoryNode.body) &&
+        (ts.isArrowFunction(factoryNode.body) || ts.isFunctionExpression(factoryNode.body))
+      ) {
+        plugin = factoryNode.body;
+      } else if (factoryNode.body) {
+        const visit = (n: any) => {
+          if (plugin) return;
+          if (
+            ts.isReturnStatement(n) &&
+            n.expression &&
+            (ts.isArrowFunction(n.expression) || ts.isFunctionExpression(n.expression))
+          ) {
+            plugin = n.expression;
+            return;
+          }
+          ts.forEachChild(n, visit);
+        };
+        visit(factoryNode.body);
+      }
+      if (!plugin) return null;
+      const param = plugin.parameters?.[0]?.name?.getText?.(file);
+      return param ? { file, node: plugin, instanceParam: param } : null;
+    };
+
     const visitedScopes = new Set<string>();
 
     const processScope = (
@@ -229,6 +348,53 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
       const scopeKey = `${model.rel}:${instanceName}:${prefix}:${scopeNode?.pos ?? 0}`;
       if (visitedScopes.has(scopeKey)) return;
       visitedScopes.add(scopeKey);
+
+      // Resolve a handler factory declared inside this scope, e.g.
+      // `const callback = (provider) => async (request, reply) => {...}`.
+      const resolveLocalHandlerFactory = (name: string): any | null => {
+        let factory: any = null;
+        const findDecl = (n: any) => {
+          if (factory) return;
+          if (
+            ts.isVariableDeclaration(n) &&
+            ts.isIdentifier(n.name) &&
+            n.name.text === name &&
+            n.initializer &&
+            (ts.isArrowFunction(n.initializer) ||
+              ts.isFunctionExpression(n.initializer) ||
+              ts.isFunctionDeclaration(n.initializer))
+          ) {
+            factory = n.initializer;
+          }
+          if (ts.isFunctionDeclaration(n) && n.name?.text === name) factory = n;
+          ts.forEachChild(n, findDecl);
+        };
+        findDecl(scopeNode);
+        if (!factory) return null;
+        if (
+          ts.isArrowFunction(factory) &&
+          factory.body &&
+          !ts.isBlock(factory.body) &&
+          (ts.isArrowFunction(factory.body) || ts.isFunctionExpression(factory.body))
+        ) {
+          return factory.body;
+        }
+        let inner: any = null;
+        const findReturn = (n: any) => {
+          if (inner) return;
+          if (
+            ts.isReturnStatement(n) &&
+            n.expression &&
+            (ts.isArrowFunction(n.expression) || ts.isFunctionExpression(n.expression))
+          ) {
+            inner = n.expression;
+            return;
+          }
+          ts.forEachChild(n, findReturn);
+        };
+        if (factory.body) findReturn(factory.body);
+        return inner;
+      };
 
       const sites = collectSites(
         ts,
@@ -254,8 +420,12 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
         );
 
         const schemaFacts = extractRouteSchema(ts, analysis, site.schemaNode);
-        const handlerFacts = site.handler
-          ? analyzeFastifyHandler(analysis, model.source, site.handler, site.origin, pathParams)
+        let resolvedHandler = site.handler;
+        if (!resolvedHandler && site.handlerFactoryName) {
+          resolvedHandler = resolveLocalHandlerFactory(site.handlerFactoryName);
+        }
+        const handlerFacts = resolvedHandler
+          ? analyzeFastifyHandler(analysis, model.source, resolvedHandler, site.origin, pathParams, site.genericNode)
           : { parameters: [], responses: [], gaps: ["response-unknown" as GapCode], sse: false, bodyKnown: false };
 
         // Merge: explicit JSON Schema (high confidence) wins over inferred.
@@ -279,7 +449,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           confidence: rankConfidence(merged.gaps),
           gaps: merged.gaps,
           components: [],
-          handlerSource: sliceNode(ts, model.source, site.handler),
+          handlerSource: sliceNode(ts, model.source, resolvedHandler),
         };
         candidates.push(candidate);
       }
@@ -292,6 +462,10 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
             instanceName;
           processScope(model, edge.inlineNode.body ?? edge.inlineNode, param, childPrefix, depth + 1);
         } else if (edge.pluginName) {
+          if (model.externalBindings.has(edge.pluginName)) {
+            // Third-party middleware plugin (helmet, cors, ...): no routes.
+            continue;
+          }
           const resolved = resolvePlugin(model, edge.pluginName);
           if (resolved) {
             const childRel = relOfSource(resolved.file, models);
@@ -303,6 +477,22 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
             unresolved.push({
               reason: "handler-unresolved",
               message: `Fastify plugin "${edge.pluginName}" could not be resolved`,
+              origin: { file: model.rel },
+            });
+          }
+        } else if (edge.pluginCallName) {
+          if (model.externalBindings.has(edge.pluginCallName)) continue;
+          const returned = resolveReturnedPlugin(model, edge.pluginCallName);
+          if (returned) {
+            const childRel = relOfSource(returned.file, models);
+            const childModel = childRel ? models.get(childRel) : undefined;
+            if (childModel) {
+              processScope(childModel, returned.node.body ?? returned.node, returned.instanceParam, childPrefix, depth + 1);
+            }
+          } else {
+            unresolved.push({
+              reason: "handler-unresolved",
+              message: `Fastify plugin factory "${edge.pluginCallName}()" could not be resolved`,
               origin: { file: model.rel },
             });
           }
@@ -386,6 +576,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     factoryBindings: new Set(),
     roots: new Set(),
     moduleBindings: new Map(),
+    externalBindings: new Set(),
     routes: [],
     edges: [],
     listenPorts: [],
@@ -410,6 +601,18 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
               specifier,
               exportName: element.propertyName?.text ?? element.name.text,
             });
+          }
+        }
+      } else if (!specifier.startsWith(".") && child.importClause) {
+        // External package (e.g. @fastify/helmet): middleware plugins carry
+        // no project routes, so they are never reported as unresolved.
+        if (child.importClause.name) {
+          model.externalBindings.add(child.importClause.name.text);
+        }
+        const named = child.importClause.namedBindings;
+        if (named && ts.isNamedImports(named)) {
+          for (const element of named.elements) {
+            model.externalBindings.add(element.name.text);
           }
         }
       }
@@ -498,9 +701,17 @@ function collectSites(
             if (typeof raw === "string") pluginPrefix = raw;
           }
           if (target && (ts.isArrowFunction(target) || ts.isFunctionExpression(target))) {
-            edges.push({ parent: instanceName, pluginName: null, inlineNode: target, prefix: pluginPrefix });
+            edges.push({ parent: instanceName, pluginName: null, pluginCallName: null, inlineNode: target, prefix: pluginPrefix });
           } else if (target && ts.isIdentifier(target)) {
-            edges.push({ parent: instanceName, pluginName: target.text, inlineNode: null, prefix: pluginPrefix });
+            edges.push({ parent: instanceName, pluginName: target.text, pluginCallName: null, inlineNode: null, prefix: pluginPrefix });
+          } else if (
+            target &&
+            ts.isCallExpression(target) &&
+            ts.isIdentifier(target.expression)
+          ) {
+            // Factory call: `app.register(buildRoutes({ pool }))` — the callee
+            // is a local/imported function that returns the plugin function.
+            edges.push({ parent: instanceName, pluginName: null, pluginCallName: target.expression.text, inlineNode: null, prefix: pluginPrefix });
           }
         }
 
@@ -510,17 +721,36 @@ function collectSites(
           if (url !== null) {
             const fnArgs = [...node.arguments].slice(1);
             const options = fnArgs.find((a: any) => ts.isObjectLiteralExpression(a)) ?? null;
-            const handler =
-              [...fnArgs].reverse().find(
-                (a: any) => ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a),
-              ) ?? null;
+            // The handler is the last function-like argument after dropping
+            // the optional options object: an inline function, an identifier
+            // (imported handler), or a factory call such as `callback("google")`.
+            const handlerArgs = fnArgs.filter((a: any) => a !== options);
+            const lastArg = handlerArgs[handlerArgs.length - 1] ?? null;
+            let handler: any = null;
+            let handlerFactoryName: string | null = null;
+            if (
+              lastArg &&
+              (ts.isArrowFunction(lastArg) ||
+                ts.isFunctionExpression(lastArg) ||
+                ts.isIdentifier(lastArg))
+            ) {
+              handler = lastArg;
+            } else if (
+              lastArg &&
+              ts.isCallExpression(lastArg) &&
+              ts.isIdentifier(lastArg.expression)
+            ) {
+              handlerFactoryName = lastArg.expression.text;
+            }
             routes.push({
               instance: instanceName,
               method,
               url,
               schemaNode: options ? getObjectProperty(ts, options, "schema") : null,
+              genericNode: node.typeArguments?.[0] ?? null,
               optionsText: options ? options.getText(model.source) : "",
               handler,
+              handlerFactoryName,
               origin,
             });
           }
@@ -548,8 +778,10 @@ function collectSites(
               method: methodText,
               url: urlText,
               schemaNode: schemaNode && ts.isObjectLiteralExpression(schemaNode) ? schemaNode : null,
+              genericNode: null,
               optionsText: obj.getText(model.source),
               handler: handlerNode,
+              handlerFactoryName: null,
               origin,
             });
           }
@@ -663,6 +895,7 @@ function analyzeFastifyHandler(
   handlerNode: any,
   origin: SourceLocation,
   pathParams: Set<string>,
+  routeGenericNode: any | null = null,
 ): Facts {
   const { ts, checker } = analysis;
   const gaps = new Set<GapCode>();
@@ -721,31 +954,44 @@ function analyzeFastifyHandler(
   };
 
   // FastifyRequest<{ Params: T; Querystring: T; Body: T; Headers: T }>
-  const reqType = handler.parameters?.[0]?.type;
-  if (reqType && ts.isTypeReferenceNode(reqType) && reqType.typeArguments?.length) {
-    const shape = reqType.typeArguments[0];
-    if (shape && ts.isTypeLiteralNode(shape)) {
-      for (const member of shape.members) {
-        if (!ts.isPropertySignature(member) || !member.type || !member.name) continue;
-        const key = member.name.getText(file);
-        const schema = schemaOfTypeNode(member.type);
-        if (key === "Params" && schema?.properties) {
-          for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
-            addParam("path", name, s, "high", true);
-          }
-        } else if ((key === "Querystring" || key === "Query") && schema?.properties) {
-          for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
-            addParam("query", name, s, "high", (schema.required as string[] | undefined)?.includes(name) ?? false);
-          }
-        } else if (key === "Headers" && schema?.properties) {
-          for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
-            addParam("header", name.toLowerCase(), s, "high", false);
-          }
-        } else if (key === "Body" && schema) {
-          factsBody.schema = schema;
+  // The same RouteGeneric shape can also sit on the call site:
+  // `app.get<{ Params: T; Body: T }>(url, handler)`.
+  const applyGenericShape = (shape: any) => {
+    if (!shape || !ts.isTypeLiteralNode(shape)) return;
+    for (const member of shape.members) {
+      if (!ts.isPropertySignature(member) || !member.type || !member.name) continue;
+      const key = member.name.getText(file);
+      const schema = schemaOfTypeNode(member.type);
+      if (key === "Params" && schema?.properties) {
+        for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
+          addParam("path", name, s, "high", true);
         }
+      } else if ((key === "Querystring" || key === "Query") && schema?.properties) {
+        for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
+          addParam("query", name, s, "high", (schema.required as string[] | undefined)?.includes(name) ?? false);
+        }
+      } else if (key === "Headers" && schema?.properties) {
+        for (const [name, s] of Object.entries(schema.properties as Record<string, JsonSchema>)) {
+          addParam("header", name.toLowerCase(), s, "high", false);
+        }
+      } else if (key === "Body" && schema) {
+        factsBody.schema = schema;
       }
     }
+  };
+
+  const reqType = handler.parameters?.[0]?.type;
+  if (reqType && ts.isTypeReferenceNode(reqType) && reqType.typeArguments?.length) {
+    applyGenericShape(reqType.typeArguments[0]);
+  }
+  if (routeGenericNode && ts.isTypeLiteralNode(routeGenericNode)) {
+    applyGenericShape(routeGenericNode);
+  } else if (
+    routeGenericNode &&
+    ts.isTypeReferenceNode(routeGenericNode) &&
+    routeGenericNode.typeArguments?.length
+  ) {
+    applyGenericShape(routeGenericNode.typeArguments[0]);
   }
 
   const queryFields = new Map<string, JsonSchema | undefined>();
@@ -780,30 +1026,87 @@ function analyzeFastifyHandler(
     return undefined;
   };
 
-  const recordResponse = (status: string, schema: JsonSchema | undefined, confidence: Confidence) => {
-    const mediaType = "application/json";
-    const key = `${status}:${mediaType}`;
+  const recordResponse = (
+    status: string,
+    schema: JsonSchema | undefined,
+    confidence: Confidence,
+    mediaType = "application/json",
+    noContent = false,
+  ) => {
+    const key = noContent ? `${status}:` : `${status}:${mediaType}`;
     const existing = responses.get(key);
     if (existing?.content?.[0]) {
       if (schema && (!existing.content[0].schema || confidence === "high")) {
         existing.content[0].schema = schema;
       }
       if (confidence === "high") existing.confidence = "high";
+    } else if (existing && noContent) {
+      existing.confidence = confidence;
     } else {
       responses.set(key, {
         statusCode: status,
         description: "",
         confidence,
-        content: [{ mediaType, ...(schema ? { schema } : {}) }],
+        content: noContent ? [] : [{ mediaType, ...(schema ? { schema } : {}) }],
       });
     }
   };
 
   const body = handler.body;
   if (body) {
-    const visit = (node: any) => {
+    const helperSeen = new Set<string>();
+
+    // Lexical lookup of a function declared in an enclosing block/module,
+    // mirroring JS scope resolution for sibling helpers inside a plugin.
+    const resolveLexicalFunction = (
+      name: string,
+      startNode: any,
+    ): { node: any; file: any } | null => {
+      const matchIn = (container: any): { node: any; file: any } | null => {
+        const statements = container?.statements;
+        if (!Array.isArray(statements)) return null;
+        for (const stmt of statements) {
+          if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === name) {
+            return { node: stmt, file };
+          }
+          if (
+            ts.isVariableStatement(stmt) &&
+            stmt.declarationList.declarations.some(
+              (d: any) =>
+                ts.isIdentifier(d.name) &&
+                d.name.text === name &&
+                d.initializer &&
+                (ts.isArrowFunction(d.initializer) ||
+                  ts.isFunctionExpression(d.initializer)),
+            )
+          ) {
+            const decl = stmt.declarationList.declarations.find(
+              (d: any) => ts.isIdentifier(d.name) && d.name.text === name,
+            );
+            return { node: decl.initializer, file };
+          }
+        }
+        return null;
+      };
+
+      // Helpers declared inside the handler's own body block.
+      if (startNode?.body && ts.isBlock(startNode.body)) {
+        const own = matchIn(startNode.body);
+        if (own) return own;
+      }
+      let scope: any = startNode;
+      while (scope && scope !== file) {
+        const container = scope.parent;
+        const found = matchIn(container);
+        if (found) return found;
+        scope = container;
+      }
+      return null;
+    };
+
+    const visit = (node: any, roots: { req: string; reply: string }, helperDepth: number) => {
       // request.<member> access
-      if (ts.isPropertyAccessExpression(node) && rootIdentifier(node) === reqName) {
+      if (ts.isPropertyAccessExpression(node) && rootIdentifier(node) === roots.req) {
         const full = node.getText(file);
         const member = node.name.text;
         const schema = typeAt(node);
@@ -814,13 +1117,13 @@ function analyzeFastifyHandler(
               queryFields.set(el.name.text, typeAt(el.name));
             }
           }
-        } else if (full.startsWith(`${reqName}.query.`) && member !== "query") {
+        } else if (full.startsWith(`${roots.req}.query.`) && member !== "query") {
           queryFields.set(member, schema);
-        } else if (full.startsWith(`${reqName}.params.`) && member !== "params") {
+        } else if (full.startsWith(`${roots.req}.params.`) && member !== "params") {
           addParam("path", member, schema, schema ? "high" : "low");
-        } else if (full.startsWith(`${reqName}.headers.`) && member !== "headers") {
+        } else if (full.startsWith(`${roots.req}.headers.`) && member !== "headers") {
           headerFields.set(member.toLowerCase(), schema);
-        } else if (full === `${reqName}.body`) {
+        } else if (full === `${roots.req}.body`) {
           factsBody.referenced = true;
           const bodyType = typeAt(node);
           if (bodyType) factsBody.schema = bodyType;
@@ -831,7 +1134,7 @@ function analyzeFastifyHandler(
               }
             }
           }
-        } else if (full.startsWith(`${reqName}.body.`) && member !== "body") {
+        } else if (full.startsWith(`${roots.req}.body.`) && member !== "body") {
           factsBody.referenced = true;
           factsBody.fields.set(member, schema);
         }
@@ -841,51 +1144,148 @@ function analyzeFastifyHandler(
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        rootIdentifier(node.expression.expression) === reqName &&
+        rootIdentifier(node.expression.expression) === roots.req &&
         ["get", "header"].includes(node.expression.name.text) &&
         ts.isStringLiteralLike(node.arguments[0])
       ) {
         headerFields.set(node.arguments[0].text.toLowerCase(), undefined);
       }
 
-      // reply.code(201).send(payload) / reply.send(payload)
+      // reply.code(201).type(media).send(payload) / reply.send(payload)
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        rootIdentifier(node.expression.expression) === replyName &&
+        rootIdentifier(node.expression.expression) === roots.reply &&
         node.expression.name.text === "send"
       ) {
         let status = "200";
-        // Chain form: reply.code(N).send(x)
+        let mediaType = "application/json";
+        // Walk the chain: reply.code(N).type("...").send(x)
         let cur: any = node.expression.expression;
         while (cur && ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression)) {
           if (cur.expression.name.text === "code") {
             const raw = cur.arguments[0]?.getText(file);
             if (raw && /^\d{3}$/.test(raw)) status = raw;
+          } else if (cur.expression.name.text === "type" && ts.isStringLiteralLike(cur.arguments[0])) {
+            mediaType = cur.arguments[0].text;
+          } else if (cur.expression.name.text === "header" && ts.isStringLiteralLike(cur.arguments[0])) {
+            const headerName = cur.arguments[0].text.toLowerCase();
+            if (headerName === "content-type" && ts.isStringLiteralLike(cur.arguments[1])) {
+              mediaType = cur.arguments[1].text;
+            }
           }
           cur = ts.isPropertyAccessExpression(cur.expression) ? cur.expression.expression : null;
         }
         const payload = node.arguments[0];
         if (payload) {
-          recordResponse(status, typeAt(payload), "high");
+          recordResponse(status, typeAt(payload), "high", mediaType);
         } else {
-          recordResponse(status, undefined, "medium");
+          recordResponse(status, undefined, "medium", mediaType);
         }
       }
 
-      // async return payload
+      // reply.redirect([code,] url)
       if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        rootIdentifier(node.expression.expression) === roots.reply &&
+        node.expression.name.text === "redirect"
+      ) {
+        let status = "302";
+        if (ts.isNumericLiteral(node.arguments[0])) status = node.arguments[0].text;
+        let cur: any = node.expression.expression;
+        while (cur && ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression)) {
+          if (cur.expression.name.text === "code" && ts.isNumericLiteral(cur.arguments[0])) {
+            status = cur.arguments[0].text;
+          }
+          cur = ts.isPropertyAccessExpression(cur.expression) ? cur.expression.expression : null;
+        }
+        recordResponse(status, undefined, "high", "text/html", true);
+      }
+
+      // async return payload (handler body only; helper returns are not responses)
+      if (
+        helperDepth === 0 &&
         ts.isReturnStatement(node) &&
         node.expression &&
         handler.modifiers?.some?.((m: any) => m.kind === ts.SyntaxKind.AsyncKeyword)
       ) {
-        const schema = typeAt(node.expression);
-        recordResponse("200", schema, schema ? "high" : "medium");
+        // `return reply.redirect()/send()/...` is a reply action, not a body.
+        const rootedAtReply =
+          ts.isCallExpression(node.expression) &&
+          rootIdentifier(node.expression.expression) === roots.reply;
+        // A closure helper declared inside the handler performs reply
+        // actions on its own; an untyped call to it is not a body.
+        const untypedClosureCall =
+          ts.isCallExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          !typeAt(node.expression) &&
+          (() => {
+            const lexical = resolveLexicalFunction(
+              node.expression!.expression.text,
+              handler,
+            );
+            const b = handler.body;
+            return (
+              lexical &&
+              b &&
+              lexical.node.pos >= b.pos &&
+              lexical.node.end <= b.end
+            );
+          })();
+        if (!rootedAtReply && !untypedClosureCall) {
+          const schema = typeAt(node.expression);
+          recordResponse("200", schema, schema ? "high" : "medium");
+        }
       }
 
-      ts.forEachChild(node, visit);
+      // Descend into local/imported helpers that receive request or reply,
+      // e.g. `await serveOas(token, request, reply)` (bounded, cycle-guarded).
+      if (
+        helperDepth < 2 &&
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression)
+      ) {
+        const calleeName = node.expression.text;
+        const lexical = resolveLexicalFunction(calleeName, handler);
+        const resolved = lexical ?? resolveHandler(analysis, file, node.expression);
+        const fnNode = resolved?.node;
+        const fnFile = resolved?.file ?? file;
+        if (fnNode?.parameters && fnNode.body) {
+          const nextRoots = { ...roots };
+          let mapped = false;
+          fnNode.parameters.forEach((param: any, i: number) => {
+            const arg = node.arguments[i];
+            const paramName = param.name?.getText?.(fnFile);
+            if (!paramName || !arg || !ts.isIdentifier(arg)) return;
+            if (arg.text === roots.req) {
+              nextRoots.req = paramName;
+              mapped = true;
+            } else if (arg.text === roots.reply) {
+              nextRoots.reply = paramName;
+              mapped = true;
+            }
+          });
+          // A helper declared inside the handler body closes over req/reply.
+          const handlerBody = handler.body;
+          const isClosure =
+            !mapped &&
+            lexical &&
+            handlerBody &&
+            fnNode.pos >= handlerBody.pos &&
+            fnNode.end <= handlerBody.end;
+          if (isClosure) mapped = true;
+          const key = `${fnFile.fileName}:${fnNode.pos ?? 0}:${nextRoots.req}:${nextRoots.reply}`;
+          if (mapped && !helperSeen.has(key)) {
+            helperSeen.add(key);
+            visit(fnNode.body, nextRoots, helperDepth + 1);
+          }
+        }
+      }
+
+      ts.forEachChild(node, (child: any) => visit(child, roots, helperDepth));
     };
-    visit(body);
+    visit(body, { req: reqName, reply: replyName }, 0);
 
     // Explicit async return type annotation.
     if (handler.type && ts.isTypeReferenceNode(handler.type)) {
@@ -897,6 +1297,16 @@ function analyzeFastifyHandler(
         recordResponse("200", schema, "high");
       }
     }
+  }
+
+  // Concise arrow with an expression body: implicit return value.
+  if (
+    ts.isArrowFunction(handler) &&
+    handler.body &&
+    !ts.isBlock(handler.body)
+  ) {
+    const schema = typeAt(handler.body);
+    recordResponse("200", schema, schema ? "high" : "medium");
   }
 
   for (const [name, schema] of queryFields) {
@@ -941,7 +1351,13 @@ function analyzeFastifyHandler(
     gaps.add("query-unknown");
   }
   if (responses.size === 0) gaps.add("response-unknown");
-  else if ([...responses.values()].some((r) => !r.content?.[0]?.schema)) {
+  else if (
+    [...responses.values()].some(
+      (r) =>
+        !/^(204|3\d\d)$/.test(r.statusCode) &&
+        !r.content?.some((m) => m.schema || m.itemSchema),
+    )
+  ) {
     gaps.add("response-schema-unknown");
   }
 
@@ -996,7 +1412,11 @@ function mergeFacts(schema: Facts, inferred: Facts, pathParams: Set<string>): Fa
   if (responses.length === 0) {
     gaps.add("response-unknown");
   } else if (
-    responses.some((r) => !r.content?.some((m) => m.schema || m.itemSchema))
+    responses.some(
+      (r) =>
+        !/^(204|3\d\d)$/.test(r.statusCode) &&
+        !r.content?.some((m) => m.schema || m.itemSchema),
+    )
   ) {
     gaps.add("response-schema-unknown");
   }

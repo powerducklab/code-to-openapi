@@ -344,6 +344,22 @@ export function analyzeHandler(
   const reqName = handler.parameters?.[0]?.name?.getText?.(file) ?? "req";
   const resName = handler.parameters?.[1]?.name?.getText?.(file) ?? "res";
 
+  // In plain JavaScript the checker only knows Express's library-wide
+  // generics (query: string | Query | Array, etc.). Those are not user
+  // contracts and must not be reported as typed fields; rely on syntax.
+  const reqParam = handler.parameters?.[0];
+  const hasJsDocType = Boolean(
+    reqParam?.jsDoc?.some?.((d: any) =>
+      d.tags?.some?.((tag: any) => tag.tagName?.text === "param" || tag.typeExpression),
+    ),
+  );
+  const trustInferredReqTypes = !(
+    (file.scriptKind === ts.ScriptKind.JS ||
+      file.scriptKind === ts.ScriptKind.JSX) &&
+    !reqParam?.type &&
+    !hasJsDocType
+  );
+
   const addParam = (
     location: RouteParameter["in"],
     name: string,
@@ -491,9 +507,11 @@ export function analyzeHandler(
       if (!ts.isBindingElement(element) || !ts.isIdentifier(element.name)) continue;
       let schema: JsonSchema | undefined;
       try {
-        const type = checker.getTypeAtLocation(element.name);
-        if (type && !(type.flags & ts.TypeFlags.Any)) {
-          schema = typeToSchema(type, analysis.schemaContext);
+        if (trustInferredReqTypes) {
+          const type = checker.getTypeAtLocation(element.name);
+          if (type && !(type.flags & ts.TypeFlags.Any)) {
+            schema = typeToSchema(type, analysis.schemaContext);
+          }
         }
       } catch {
         // no type info
@@ -518,9 +536,11 @@ export function analyzeHandler(
         if (member || /^req\.(params|query|body)$/.test(fullText)) {
           let schema: JsonSchema | undefined;
           try {
-            const type = checker.getTypeAtLocation(node);
-            if (type && !(type.flags & ts.TypeFlags.Any)) {
-              schema = typeToSchema(type, analysis.schemaContext);
+            if (trustInferredReqTypes) {
+              const type = checker.getTypeAtLocation(node);
+              if (type && !(type.flags & ts.TypeFlags.Any)) {
+                schema = typeToSchema(type, analysis.schemaContext);
+              }
             }
           } catch {
             // no type info

@@ -26,6 +26,8 @@ export interface SchemaContext {
   isProjectFile: (fileName: string) => boolean;
   /** Cycle guard, keyed by component name. */
   inProgress: Set<string>;
+  /** Cycle guard for anonymous structural expansion, keyed by type id. */
+  activeTypes: Set<string>;
 }
 
 let componentCounter = 0;
@@ -46,17 +48,35 @@ function declarationInProject(ctx: SchemaContext, symbol: any): boolean {
   });
 }
 
+function isNamedDeclarationKind(ts: TsShim, d: any): boolean {
+  return [
+    ts.SyntaxKind.InterfaceDeclaration,
+    ts.SyntaxKind.ClassDeclaration,
+    ts.SyntaxKind.TypeAliasDeclaration,
+    ts.SyntaxKind.EnumDeclaration,
+  ].includes(d.kind);
+}
+
 function isNamedUserDeclaration(ctx: SchemaContext, symbol: any): boolean {
   if (!symbol?.declarations || !declarationInProject(ctx, symbol)) return false;
-  const { ts } = ctx;
   return symbol.declarations.some((d: any) =>
-    [
-      ts.SyntaxKind.InterfaceDeclaration,
-      ts.SyntaxKind.ClassDeclaration,
-      ts.SyntaxKind.TypeAliasDeclaration,
-      ts.SyntaxKind.EnumDeclaration,
-    ].includes(d.kind),
+    isNamedDeclarationKind(ctx.ts, d),
   );
+}
+
+// Named declarations coming from node_modules are treated as opaque objects:
+// structurally expanding them (e.g. a passthrough OpenAPI document) is both
+// unbounded and uninformative, and can recurse forever.
+function isExternalNamedDeclaration(ctx: SchemaContext, symbol: any): boolean {
+  if (!symbol?.declarations) return false;
+  const kinds = symbol.declarations.filter((d: any) =>
+    isNamedDeclarationKind(ctx.ts, d),
+  );
+  if (!kinds.length) return false;
+  return !kinds.some((d: any) => {
+    const source = d.getSourceFile?.();
+    return source && ctx.isProjectFile(source.fileName);
+  });
 }
 
 function ref(name: string): JsonSchema {
@@ -166,11 +186,26 @@ export function typeToSchema(
     return hoistComponent(type, symbol, ctx, hintName);
   }
 
+  // External named declaration (library type): opaque and uninformative about
+  // the user's contract; return an empty schema so the completeness gate keeps
+  // an honest gap instead of treating it as a high-confidence user schema.
+  if (symbol && isExternalNamedDeclaration(ctx, symbol)) {
+    return {};
+  }
+
   // Object shapes (including mapped Pick/Omit/Partial resolve here).
   const properties = type.getProperties?.() ?? [];
   const stringIndex = checker.getIndexTypeOfType?.(type, ts.IndexKind.String);
   if (properties.length > 0 || stringIndex) {
-    return objectSchema(type, properties, stringIndex, ctx, symbol);
+    // Cycle guard for anonymous recursive structural types.
+    const typeKey = `t:${type.id ?? namePath}`;
+    if (type.id != null && ctx.activeTypes.has(typeKey)) return {};
+    ctx.activeTypes.add(typeKey);
+    try {
+      return objectSchema(type, properties, stringIndex, ctx, symbol);
+    } finally {
+      ctx.activeTypes.delete(typeKey);
+    }
   }
 
   // Fallback: trust the apparent type once, otherwise leave open.
@@ -195,14 +230,18 @@ function unionSchema(type: any, ctx: SchemaContext, hintName?: string): JsonSche
   );
   const nonNull = members.filter((t: any) => !(t.flags & ctx.ts.TypeFlags.Null));
 
-  // Optional property (T | undefined) collapses back to T.
-  if (!includesNull && nonNull.length === 1) {
-    return typeToSchema(nonNull[0], ctx, hintName);
-  }
+  // Drop members that resolve to empty schemas (opaque external library
+  // types); an all-empty union carries no contract information.
+  const memberSchemas = nonNull.map((t: any) => typeToSchema(t, ctx));
+  const meaningful = memberSchemas.filter(
+    (s: JsonSchema) => s && Object.keys(s).length > 0,
+  );
+  if (meaningful.length === 0) return {};
+  if (!includesNull && meaningful.length === 1) return meaningful[0];
 
   // Single non-null member + null -> nullable scalar/object.
-  if (includesNull && nonNull.length === 1) {
-    const inner = typeToSchema(nonNull[0], ctx, hintName);
+  if (includesNull && meaningful.length === 1) {
+    const inner = meaningful[0];
     if (inner.$ref) return { oneOf: [inner, { type: "null" }] };
     const types = inner.type
       ? Array.isArray(inner.type)
@@ -220,14 +259,23 @@ function unionSchema(type: any, ctx: SchemaContext, hintName?: string): JsonSche
   );
   if (literals.length === nonNull.length && literals.length > 0) {
     const values = literals.map((t: any) => {
-      const v = ctx.checker.typeToString(t);
-      return t.flags & ctx.ts.TypeFlags.NumberLiteral ? Number(v.replace(/_/g, "")) : v;
+      const raw = ctx.checker.typeToString(t);
+      if (t.flags & ctx.ts.TypeFlags.NumberLiteral) {
+        return Number(raw.replace(/_/g, ""));
+      }
+      // typeToString quotes string literals; strip one matching pair.
+      return raw.replace(/^(['"])(.*)\1$/, "$2");
     });
     const typeName = typeof values[0] === "number" ? "number" : "string";
     return { type: typeName, enum: values };
   }
 
-  return { oneOf: nonNull.map((t: any) => typeToSchema(t, ctx)) };
+  return {
+    oneOf: [
+      ...meaningful,
+      ...(includesNull ? [{ type: "null" } as JsonSchema] : []),
+    ],
+  };
 }
 
 function recordSchema(type: any, ctx: SchemaContext): JsonSchema {
@@ -316,7 +364,15 @@ function hoistComponent(
       type,
       ctx.ts.IndexKind.String,
     );
-    ctx.components.set(name, objectSchema(type, properties, stringIndex, ctx, symbol));
+    // Build the schema before registering the component so a failure never
+    // leaves a dangling $ref; fall back to an opaque object rather than throw.
+    let schema: JsonSchema;
+    try {
+      schema = objectSchema(type, properties, stringIndex, ctx, symbol);
+    } catch {
+      schema = { type: "object" };
+    }
+    ctx.components.set(name, schema);
   }
 
   ctx.inProgress.delete(name);
@@ -337,6 +393,7 @@ export function createSchemaContext(
     symbolToComponent: new Map(),
     isProjectFile,
     inProgress: new Set(),
+    activeTypes: new Set(),
   };
 }
 

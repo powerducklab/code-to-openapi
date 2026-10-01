@@ -45,6 +45,8 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
   }
 
   const typedResponses = candidate.responses.filter((r) => {
+    // 204 and 3xx responses carry no JSON body by definition.
+    if (/^(204|3\d\d)$/.test(r.statusCode)) return true;
     if (!r.content) return true;
     return r.content.every((m) => {
       if (m.schema || m.itemSchema) return true;
@@ -60,6 +62,21 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
     gaps.add("response-unknown");
   } else if (typedResponses.length !== candidate.responses.length) {
     gaps.add("response-schema-unknown");
+  } else if (
+    candidate.responses.every((r) => /^(204|3\d\d)$/.test(r.statusCode))
+  ) {
+    // Bodyless 204/3xx responses never need a schema.
+    gaps.delete("response-schema-unknown");
+  }
+
+  // 204/3xx responses carry no body by definition: normalize away any
+  // placeholder media so the converted document stays valid. Other media
+  // without schema is kept on purpose (weakly typed packs surface the gap as
+  // an empty schema for the AI resolver or the user to fill).
+  for (const response of candidate.responses) {
+    if (/^(204|3\d\d)$/.test(response.statusCode)) {
+      response.content = undefined;
+    }
   }
 
   let confidence: Confidence = candidate.confidence;
