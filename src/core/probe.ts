@@ -42,6 +42,10 @@ export function probeManifest(root: string, index: FileIndex): DependencyManifes
 
   probePython(root, packages);
   probeGo(root, packages);
+  probeJava(root, packages);
+  probeCSharp(root, index, packages);
+  probeRust(root, packages);
+  probePhp(root, packages);
 
   return { packages, packageJsonPath };
 }
@@ -108,4 +112,103 @@ export function hasAnyDependency(
   names: readonly string[],
 ): boolean {
   return names.some((name) => manifest.packages.has(name));
+}
+
+/** Maven pom.xml and Gradle builds: Spring Boot starters, frameworks. */
+function probeJava(root: string, packages: Map<string, string>): void {
+  const pom = join(root, "pom.xml");
+  if (existsSync(pom)) {
+    try {
+      const text = readFileSync(pom, "utf8");
+      for (const match of text.matchAll(
+        /<artifactId>\s*([A-Za-z0-9._-]+)\s*<\/artifactId>/g,
+      )) {
+        addPackage(packages, match[1]!);
+      }
+    } catch {
+      // Ignore unreadable pom files.
+    }
+  }
+
+  for (const gradle of ["build.gradle", "build.gradle.kts"]) {
+    const path = join(root, gradle);
+    if (!existsSync(path)) continue;
+    try {
+      const text = readFileSync(path, "utf8");
+      for (const match of text.matchAll(
+        /(?:implementation|api|compile|runtimeOnly)\s*(?:\(|\s)\s*["']([^:"']+):([^:"']+)/g,
+      )) {
+        addPackage(packages, `${match[1]}:${match[2]}`);
+      }
+    } catch {
+      // Ignore unreadable Gradle files.
+    }
+  }
+}
+
+/** .csproj PackageReference entries, including monorepo leaves. */
+function probeCSharp(root: string, index: FileIndex, packages: Map<string, string>): void {
+  const csprojFiles = index.files
+    .map((f) => f.path)
+    .filter((p) => p.endsWith(".csproj"));
+  for (const candidate of csprojFiles) {
+    const path = join(root, candidate);
+    if (!existsSync(path)) continue;
+    try {
+      const text = readFileSync(path, "utf8");
+      for (const match of text.matchAll(
+        /<PackageReference[^>]*Include\s*=\s*"([^"]+)"[^>]*Version\s*=\s*"([^"]+)"/g,
+      )) {
+        addPackage(packages, match[1]!, match[2]);
+      }
+    } catch {
+      // Ignore unreadable csproj files.
+    }
+  }
+}
+
+/** Cargo.toml [dependencies] / [dev-dependencies] tables. */
+function probeRust(root: string, packages: Map<string, string>): void {
+  const cargo = join(root, "Cargo.toml");
+  if (!existsSync(cargo)) return;
+  try {
+    const text = readFileSync(cargo, "utf8");
+    const tableNames = new Set([
+      "[dependencies]",
+      "[dev-dependencies]",
+      "[build-dependencies]",
+    ]);
+    let active = false;
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line.startsWith("[")) {
+        active = tableNames.has(line.split("#")[0]!.trim());
+        continue;
+      }
+      if (!active || !line || line.startsWith("#")) continue;
+      const match = /^([A-Za-z0-9_-]+)\s*=/.exec(line);
+      if (match) addPackage(packages, match[1]!);
+    }
+  } catch {
+    // Ignore unreadable Cargo.toml files.
+  }
+}
+
+/** composer.json require / require-dev tables. */
+function probePhp(root: string, packages: Map<string, string>): void {
+  const composer = join(root, "composer.json");
+  if (!existsSync(composer)) return;
+  try {
+    const json = JSON.parse(readFileSync(composer, "utf8")) as Record<string, unknown>;
+    for (const bucket of ["require", "require-dev"]) {
+      const table = json[bucket];
+      if (table && typeof table === "object") {
+        for (const [name, version] of Object.entries(table as Record<string, unknown>)) {
+          if (typeof version === "string") addPackage(packages, name, version);
+        }
+      }
+    }
+  } catch {
+    // Ignore unreadable composer.json files.
+  }
 }

@@ -18,7 +18,23 @@ const nodeRequire: NodeRequire =
           : import.meta.url,
       );
 
-export type GrammarName = "python" | "go";
+export type GrammarName =
+  | "python"
+  | "go"
+  | "java"
+  | "c_sharp"
+  | "rust"
+  | "php";
+
+/** Grammar id -> WASM file shipped by tree-sitter-wasms. */
+const GRAMMAR_WASM: Record<GrammarName, string> = {
+  python: "tree-sitter-python.wasm",
+  go: "tree-sitter-go.wasm",
+  java: "tree-sitter-java.wasm",
+  c_sharp: "tree-sitter-c_sharp.wasm",
+  rust: "tree-sitter-rust.wasm",
+  php: "tree-sitter-php.wasm",
+};
 
 export interface TsNode {
   type: string;
@@ -72,7 +88,7 @@ async function getParser(grammar: GrammarName): Promise<TreeParser> {
     cached = (async () => {
       const wt = await loadRuntime();
       const wasmPath = nodeRequire.resolve(
-        `tree-sitter-wasms/out/tree-sitter-${grammar}.wasm`,
+        `tree-sitter-wasms/out/${GRAMMAR_WASM[grammar]}`,
       );
       const language = await wt.Language.load(wasmPath);
       const parser = new wt.Parser();

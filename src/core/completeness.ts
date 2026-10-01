@@ -44,11 +44,18 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
     gaps.add("body-schema-unknown");
   }
 
-  const typedResponses = candidate.responses.filter(
-    (r) =>
-      !r.content ||
-      r.content.every((m) => m.schema || m.itemSchema),
-  );
+  const typedResponses = candidate.responses.filter((r) => {
+    if (!r.content) return true;
+    return r.content.every((m) => {
+      if (m.schema || m.itemSchema) return true;
+      // SSE event payloads have their own dedicated gap code.
+      if (m.mediaType === "text/event-stream") {
+        gaps.add("sse-events-unknown");
+        return true;
+      }
+      return false;
+    });
+  });
   if (candidate.responses.length === 0) {
     gaps.add("response-unknown");
   } else if (typedResponses.length !== candidate.responses.length) {

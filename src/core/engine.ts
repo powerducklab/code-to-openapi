@@ -29,7 +29,17 @@ import type {
 import { createTsAnalysis, type TsAnalysis } from "../lang/typescript/index.js";
 import { createPythonAnalysis, type PythonAnalysis } from "../lang/python/index.js";
 import { createGoAnalysis, type GoAnalysis } from "../lang/go/index.js";
+import { createJavaAnalysis, type JavaAnalysis } from "../lang/java/index.js";
+import { createCSharpAnalysis, type CSharpAnalysis } from "../lang/csharp/index.js";
+import { createRustAnalysis, type RustAnalysis } from "../lang/rust/index.js";
+import { createPhpAnalysis, type PhpAnalysis } from "../lang/php/index.js";
 import { expressPack } from "../frameworks/express.js";
+import { fastifyPack } from "../frameworks/fastify.js";
+import { nestPack } from "../frameworks/nest.js";
+import { springPack } from "../frameworks/spring.js";
+import { aspnetPack } from "../frameworks/aspnet.js";
+import { axumPack } from "../frameworks/axum.js";
+import { laravelPack } from "../frameworks/laravel.js";
 import { fastapiPack } from "../frameworks/fastapi.js";
 import { flaskPack } from "../frameworks/flask.js";
 import { ginPack } from "../frameworks/gin.js";
@@ -48,7 +58,11 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
       analyze: (ctx) => createTsAnalysis(ctx),
     },
-    frameworks: [expressPack as FrameworkPack],
+    frameworks: [
+      expressPack as FrameworkPack,
+      fastifyPack as FrameworkPack,
+      nestPack as FrameworkPack,
+    ],
   },
   {
     pack: {
@@ -65,6 +79,38 @@ const REGISTRY: LanguageRegistryEntry[] = [
       analyze: (ctx) => createGoAnalysis(ctx),
     },
     frameworks: [ginPack as FrameworkPack, chiPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "java",
+      extensions: [".java"],
+      analyze: (ctx) => createJavaAnalysis(ctx),
+    },
+    frameworks: [springPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "csharp",
+      extensions: [".cs"],
+      analyze: (ctx) => createCSharpAnalysis(ctx),
+    },
+    frameworks: [aspnetPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "rust",
+      extensions: [".rs"],
+      analyze: (ctx) => createRustAnalysis(ctx),
+    },
+    frameworks: [axumPack as FrameworkPack],
+  },
+  {
+    pack: {
+      id: "php",
+      extensions: [".php"],
+      analyze: (ctx) => createPhpAnalysis(ctx),
+    },
+    frameworks: [laravelPack as FrameworkPack],
   },
 ];
 
@@ -351,12 +397,12 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
 
   if (!activeLanguages.length) {
     throw new Error(
-      "No supported source files found. Supported languages: TypeScript/JavaScript, Python, Go.",
+      "No supported source files found. Supported languages: TypeScript/JavaScript, Python, Go, Java, C#, Rust, PHP.",
     );
   }
   if (!extractions.length) {
     throw new Error(
-      "No supported HTTP framework detected. Supported packs: Express, FastAPI, Flask, Gin, Chi.",
+      "No supported HTTP framework detected. Supported packs: Express, Fastify, NestJS, FastAPI, Flask, Gin, Chi, Spring Boot, ASP.NET Core, Axum, Laravel.",
     );
   }
 

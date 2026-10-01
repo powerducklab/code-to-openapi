@@ -32,10 +32,11 @@ const ALWAYS_IGNORE_DIRS = new Set([
   ".eggs",
   "site-packages",
   "egg-info",
+  ".gradle",
 ]);
 
 const TEST_FILE =
-  /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
+  /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|Test\.java$|Tests\.cs$|Test\.php$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
 
 const EXTENSION_LANGUAGE: Record<string, string> = {
   ".ts": "typescript",
@@ -49,6 +50,10 @@ const EXTENSION_LANGUAGE: Record<string, string> = {
   ".py": "python",
   ".pyi": "python",
   ".go": "go",
+  ".java": "java",
+  ".cs": "csharp",
+  ".rs": "rust",
+  ".php": "php",
 };
 
 export interface IndexOptions {

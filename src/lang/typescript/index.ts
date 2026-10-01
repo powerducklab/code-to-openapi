@@ -75,6 +75,8 @@ function compilerOptions(ts: any, root: string, index: FileIndex): {
       resolveJsonModule: true,
       skipLibCheck: true,
       strict: false,
+      experimentalDecorators: true,
+      emitDecoratorMetadata: true,
       noEmit: true,
     },
     host: undefined,

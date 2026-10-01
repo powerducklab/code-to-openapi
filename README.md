@@ -49,10 +49,13 @@ indexer  →  language packs (AST + type checker)
 
 | Language   | Framework | Status |
 | ---------- | --------- | ------ |
-| TypeScript / JavaScript | Express | 0.1.x |
+| TypeScript / JavaScript | Express, Fastify, NestJS | 0.6.x |
 | Python     | FastAPI, Flask | 0.5.x |
 | Go         | Gin, Chi | 0.5.x |
-| TypeScript / JavaScript | Fastify, NestJS | Planned |
+| Java       | Spring Boot | 0.6.x |
+| C#         | ASP.NET Core (controllers + minimal API) | 0.6.x |
+| Rust       | Axum | 0.6.x |
+| PHP        | Laravel | 0.6.x |
 
 HTTP is fully supported; SSE endpoints are emitted with the canonical
 `x-protocol: "sse"` extension and a `text/event-stream` media type carrying
@@ -60,9 +63,10 @@ HTTP is fully supported; SSE endpoints are emitted with the canonical
 
 The TypeScript/JavaScript layer uses the TypeScript compiler API (an optional
 peer dependency; the pack degrades to syntactic analysis with explicit gaps
-when it is not installed). Python and Go are parsed through tree-sitter WASM,
-so no language toolchain is required. Framework pack ids are `express`,
-`fastapi`, `flask`, `gin` and `chi`.
+when it is not installed). Python, Go, Java, C#, Rust and PHP are parsed
+through tree-sitter WASM, so no language toolchain is required. Framework
+pack ids are `express`, `fastify`, `nest`, `fastapi`, `flask`, `gin`, `chi`,
+`spring`, `aspnet`, `axum` and `laravel`.
 
 ---
 

@@ -1,0 +1,577 @@
+/**
+ * Spring Boot framework pack (Java, tree-sitter based).
+ *
+ * Recognizes @RestController classes with @RequestMapping / @GetMapping /
+ * @PostMapping and friends, @PathVariable/@RequestParam/@RequestHeader/
+ * @RequestBody parameters, @ResponseStatus and SSE via SseEmitter / Flux with
+ * produces=text/event-stream.
+ */
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import type {
+  Confidence,
+  DiscoveredMediaType,
+  DiscoveredResponse,
+  DiscoveredSecurityScheme,
+  DiscoveredServer,
+  DiscoveredUnresolved,
+  FrameworkPack,
+  GapCode,
+  JsonSchema,
+  RouteCandidate,
+  RouteParameter,
+  ScanContext,
+  SourceLocation,
+} from "../core/types.js";
+import type { JavaAnalysis } from "../lang/java/index.js";
+import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
+import type { TsNode } from "../lang/treesitter/runtime.js";
+import {
+  annotationElement,
+  annotationStringArg,
+  buildJavaModelIndex,
+  ensureJavaComponent,
+  findAnnotation,
+  javaTypeToSchema,
+  listAnnotations,
+  type JavaModelIndex,
+} from "../lang/java/schema.js";
+
+const MAPPING_ANNOTATIONS = new Set([
+  "GetMapping",
+  "PostMapping",
+  "PutMapping",
+  "DeleteMapping",
+  "PatchMapping",
+  "RequestMapping",
+]);
+
+const HTTP_STATUS: Record<string, string> = {
+  OK: "200",
+  CREATED: "201",
+  ACCEPTED: "202",
+  NO_CONTENT: "204",
+  MOVED_PERMANENTLY: "301",
+  FOUND: "302",
+  BAD_REQUEST: "400",
+  UNAUTHORIZED: "401",
+  FORBIDDEN: "403",
+  NOT_FOUND: "404",
+  CONFLICT: "409",
+  UNPROCESSABLE_ENTITY: "422",
+  INTERNAL_SERVER_ERROR: "500",
+};
+
+const PATH_ELEMENTS = new Set(["value", "path"]);
+
+export const springPack: FrameworkPack<JavaAnalysis> = {
+  id: "spring",
+  language: "java",
+  dependencyHints: ["spring-boot-starter-web", "spring-web"],
+
+  applies(ctx) {
+    return (
+      ctx.manifest.packages.has("spring-boot-starter-web") ||
+      ctx.index.files.some(
+        (f) =>
+          /\.java$/.test(f.path) &&
+          f.content.includes("org.springframework.web.bind.annotation"),
+      )
+    );
+  },
+
+  extract(analysis, ctx) {
+    const unresolved: DiscoveredUnresolved[] = [];
+    const candidates: RouteCandidate[] = [];
+    const model = buildJavaModelIndex(analysis);
+
+    const classAnnotation = (cls: TsNode, name: string): TsNode | null => {
+      const mods = cls.namedChildren.find((c) => c.type === "modifiers");
+      if (!mods) return null;
+      for (const mod of mods.namedChildren) {
+        if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
+        const id = mod.namedChildren.find((c) => c.type === "identifier");
+        if (id && id.text === name) return mod;
+      }
+      return null;
+    };
+
+    for (const [rel, file] of analysis.files) {
+      const classes = findAll(file.root, (n) => n.type === "class_declaration");
+      for (const cls of classes) {
+        const isRest = Boolean(classAnnotation(cls, "RestController"));
+        const isController = Boolean(classAnnotation(cls, "Controller"));
+        if (!isRest && !isController) continue;
+
+        const clsRequestMapping = classAnnotation(cls, "RequestMapping");
+        const basePath = clsRequestMapping
+          ? normalizePath(annotationStringArg(clsRequestMapping, PATH_ELEMENTS) ?? "")
+          : "";
+        const tagName =
+          cls.namedChildren.find((c) => c.type === "identifier")?.text
+            .replace(/Controller$/, "")
+            .replace(/^./, (c) => c.toLowerCase()) ?? "default";
+
+        const body = childrenOfType(cls, "class_body")[0];
+        if (!body) continue;
+
+        for (const method of childrenOfType(body, "method_declaration")) {
+          const annotations = listAnnotations(method);
+          const mapping = annotations.find((a) => MAPPING_ANNOTATIONS.has(a.name));
+          if (!mapping) continue;
+          const responseBody =
+            isRest ||
+            Boolean(findAnnotation(method, new Set(["ResponseBody"]))) ||
+            mapping.name !== "RequestMapping";
+          if (!responseBody) continue;
+
+          const { verb, subPath } = resolveMapping(mapping.node, mapping.name);
+          const fullPath = joinPath(basePath, normalizePath(subPath));
+          const pathParams = new Set(
+            [...fullPath.matchAll(/\{([^}]+)\}/g)].map((m) => stripRegex(m[1]!)),
+          );
+
+          const origin: SourceLocation = {
+            file: rel,
+            line: method.startPosition.row + 1,
+          };
+
+          const { parameters, requestBody, gaps } = collectParameters(
+            method,
+            model,
+            pathParams,
+          );
+
+          const producesEventStream = annotationProducesEventStream(mapping.node);
+          const returnType = method.namedChildren.find(
+            (c) =>
+              c.type === "type_identifier" ||
+              c.type === "generic_type" ||
+              c.type === "void_type" ||
+              c.type === "array_type" ||
+              c.type === "scoped_identifier",
+          );
+
+          const isSse =
+            producesEventStream ||
+            (returnType && /SseEmitter|ServerSentEvent/.test(returnType.text));
+
+          const responses = isSse
+            ? collectSseResponse(returnType ?? null, model, gaps)
+            : collectJsonResponse(method, mapping.node, verb, returnType ?? null, model, gaps);
+
+          const extensions = isSse ? { "x-protocol": "sse" } : undefined;
+
+          candidates.push({
+            method: verb,
+            path: fullPath,
+            fullPath,
+            operationId:
+              method.namedChildren.find((c) => c.type === "identifier")?.text ??
+              undefined,
+            origin,
+            parameters,
+            ...(requestBody ? { requestBody } : {}),
+            responses,
+            tags: [tagName],
+            ...(extensions ? { extensions } : {}),
+            confidence: gaps.length ? "medium" : "high",
+            gaps,
+            components: [],
+            handlerSource: sliceNode(method),
+          });
+        }
+      }
+    }
+
+    const components = [...model.components.entries()].map(([name, schema]) => ({
+      name,
+      schema,
+    }));
+    const securitySchemes: DiscoveredSecurityScheme[] = [];
+    const servers = detectServers(ctx);
+
+    return { routes: dedupe(candidates), unresolved, components, securitySchemes, servers };
+  },
+};
+
+function resolveMapping(
+  node: TsNode,
+  annotationName: string,
+): { verb: string; subPath: string } {
+  let verb = annotationName
+    .replace("Mapping", "")
+    .toLowerCase()
+    .replace("request", "get");
+  if (annotationName === "RequestMapping") {
+    const methodElement = annotationElement(node, "method");
+    if (methodElement) {
+      const match = /RequestMethod\.([A-Z]+)/.exec(methodElement.text);
+      if (match) verb = match[1]!.toLowerCase();
+    }
+  }
+  const subPath = annotationStringArg(node, PATH_ELEMENTS) ?? "";
+  return { verb, subPath };
+}
+
+function annotationProducesEventStream(node: TsNode): boolean {
+  const produces = annotationElement(node, "produces");
+  return Boolean(
+    produces && /text\/event-stream|TEXT_EVENT_STREAM/i.test(produces.text),
+  );
+}
+
+function collectParameters(
+  method: TsNode,
+  model: JavaModelIndex,
+  pathParams: Set<string>,
+): {
+  parameters: RouteParameter[];
+  requestBody?: {
+    required: boolean;
+    content: DiscoveredMediaType[];
+    confidence: Confidence;
+  };
+  gaps: GapCode[];
+} {
+  const parameters: RouteParameter[] = [];
+  const gaps: GapCode[] = [];
+  let requestBody:
+    | { required: boolean; content: DiscoveredMediaType[]; confidence: Confidence }
+    | undefined;
+
+  const paramsNode = childrenOfType(method, "formal_parameters")[0];
+  if (!paramsNode) return { parameters, gaps: [] };
+
+  const addParam = (
+    location: RouteParameter["in"],
+    name: string,
+    schema: JsonSchema | undefined,
+    confidence: Confidence,
+    required: boolean,
+  ) => {
+    if (parameters.some((p) => p.in === location && p.name === name)) return;
+    parameters.push({
+      name,
+      in: location,
+      required: location === "path" ? true : required,
+      ...(schema && Object.keys(schema).length ? { schema } : {}),
+      confidence,
+    });
+  };
+
+  const isRequiredFalse = (annotation: TsNode): boolean => {
+    const required = annotationElement(annotation, "required");
+    return Boolean(required && required.text.trim() === "false");
+  };
+
+  const expandModel = (typeNode: TsNode, location: RouteParameter["in"]) => {
+    const typeName =
+      typeNode.type === "generic_type"
+        ? typeNode.namedChildren.find((c) => c.type === "type_identifier")?.text
+        : typeNode.type === "type_identifier"
+          ? typeNode.text
+          : null;
+    if (!typeName) return;
+    const def = model.byName.get(typeName);
+    if (!def) return;
+    ensureJavaComponent(typeName, model);
+    for (const field of def.fields) {
+      addParam(
+        location,
+        field.name,
+        javaTypeToSchema(field.typeNode, model),
+        "high",
+        field.required,
+      );
+    }
+  };
+
+  for (const param of childrenOfType(paramsNode, "formal_parameter")) {
+    const annotations = listAnnotations(param);
+    const nameNode = childrenOfType(param, "identifier").pop();
+    const typeNode = param.namedChildren.find(
+      (c) =>
+        c.type === "type_identifier" ||
+        c.type === "generic_type" ||
+        c.type === "array_type" ||
+        c.type === "integral_type" ||
+        c.type === "floating_point_type" ||
+        c.type === "boolean_type",
+    );
+
+    const pathVar = annotations.find((a) => a.name === "PathVariable");
+    const requestParam = annotations.find((a) => a.name === "RequestParam");
+    const requestHeader = annotations.find((a) => a.name === "RequestHeader");
+    const modelAttr = annotations.find((a) => a.name === "ModelAttribute");
+    const body = annotations.find((a) => a.name === "RequestBody");
+
+    if (pathVar) {
+      const name =
+        annotationStringArg(pathVar.node, new Set(["value", "name"])) ??
+        nameNode?.text;
+      if (name) {
+        addParam(
+          "path",
+          name,
+          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          "high",
+          !isRequiredFalse(pathVar.node),
+        );
+      }
+      continue;
+    }
+
+    if (requestParam) {
+      const name =
+        annotationStringArg(requestParam.node, new Set(["value", "name"])) ??
+        nameNode?.text;
+      const hasDefault = Boolean(annotationElement(requestParam.node, "defaultValue"));
+      const required = !isRequiredFalse(requestParam.node) && !hasDefault;
+      if (name) {
+        addParam(
+          "query",
+          name,
+          typeNode ? javaTypeToSchema(typeNode, model) : undefined,
+          "high",
+          required,
+        );
+      }
+      continue;
+    }
+
+    if (requestHeader) {
+      const name =
+        annotationStringArg(requestHeader.node, new Set(["value", "name"])) ??
+        nameNode?.text;
+      if (name) {
+        addParam(
+          "header",
+          name.toLowerCase(),
+          typeNode ? javaTypeToSchema(typeNode, model) : { type: "string" },
+          "high",
+          !isRequiredFalse(requestHeader.node),
+        );
+      }
+      continue;
+    }
+
+    if (body && typeNode) {
+      const schema = javaTypeToSchema(typeNode, model);
+      if (schema && Object.keys(schema).length) {
+        requestBody = {
+          required: !isRequiredFalse(body.node),
+          content: [{ mediaType: "application/json", schema }],
+          confidence: "high",
+        };
+      } else {
+        gaps.push("body-schema-unknown");
+      }
+      continue;
+    }
+
+    if (modelAttr && typeNode) {
+      expandModel(typeNode, "query");
+      continue;
+    }
+
+    // Unannotated complex POJO parameters are implicitly command objects in
+    // Spring MVC and bind from query parameters.
+    if (!annotations.length && typeNode && model.byName.has(typeNameOf(typeNode))) {
+      expandModel(typeNode, "query");
+    }
+  }
+
+  for (const name of pathParams) {
+    if (!parameters.some((p) => p.in === "path" && p.name === name)) {
+      addParam("path", name, { type: "string" }, "low", true);
+    }
+  }
+
+  return {
+    parameters,
+    ...(requestBody ? { requestBody } : {}),
+    gaps,
+  };
+}
+
+function typeNameOf(node: TsNode): string {
+  if (node.type === "type_identifier") return node.text;
+  if (node.type === "generic_type") {
+    return node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? "";
+  }
+  return "";
+}
+
+function collectJsonResponse(
+  method: TsNode,
+  mapping: TsNode,
+  verb: string,
+  returnType: TsNode | null,
+  model: JavaModelIndex,
+  gaps: GapCode[],
+): DiscoveredResponse[] {
+  const status = resolveStatus(method) ?? (verb === "post" ? "200" : "200");
+  void mapping;
+  if (!returnType || returnType.type === "void_type") {
+    return [{ statusCode: status, description: "", confidence: "high" }];
+  }
+  const schema = javaTypeToSchema(returnType, model);
+  if (!schema || !Object.keys(schema).length) {
+    gaps.push("response-unknown");
+    return [
+      {
+        statusCode: status,
+        description: "",
+        confidence: "low",
+        content: [{ mediaType: "application/json" }],
+      },
+    ];
+  }
+  return [
+    {
+      statusCode: status,
+      description: "",
+      confidence: "high",
+      content: [{ mediaType: "application/json", schema }],
+    },
+  ];
+}
+
+function collectSseResponse(
+  returnType: TsNode | null,
+  model: JavaModelIndex,
+  gaps: GapCode[],
+): DiscoveredResponse[] {
+  let itemSchema: JsonSchema | undefined;
+  if (returnType) {
+    // Flux<Foo> or Flux<ServerSentEvent<Foo>>.
+    const genericArgs = findFirst(returnType, (n) => n.type === "type_arguments");
+    const firstArg = genericArgs?.namedChildren[0];
+    if (firstArg) {
+      if (firstArg.type === "generic_type" && /ServerSentEvent/.test(firstArg.text)) {
+        const inner = findFirst(firstArg, (n) => n.type === "type_arguments")?.namedChildren[0];
+        if (inner) itemSchema = javaTypeToSchema(inner, model);
+      } else {
+        itemSchema = javaTypeToSchema(firstArg, model);
+      }
+    }
+  }
+  if (!itemSchema || !Object.keys(itemSchema).length) {
+    gaps.push("sse-events-unknown");
+  }
+  return [
+    {
+      statusCode: "200",
+      description: "Server-sent events",
+      confidence: itemSchema ? "high" : "medium",
+      content: [
+        {
+          mediaType: "text/event-stream",
+          ...(itemSchema ? { itemSchema } : {}),
+        },
+      ],
+    },
+  ];
+}
+
+function resolveStatus(method: TsNode): string | null {
+  const responseStatus = findAnnotation(method, new Set(["ResponseStatus"]));
+  if (!responseStatus) return null;
+  const code =
+    annotationElement(responseStatus, "code") ??
+    annotationElement(responseStatus, "value");
+  if (code) {
+    const field = code.namedChildren[code.namedChildren.length - 1];
+    if (field?.type === "field_access") {
+      const constant = field.namedChildren[field.namedChildren.length - 1];
+      if (constant && HTTP_STATUS[constant.text]) return HTTP_STATUS[constant.text];
+    }
+    if (field && HTTP_STATUS[field.text]) return HTTP_STATUS[field.text];
+    const numeric = /\d{3}/.exec(code.text);
+    if (numeric) return numeric[0];
+  }
+  // Positional argument: @ResponseStatus(HttpStatus.CREATED).
+  const args = childrenOfType(responseStatus, "annotation_argument_list")[0];
+  if (args) {
+    const positional = args.namedChildren.find(
+      (c) => c.type !== "element_value_pair",
+    );
+    if (positional) {
+      const constant =
+        positional.type === "field_access"
+          ? positional.namedChildren[positional.namedChildren.length - 1]
+          : positional;
+      if (constant && HTTP_STATUS[constant.text]) return HTTP_STATUS[constant.text];
+      const numeric = /\d{3}/.exec(positional.text);
+      if (numeric) return numeric[0];
+    }
+  }
+  return null;
+}
+
+function normalizePath(raw: string): string {
+  if (!raw) return "";
+  let path = raw.trim();
+  if (path && !path.startsWith("/")) path = `/${path}`;
+  // Spring path variables may carry regex: {id:[0-9]+} or {*path}.
+  path = path.replace(/\{(\*?)([A-Za-z0-9_]+)(?::[^}]*)?\}/g, "{$2}");
+  return path;
+}
+
+function stripRegex(varName: string): string {
+  return varName.replace(/^\*/, "");
+}
+
+function joinPath(base: string, sub: string): string {
+  const joined = `${base}${sub}`.replace(/\/+/g, "/");
+  return joined || "/";
+}
+
+function sliceNode(node: TsNode): string | undefined {
+  const text = node.text;
+  return text.length > 8192 ? `${text.slice(0, 8192)}\n// ... truncated` : text;
+}
+
+function dedupe(routes: RouteCandidate[]): RouteCandidate[] {
+  const seen = new Map<string, RouteCandidate>();
+  for (const route of routes) {
+    const key = `${route.method} ${route.fullPath}`;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, route);
+      continue;
+    }
+    const score = (c: RouteCandidate) =>
+      c.responses.length * 2 +
+      c.parameters.length +
+      (c.requestBody ? 2 : 0) -
+      c.gaps.length;
+    if (score(route) > score(existing)) seen.set(key, route);
+  }
+  return [...seen.values()];
+}
+
+function detectServers(ctx: ScanContext): DiscoveredServer[] {
+  // Resource files are not indexed as source; read the standard Spring
+  // configuration locations directly.
+  const candidates = [
+    "src/main/resources/application.properties",
+    "src/main/resources/application.yml",
+    "src/main/resources/application.yaml",
+    "config/application.properties",
+    "application.properties",
+  ];
+  for (const rel of candidates) {
+    try {
+      const content = readFileSync(join(ctx.root, rel), "utf8");
+      const match = /(?:^|\n)\s*server\.port\s*[=:]\s*(\d+)/.exec(content);
+      if (match) return [{ url: `http://localhost:${match[1]}` }];
+    } catch {
+      // Try the next conventional location.
+    }
+  }
+  return [];
+}

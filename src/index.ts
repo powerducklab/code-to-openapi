@@ -30,10 +30,16 @@ export {
   type MergeChange,
 } from "./core/merge.js";
 export { expressPack } from "./frameworks/express.js";
+export { fastifyPack } from "./frameworks/fastify.js";
+export { nestPack } from "./frameworks/nest.js";
 export { fastapiPack } from "./frameworks/fastapi.js";
 export { flaskPack } from "./frameworks/flask.js";
 export { ginPack } from "./frameworks/gin.js";
 export { chiPack } from "./frameworks/chi.js";
+export { springPack } from "./frameworks/spring.js";
+export { aspnetPack } from "./frameworks/aspnet.js";
+export { axumPack } from "./frameworks/axum.js";
+export { laravelPack } from "./frameworks/laravel.js";
 export {
   type GapRequest,
   type GapResolution,
