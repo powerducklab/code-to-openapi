@@ -23,6 +23,12 @@ export {
   type SidecarDiff,
   type SidecarRoute,
 } from "./core/sidecar.js";
+export {
+  mergeScannedDocument,
+  type MergeInput,
+  type MergeResult,
+  type MergeChange,
+} from "./core/merge.js";
 export { expressPack } from "./frameworks/express.js";
 export {
   type GapRequest,

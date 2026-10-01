@@ -194,6 +194,41 @@ The sidecar is the only place scan provenance is stored. The generated OpenAPI
 document stays clean and is safe for users to edit; removed routes are flagged
 for review rather than deleted automatically.
 
+### Three-way merge into an edited document
+
+On a rescan, merge the freshly scanned document into the user's current
+specification. Manual edits always win; the scan only refreshes structural
+contracts.
+
+```ts
+import { mergeScannedDocument } from "@powerduck/code-to-openapi";
+
+const merged = mergeScannedDocument({
+  current: currentOpenApiDocument, // user-edited OAS object
+  scanned: scannedOpenApiDocument, // result.convert() output
+  previous: previousSidecar,       // .powerduck/discovery.json on disk
+  next: scanResult.sidecar,        // sidecar from the new scan
+});
+// merged.added / changed / removed / unchanged
+// merged.document is the merged OAS object (inputs are never mutated)
+```
+
+Merge rules:
+
+- **Added** routes are inserted; **unchanged** routes are left exactly as the
+  user wrote them.
+- **Changed** routes refresh parameters, request bodies, responses and security
+  while preserving `summary`, `description`, `tags`, `externalDocs`,
+  `deprecated`, `operationId`, parameter/response descriptions and examples,
+  and every `x-` extension. User-only parameters and response statuses are
+  kept.
+- **Removed** routes are never deleted; they stay in the document and are
+  returned in `removed` for explicit review.
+- `components.schemas` and `securitySchemes` are add-only. A scanned component
+  whose name collides with a different user schema is renamed (`User2`,
+  `User3`, …) and its refs are rewritten automatically.
+- `info`, `servers` and all other top-level user content are untouched.
+
 ## Confidence and gaps
 
 Every operation carries a confidence level:
