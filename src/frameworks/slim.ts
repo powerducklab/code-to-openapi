@@ -52,6 +52,9 @@ import {
 } from "../lang/php/response.js";
 
 const VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head"]);
+/** Router variables Slim registers routes on: $app, the group proxy ($group),
+ *  or an aliased router ($router/$r) in modular setups. */
+const ROUTER_VARS = new Set(["$app", "$group", "$router", "$r", "$routeCollector"]);
 
 export const slimPack: FrameworkPack<PhpAnalysis> = {
   id: "slim",
@@ -100,9 +103,17 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
           : argNodes[0]?.namedChildren.find((c) => c.type === "string");
         const rawPath = pathStr ? phpStringText(pathStr) : null;
         if (rawPath === null) continue;
-        const closure = findClosureHandler(argNodes[1]);
         const prefix = groupPrefixChain(call);
         const fullPath = joinRoute(prefix, normalizeRoute(rawPath));
+
+        // Resolve the handler: a closure/arrow function, or an invokable
+        // class-string (`ListUsersAction::class`) whose __invoke method we
+        // index directly.
+        const closure = findClosureHandler(argNodes[1]);
+        let handlerNode = closure;
+        if (!handlerNode) {
+          handlerNode = resolveClassStringHandler(argNodes[1], analysis, rel);
+        }
 
         const candidate = buildRoute({
           analysis,
@@ -111,7 +122,7 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
           call,
           verb: method,
           path: fullPath,
-          closure,
+          closure: handlerNode,
         });
         if (candidate) candidates.push(candidate);
       }
@@ -131,10 +142,10 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
 // Call-site recognition
 // ---------------------------------------------------------------------------
 
-/** True when the member call is `$app->...` on the Slim router variable. */
+/** True when the member call is on a Slim router/app/proxy variable. */
 function isAppCall(node: TsNode): boolean {
   const receiver = node.namedChildren.find((c) => c.type === "variable_name");
-  return receiver?.text === "$app";
+  return receiver ? ROUTER_VARS.has(receiver.text) : false;
 }
 
 function isAppVerbCall(node: TsNode): boolean {
@@ -151,6 +162,31 @@ function findClosureHandler(arg: TsNode | undefined): TsNode | null {
     arg,
     (n) => n.type === "anonymous_function_creation_expression" || n.type === "arrow_function",
   );
+}
+
+/**
+ * Resolve a class-string handler (`ListUsersAction::class`) to its __invoke
+ * method node. Returns null when the class (or its invokable) is not in the
+ * scanned tree — the route is still emitted with an honest response gap.
+ */
+function resolveClassStringHandler(
+  arg: TsNode | undefined,
+  analysis: PhpAnalysis,
+  rel: string,
+): TsNode | null {
+  if (!arg) return null;
+  const access = arg.type === "class_constant_access_expression"
+    ? arg
+    : findFirst(arg, (n) => n.type === "class_constant_access_expression");
+  if (!access) return null;
+  const names = childrenOfType(access, "name").filter((n) => n.text !== "class");
+  const rawShort = names[names.length - 1]?.text ?? null;
+  if (!rawShort) return null;
+  const imports = analysis.files.get(rel)?.imports;
+  const declared = imports?.get(rawShort)?.split("\\").pop() ?? rawShort;
+  const cls = analysis.classes.get(declared) ?? analysis.classes.get(rawShort);
+  if (!cls) return null;
+  return cls.methods.get("__invoke") ?? null;
 }
 
 /**

@@ -268,9 +268,30 @@ interface BuildArgs {
   originNode: TsNode;
 }
 
+/**
+ * Normalize a Symfony path template to OpenAPI form: strip requirement
+ * syntax (`{id:post}` -> `{id}`) and optional markers (`{id?}` -> `{id}`).
+ */
+function normalizeSymfonyPath(path: string): string {
+  return path.replace(/\{([^{}:?]+)[^}]*\}/g, "{$1}");
+}
+
+/**
+ * Extract `{placeholder}` names from a path, stripping Symfony requirement
+ * syntax (`{id:post}` -> `id`) and optional markers (`{id?}` -> `id`).
+ */
+function pathParamNames(path: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of normalizeSymfonyPath(path).matchAll(/\{([^{}]+)\}/g)) {
+    names.add(m[1]!);
+  }
+  return names;
+}
+
 function buildCandidate(args: BuildArgs): RouteCandidate | null {
-  const { analysis, model, rel, methodNode, className, methodName, path, name, verb, originNode } = args;
-  const declaredPathParams = new Set([...path.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!));
+  const { analysis, model, rel, methodNode, className, methodName, name, verb, originNode } = args;
+  const path = normalizeSymfonyPath(args.path);
+  const declaredPathParams = pathParamNames(path);
 
   const { parameters, requestBody, gaps } = collectParameters(methodNode, analysis, model, path, declaredPathParams);
 
@@ -647,7 +668,8 @@ function yamlRoutes(
     for (const block of routeBlocks) {
       const pathMatch = /^\s+path:\s*["']?([^\s"']+)["']?\s*$/m.exec(block);
       if (!pathMatch) continue;
-      const path = pathMatch[1]!.startsWith("/") ? pathMatch[1]! : `/${pathMatch[1]!}`;
+      const rawPath = pathMatch[1]!.startsWith("/") ? pathMatch[1]! : `/${pathMatch[1]!}`;
+      const path = normalizeSymfonyPath(rawPath);
       const methodsMatch = /^\s+methods:\s*\[?([^\]\n]*)\]?\s*$/m.exec(block);
       const verbs = methodsMatch
         ? methodsMatch[1]!.split(",").map((v) => v.trim().toLowerCase()).filter((v) => ROUTE_VERBS.has(v))
@@ -666,7 +688,7 @@ function yamlRoutes(
         }
       }
       const gaps: GapCode[] = [];
-      const declaredPathParams = new Set([...path.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!));
+      const declaredPathParams = pathParamNames(path);
       let parameters: RouteParameter[] = [];
       let requestBody;
       if (methodNode) {
