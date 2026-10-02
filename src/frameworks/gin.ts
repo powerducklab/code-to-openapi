@@ -1086,9 +1086,14 @@ function dedupe(routes: RouteCandidate[]): RouteCandidate[] {
 }
 
 function joinPath(prefix: string, path: string): string {
-  if (!prefix) return path || "/";
-  if (!path) return prefix;
-  return `${prefix.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+  const combined = !prefix
+    ? path || "/"
+    : !path
+      ? prefix
+      : `${prefix.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+  // Go/Gin accept relative route patterns such as `router.GET("favicon.ico", ...)`,
+  // but OpenAPI path keys must always begin with "/".
+  return combined.startsWith("/") ? combined : `/${combined}`;
 }
 
 function addrToUrl(addr: string): string {

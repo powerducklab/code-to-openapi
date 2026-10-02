@@ -571,8 +571,9 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
   };
 
   // app.listen(PORT) — the app var is also registered as a router, so check
-  // before routing the call through router/middleware classification.
-  if (method === "listen" && ts.isNumericLiteral(node.arguments[0])) {
+  // before routing the call through router/middleware classification. A bare
+  // `app.listen()` (no argument) must not crash: arguments[0] is undefined.
+  if (method === "listen" && node.arguments[0] && ts.isNumericLiteral(node.arguments[0])) {
     model.listenPorts.push(Number(node.arguments[0].text));
     return;
   }

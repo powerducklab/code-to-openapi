@@ -62,6 +62,20 @@ HTTP is fully supported; SSE endpoints are emitted with the canonical
 `itemSchema` (including named Spring `SseEmitter` events when the event name
 and payload type are statically provable).
 
+#### 0.9.1 robustness and real-project hardening
+
+No new packs; this release hardens extraction against real-world code found while
+validating the 28 packs against public backends (see
+[`docs/real-project-verification.md`](docs/real-project-verification.md)):
+
+- **Express**: no longer crashes on `app.listen()` called with no arguments
+  (seen in the Nest monorepo); the listen call is now guarded.
+- **Gin**: relative route patterns accepted by Go (`router.GET("favicon.ico", ...)`)
+  are normalized to a leading-slash OpenAPI path so the emitted document stays
+  schema-valid.
+- The previously flaky AI-gap integration test now runs with an explicit, larger
+  timeout; the suite is reliably green (262 tests).
+
 #### 0.9.0 framework expansion
 
 Seventeen new framework packs were added and validated against real

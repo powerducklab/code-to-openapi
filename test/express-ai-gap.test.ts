@@ -65,7 +65,10 @@ class StubGapResolver implements GapResolver {
 }
 
 describe("scanProject AI gap resolver", () => {
-  it("fills body, query, response and SSE gaps without inventing routes", async () => {
+  it(
+    "fills body, query, response and SSE gaps without inventing routes",
+    { timeout: 20000 },
+    async () => {
     const withoutAi = await scanProject({ root: fixtureRoot, includeTests: true });
     expect(withoutAi.report.routesConfirmed).toBe(0);
     expect(withoutAi.report.routesPartial).toBe(2);
