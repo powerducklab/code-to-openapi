@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 
 import {
@@ -14,6 +14,7 @@ import { probeManifest } from "./probe.js";
 import { buildSidecar } from "./sidecar.js";
 import type {
   Confidence,
+  DependencyManifest,
   ExtractionResult,
   FileEntry,
   FileIndex,
@@ -369,6 +370,9 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   const activeLanguages: string[] = [];
   const candidateLanguages: string[] = [];
   let analyzedFiles: FileEntry[] = [];
+  // Keep each language analysis so a monorepo-leaf fallback can re-run framework
+  // packs with a leaf-scoped manifest when the root itself detects nothing.
+  const languageAnalyses: Array<{ entry: (typeof REGISTRY)[number]; analysis: unknown }> = [];
 
   for (const entry of REGISTRY) {
     const extensionSet = new Set(entry.pack.extensions);
@@ -390,6 +394,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     if (!analysis) continue;
     activeLanguages.push(entry.pack.id);
     analyzedFiles = analyzedFiles.concat(languageFiles);
+    languageAnalyses.push({ entry, analysis });
 
     for (const pack of entry.frameworks) {
       if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
@@ -423,9 +428,33 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     );
   }
   if (!extractions.length) {
-    throw new Error(
-      "No supported HTTP framework detected. Supported packs: Express, Fastify, NestJS, FastAPI, Flask, Gin, Chi, Spring Boot, ASP.NET Core, Axum, Laravel.",
-    );
+    // Root scan detected no supported framework. For monorepos the real server
+    // package often lives one level down (packages/*, apps/*, ...); try those
+    // leaves before giving up. This branch only runs on root-miss, so any
+    // project whose root already resolves a framework is byte-identical.
+    const leafExtractions = await scanMonorepoLeaves({
+      root,
+      ctx,
+      languageAnalyses,
+      options,
+      diagnostics,
+    });
+    if (leafExtractions.found) {
+      extractions.push(...leafExtractions.extractions);
+      if (leafExtractions.extractions.length) {
+        diagnostics.push(
+          `No framework detected at the root; aggregated routes from workspace package(s).`,
+        );
+      } else {
+        diagnostics.push(
+          `Monorepo detected (${leafExtractions.leafCount} workspace package(s)) but none use a supported HTTP framework; producing an empty document.`,
+        );
+      }
+    } else {
+      throw new Error(
+        "No supported HTTP framework detected. Supported packs: Express, Fastify, NestJS, FastAPI, Flask, Gin, Chi, Spring Boot, ASP.NET Core, Axum, Laravel.",
+      );
+    }
   }
 
   let candidates = extractions.flatMap((entry) => entry.result.routes);
@@ -507,4 +536,177 @@ function dedupeBy<T>(items: T[], key: (item: T) => string): T[] {
     seen.add(k);
     return true;
   });
+}
+
+// Top-level directories that conventionally hold workspace packages, plus the
+// single-package server roots. Only one level is ever walked.
+const LEAF_PARENT_DIRS = ["packages", "apps", "services", "packages"];
+const LEAF_SINGLE_DIRS = ["server", "api", "app", "src"];
+const LEAF_SKIP_DIRS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  ".git",
+  "coverage",
+  ".turbo",
+]);
+const MAX_MONOREPO_LEAVES = 40;
+
+/**
+ * Cheaply reads workspace globs from package.json `workspaces` and
+ * pnpm-workspace.yaml `packages:`. Returns directory globs (e.g. "packages/*").
+ */
+function readWorkspaceGlobs(root: string): string[] {
+  const globs: string[] = [];
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      workspaces?: string[] | { packages?: string[] };
+    };
+    const ws = pkg.workspaces;
+    const list = Array.isArray(ws) ? ws : ws?.packages;
+    if (Array.isArray(list)) globs.push(...list);
+  } catch {
+    // No root package.json or no workspaces field.
+  }
+  try {
+    const yaml = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8");
+    const inPackages = /^packages\s*:/m.test(yaml);
+    if (inPackages) {
+      for (const line of yaml.split(/\r?\n/)) {
+        const m = /^\s*-\s*['"]?([\w.-/]+)['"]?\s*$/.exec(line);
+        if (m) globs.push(m[1]!);
+      }
+    }
+  } catch {
+    // No pnpm-workspace.yaml.
+  }
+  return globs;
+}
+
+/**
+ * Discovers candidate server package directories exactly one level below the
+ * root. Honors workspace globs and the common layout names; never recurses.
+ */
+function discoverMonorepoLeaves(root: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const addIfPackage = (absDir: string): void => {
+    if (seen.has(absDir)) return;
+    seen.add(absDir);
+    if (existsSync(join(absDir, "package.json"))) found.push(absDir);
+  };
+
+  // Workspace globs: "packages/*", "packages/*/server", etc. Expand a single
+  // trailing segment; deeper globs are flattened to their parent's children.
+  for (const glob of readWorkspaceGlobs(root)) {
+    const cleaned = glob.replace(/\/+$/, "");
+    if (!cleaned || cleaned.startsWith("!")) continue;
+    const parent = cleaned.includes("*") ? cleaned.slice(0, cleaned.lastIndexOf("/") + 1).replace(/\*$/, "") : cleaned;
+    const absParent = join(root, parent);
+    let entries;
+    try {
+      entries = readdirSync(absParent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || LEAF_SKIP_DIRS.has(e.name)) continue;
+      addIfPackage(join(absParent, e.name));
+    }
+  }
+
+  for (const parent of LEAF_PARENT_DIRS) {
+    const absParent = join(root, parent);
+    let entries;
+    try {
+      entries = readdirSync(absParent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || LEAF_SKIP_DIRS.has(e.name)) continue;
+      addIfPackage(join(absParent, e.name));
+    }
+  }
+
+  for (const single of LEAF_SINGLE_DIRS) {
+    addIfPackage(join(root, single));
+  }
+
+  return found.slice(0, MAX_MONOREPO_LEAVES);
+}
+
+/** Reads one leaf package.json and merges its dependencies into a manifest. */
+function leafManifest(root: string, leafAbs: string): DependencyManifest {
+  const packages = new Map<string, string>();
+  try {
+    const json = JSON.parse(readFileSync(join(leafAbs, "package.json"), "utf8")) as Record<string, unknown>;
+    for (const bucket of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+      const table = json[bucket];
+      if (table && typeof table === "object") {
+        for (const [name, version] of Object.entries(table as Record<string, unknown>)) {
+          if (typeof version === "string" && !packages.has(name)) packages.set(name, version);
+        }
+      }
+    }
+  } catch {
+    // Unreadable leaf manifest: treated as empty.
+  }
+  return { packages, packageJsonPath: join(leafAbs, "package.json").slice(root.length + 1) };
+}
+
+interface LeafScanResult {
+  found: boolean;
+  leafCount: number;
+  extractions: Array<{ result: ExtractionResult; language: string; framework: string }>;
+}
+
+/**
+ * Root-miss fallback: scan one level of workspace packages and aggregate any
+ * routes they expose. Activates only when the root produced no extraction.
+ */
+async function scanMonorepoLeaves(args: {
+  root: string;
+  ctx: ScanContext;
+  languageAnalyses: Array<{ entry: (typeof REGISTRY)[number]; analysis: unknown }>;
+  options: ScanOptions;
+  diagnostics: string[];
+}): Promise<LeafScanResult> {
+  const { root, ctx, languageAnalyses, options, diagnostics } = args;
+  const leaves = discoverMonorepoLeaves(root);
+  if (!leaves.length) return { found: false, leafCount: 0, extractions: [] };
+
+  const extractions: LeafScanResult["extractions"] = [];
+  const seenOps = new Set<string>();
+  for (const leafAbs of leaves) {
+    const manifest = leafManifest(root, leafAbs);
+    const leafCtx: ScanContext = { ...ctx, manifest };
+    for (const { entry, analysis } of languageAnalyses) {
+      for (const pack of entry.frameworks) {
+        if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
+        if (!pack.applies(leafCtx)) continue;
+        ctx.onProgress?.("extract", `leaf ${pack.id}`);
+        try {
+          const result = await pack.extract(analysis, leafCtx);
+          // Dedupe identical operations across leaves; keep the first richer one.
+          result.routes = result.routes.filter((route) => {
+            const key = `${route.method} ${route.fullPath ?? route.path}`;
+            if (seenOps.has(key)) return false;
+            seenOps.add(key);
+            return true;
+          });
+          for (const route of result.routes) {
+            route.language = pack.language;
+            route.framework = pack.id;
+          }
+          extractions.push({ result, language: pack.language, framework: pack.id });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          diagnostics.push(`monorepo leaf pack "${pack.id}" failed: ${message}`);
+        }
+      }
+    }
+  }
+  return { found: true, leafCount: leaves.length, extractions };
 }

@@ -32,6 +32,74 @@ interface CollectedField {
   required?: boolean;
 }
 
+/**
+ * A monkey-patched Express Response method, e.g.
+ *   response.customSuccess = function (status, message, data = null) {
+ *     return this.status(status).json({ message, data });
+ *   };
+ * `paramNames` binds the call arguments positionally; `statusArg`/`bodyArg` are
+ * the inner nodes passed to `this.status(...)` / `.json(...)`.
+ */
+export interface CustomResponseMethod {
+  paramNames: string[];
+  statusArg?: any;
+  bodyArg?: any;
+}
+
+/**
+ * Scans every project file for monkey-patched Express Response methods of the
+ * form
+ *   response.<name> = function (<p0>, <p1>, ...) { return this.status(S).json(BODY); };
+ * or the arrow equivalent. Returns them keyed by method name so handlers can
+ * expand `res.<name>(args)` into a concrete response site.
+ */
+export function extractCustomResponseMethods(analysis: TsAnalysis): Map<string, CustomResponseMethod> {
+  const { ts } = analysis;
+  const map = new Map<string, CustomResponseMethod>();
+
+  const inspectFunction = (fn: any): CustomResponseMethod | null => {
+    let statusArg: any;
+    let bodyArg: any;
+    const examineReturn = (ret: any) => {
+      if (!ret || !ts.isCallExpression(ret)) return;
+      if (ret.expression?.name?.text !== "json") return;
+      bodyArg = ret.arguments?.[0];
+      const statusCall = ret.expression?.expression;
+      if (ts.isCallExpression(statusCall) && statusCall.expression?.name?.text === "status") {
+        statusArg = statusCall.arguments?.[0];
+      }
+    };
+    if (ts.isBlock(fn.body)) {
+      fn.body.forEachChild((child: any) => {
+        if (ts.isReturnStatement(child)) examineReturn(child.expression);
+      });
+    } else {
+      // Arrow function with an expression body.
+      examineReturn(fn.body);
+    }
+    if (!bodyArg) return null;
+    const paramNames = (fn.parameters ?? []).map((p: any) => p.name?.getText?.() ?? "");
+    return { paramNames, statusArg, bodyArg };
+  };
+
+  for (const file of analysis.sourceByPath.values()) {
+    file.forEachChild((node: any) => {
+      // `response.x = function(){...}` lives inside an ExpressionStatement.
+      const binary = ts.isExpressionStatement(node) ? node.expression : node;
+      if (!ts.isBinaryExpression(binary)) return;
+      node = binary;
+      if (node.operatorToken?.kind !== ts.SyntaxKind.EqualsToken) return;
+      if (!ts.isPropertyAccessExpression(node.left)) return;
+      const methodName = node.left.name.text;
+      const fn = node.right;
+      if (!(ts.isFunctionExpression(fn) || ts.isArrowFunction(fn))) return;
+      const custom = inspectFunction(fn);
+      if (custom && !map.has(methodName)) map.set(methodName, custom);
+    });
+  }
+  return map;
+}
+
 const HTTP_VERB_LITERAL = /^\d{3}$/;
 
 function rootIdentifier(ts: any, node: any): string | undefined {
@@ -228,6 +296,70 @@ function findExportedDeclaration(
 
 export { findExportedDeclaration };
 
+/**
+ * Resolves a property name against CommonJS module exports that are an object
+ * literal (`module.exports = { login(req,res){...} }`) or direct property
+ * assignments (`exports.login = function...`). Returns the function-like node.
+ */
+function findExportedObjectMethod(
+  analysis: TsAnalysis,
+  file: any,
+  name: string,
+): { node: any; file: any } | null {
+  const { ts } = analysis;
+  let found: any;
+
+  const lookInObject = (obj: any) => {
+    if (!obj || !ts.isObjectLiteralExpression(obj)) return;
+    for (const prop of obj.properties) {
+      // Shorthand `{ login }`, method `login(req,res){}`, or `login: function(){}`.
+      const propName =
+        ts.isShorthandPropertyAssignment(prop)
+          ? prop.name.text
+          : ts.isMethodDeclaration(prop) || ts.isPropertyAssignment(prop)
+            ? prop.name?.text
+            : undefined;
+      if (propName !== name) continue;
+      if (ts.isMethodDeclaration(prop)) {
+        found = prop;
+      } else if (ts.isPropertyAssignment(prop)) {
+        found = prop.initializer;
+      } else if (ts.isShorthandPropertyAssignment(prop)) {
+        found = prop.name;
+      }
+      return;
+    }
+  };
+
+  file.forEachChild((child: any) => {
+    if (found) return;
+    if (!ts.isExpressionStatement(child)) return;
+    const expr = child.expression;
+    if (!ts.isBinaryExpression(expr) || expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
+    const lhs = expr.left;
+    // module.exports = { ... }
+    if (
+      ts.isPropertyAccessExpression(lhs) &&
+      lhs.expression.getText(file) === "module" &&
+      lhs.name.text === "exports"
+    ) {
+      lookInObject(expr.right);
+      return;
+    }
+    // exports.login = function... / module.exports.login = function...
+    const lhsText = lhs.getText(file);
+    if (
+      ts.isPropertyAccessExpression(lhs) &&
+      (lhsText === `exports.${name}` || lhsText === `module.exports.${name}`) &&
+      (ts.isFunctionExpression(expr.right) || ts.isArrowFunction(expr.right) || ts.isFunctionDeclaration(expr.right))
+    ) {
+      found = expr.right;
+    }
+  });
+
+  return found ? { node: found, file } : null;
+}
+
 export function resolveHandler(
   analysis: TsAnalysis,
   sourceFile: any,
@@ -260,7 +392,9 @@ export function resolveHandler(
       node.name.text,
       new Set(),
     );
-    return decl;
+    if (decl) return decl;
+    // CommonJS controller object: `module.exports = { login(req,res){} }`.
+    return findExportedObjectMethod(analysis, imported.file, node.name.text);
   }
 
   if (!ts.isIdentifier(node)) return null;
@@ -356,24 +490,26 @@ export function resolveImportedFile(
   });
 
   if (!specifier) {
-    // const x = require('./m')
+    // const x = require('./m') — only accept the require that initializes a
+    // variable whose name matches localName (not the first require in file).
     sourceFile.forEachChild((child: any) => {
       if (specifier) return;
-      const walk = (n: any) => {
+      if (!ts.isVariableStatement(child)) return;
+      for (const decl of child.declarationList.declarations) {
+        if (specifier) return;
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== localName) continue;
+        const init = decl.initializer;
         if (
-          ts.isCallExpression(n) &&
-          ts.isIdentifier(n.expression) &&
-          n.expression.text === "require" &&
-          ts.isStringLiteral(n.arguments[0])
+          init &&
+          ts.isCallExpression(init) &&
+          ts.isIdentifier(init.expression) &&
+          init.expression.text === "require" &&
+          ts.isStringLiteral(init.arguments[0])
         ) {
-          // Binding name validated by caller via enclosing variable; this
-          // coarse pass only resolves relative modules.
-          specifier = n.arguments[0].text;
+          specifier = init.arguments[0].text;
           exportName = "module";
         }
-        ts.forEachChild(n, walk);
-      };
-      walk(child);
+      }
     });
   }
 
@@ -437,6 +573,7 @@ export function analyzeHandler(
     pathParams: Set<string>;
     validators: ValidatedField[];
     bodyReferencedHint?: boolean;
+    customResponseMethods?: Map<string, CustomResponseMethod>;
   },
 ): HandlerFacts {
   const { ts, checker } = analysis;
@@ -607,6 +744,125 @@ export function analyzeHandler(
       });
     }
   }
+
+  // ---- Local-variable tracking (pure-JS friendly) ----
+  // Collect `const x = <expr>` declarations lexically inside the handler body so
+  // `res.json(localVar)` can be grounded to a concrete shape. Nested-block
+  // assignments are kept first-wins; this is a within-function heuristic.
+  const localAssignments = new Map<string, any>();
+  (function collectLocals(node: any): void {
+    if (!node) return;
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name) && decl.initializer) {
+          if (!localAssignments.has(decl.name.text)) {
+            localAssignments.set(decl.name.text, decl.initializer);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, collectLocals);
+  })(handler.body);
+
+  type Bindings = Map<string, any>;
+
+  /**
+ * Resolves a value node to a JSON schema using only local information:
+ * literals, object/array literals, local variable assignments, req.body/query/
+ * params references, ternaries and literal merges. Truly dynamic values
+ * (calls, awaited repos, external clients) yield an empty schema honestly.
+ */
+  function resolveLocalValue(
+    node: any,
+    bindings: Bindings = new Map(),
+    depth = 0,
+  ): JsonSchema | undefined {
+    if (!node || depth > 12) return undefined;
+
+    // Template string → string.
+    if (ts.isTemplateExpression(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      return { type: "string" };
+    }
+    // Identifier: follow bindings, then local assignments.
+    if (ts.isIdentifier(node)) {
+      const name = node.text;
+      if (bindings.has(name)) return resolveLocalValue(bindings.get(name), bindings, depth + 1);
+      if (localAssignments.has(name)) {
+        return resolveLocalValue(localAssignments.get(name), bindings, depth + 1);
+      }
+      return undefined;
+    }
+    // Literal (string/number/bool/null/array/object handled below).
+    if (!ts.isObjectLiteralExpression(node) && !ts.isArrayLiteralExpression(node)) {
+      const value = literalToValue(ts, node);
+      if (value !== undefined) return jsonSchema(value);
+    }
+    // Object literal, including spread merges.
+    if (ts.isObjectLiteralExpression(node)) {
+      const props: Record<string, JsonSchema> = {};
+      const required: string[] = [];
+      for (const prop of node.properties) {
+        if (ts.isSpreadAssignment(prop)) {
+          const spread = resolveLocalValue(prop.expression, bindings, depth + 1);
+          if (spread?.properties) Object.assign(props, spread.properties as Record<string, JsonSchema>);
+          continue;
+        }
+        let key: string | undefined;
+        let init: any;
+        if (ts.isPropertyAssignment(prop)) {
+          key = prop.name?.getText(file)?.replace(/['"]/g, "");
+          init = prop.initializer;
+        } else if (ts.isShorthandPropertyAssignment(prop)) {
+          key = prop.name.text;
+          init = prop.name;
+        }
+        if (!key) continue;
+        const val = resolveLocalValue(init, bindings, depth + 1);
+        props[key] = val ?? {};
+        if (val) required.push(key);
+      }
+      if (!Object.keys(props).length) return undefined;
+      return { type: "object", properties: props, ...(required.length ? { required } : {}) };
+    }
+    // Array literal.
+    if (ts.isArrayLiteralExpression(node)) {
+      const itemSchemas = node.elements
+        .map((el: any) => resolveLocalValue(el, bindings, depth + 1))
+        .filter((s: JsonSchema | undefined): s is JsonSchema => Boolean(s));
+      return { type: "array", items: itemSchemas[0] ?? {} };
+    }
+    // Property access: req.body.x, localVar.x, localVar.nested.prop.
+    if (ts.isPropertyAccessExpression(node)) {
+      const base = node.expression;
+      const propName = node.name.text;
+      if (ts.isPropertyAccessExpression(base)) {
+        const root = rootIdentifier(ts, base);
+        const container = base.name?.text;
+        if (root === reqName && container === "body") {
+          return { type: "object", properties: { [propName]: {} } };
+        }
+        if (root === reqName && (container === "query" || container === "params")) {
+          return { type: "string" };
+        }
+      }
+      const baseSchema = resolveLocalValue(base, bindings, depth + 1);
+      if (baseSchema?.type === "object" && baseSchema.properties) {
+        const picked = (baseSchema.properties as Record<string, JsonSchema>)[propName];
+        if (picked) return picked;
+      }
+      return undefined;
+    }
+    // Ternary: union of both branches.
+    if (ts.isConditionalExpression(node)) {
+      const whenTrue = resolveLocalValue(node.whenTrue, bindings, depth + 1);
+      const whenFalse = resolveLocalValue(node.whenFalse, bindings, depth + 1);
+      if (whenTrue && whenFalse) return { anyOf: [whenTrue, whenFalse] };
+      return whenTrue ?? whenFalse;
+    }
+    // Call expression / awaited value / external: honest opaque.
+    return undefined;
+  }
+
 
   function collectDestructure(
     accessNode: any,
@@ -863,7 +1119,16 @@ export function analyzeHandler(
           return;
         }
         if (arg) {
-          const { schema, typed } = schemaFromNode(analysis, arg);
+          let { schema, typed } = schemaFromNode(analysis, arg);
+          // Pure-JS fall-through: the checker hands back `any` for locals, so
+          // ground `res.json(localVar)` by resolving the local value.
+          if (!schema) {
+            const local = resolveLocalValue(arg);
+            if (local && Object.keys(local).length) {
+              schema = local;
+              typed = false;
+            }
+          }
           const isString =
             ts.isStringLiteralLike(arg) ||
             (() => {
@@ -882,6 +1147,34 @@ export function analyzeHandler(
           recordResponse(status, mediaType, schema, typed ? "high" : "medium");
         } else {
           recordResponse(status, explicitType ?? "application/json", undefined, "medium");
+        }
+      }
+    }
+    // Monkey-patched response method (e.g. res.customSuccess(200, msg, data)):
+    // only expand when no standard Express response site was already recorded.
+    if (!hasResponseSite) {
+      const custom = context.customResponseMethods;
+      if (custom?.size) {
+        for (const step of chain) {
+          const def = custom.get(step.name);
+          if (!def) continue;
+          const bindings: Bindings = new Map();
+          def.paramNames.forEach((p, i) => {
+            if (p && step.args[i]) bindings.set(p, step.args[i]);
+          });
+          let resolvedStatus = "200";
+          if (def.statusArg) {
+            let statusNode: any = def.statusArg;
+            if (ts.isIdentifier(statusNode)) statusNode = bindings.get(statusNode.text) ?? statusNode;
+            const raw = literalToValue(ts, statusNode);
+            if (typeof raw === "number" && HTTP_VERB_LITERAL.test(String(raw))) {
+              resolvedStatus = String(raw);
+            }
+          }
+          let bodySchema: JsonSchema | undefined;
+          if (def.bodyArg) bodySchema = resolveLocalValue(def.bodyArg, bindings);
+          recordResponse(resolvedStatus, "application/json", bodySchema, "medium");
+          break;
         }
       }
     }

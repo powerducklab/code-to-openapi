@@ -1,0 +1,5 @@
+{
+  "name": "@acme/api",
+  "private": true,
+  "dependencies": { "thinkjs": "^4.0.0" }
+}

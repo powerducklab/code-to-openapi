@@ -393,7 +393,17 @@ function collectParameters(
         case "Param": {
           const nameArg = info.args[0];
           if (nameArg && ts.isStringLiteralLike(nameArg)) {
-            addParam("path", nameArg.text, schema, "high", true);
+            // At the HTTP layer every path parameter arrives as a string. When
+            // the handler omits the type annotation (`@Param('slug') slug`),
+            // default to { type: string } instead of leaving an untyped gap.
+            // An explicit annotation (`: number`) is preserved as-is.
+            addParam(
+              "path",
+              nameArg.text,
+              schema ?? { type: "string" },
+              "high",
+              true,
+            );
           } else if (schema?.properties || schema?.$ref) {
             expandObject(schema, "path", true);
           }
