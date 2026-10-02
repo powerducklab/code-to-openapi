@@ -77,6 +77,7 @@ export const fastendpointsPack: FrameworkPack<CSharpAnalysis> = {
     const servers: DiscoveredServer[] = [];
 
     const routes = dedupe(candidates);
+    disambiguateOperationIds(routes);
     return { routes, unresolved, components, securitySchemes, servers };
   },
 };
@@ -330,4 +331,32 @@ function dedupe(routes: RouteCandidate[]): RouteCandidate[] {
     if (!seen.has(key)) seen.set(key, route);
   }
   return [...seen.values()];
+}
+
+// Several test endpoints share the same simple class name (e.g. multiple
+// `Endpoint` classes). Append a numeric suffix to keep operationIds unique.
+function disambiguateOperationIds(routes: RouteCandidate[]): void {
+  const counts = new Map<string, number>();
+  for (const r of routes) {
+    if (!r.operationId) continue;
+    counts.set(r.operationId, (counts.get(r.operationId) ?? 0) + 1);
+  }
+  const firstSeen = new Set<string>();
+  const used = new Set(routes.map((r) => r.operationId).filter((x): x is string => !!x));
+  for (const r of routes) {
+    if (!r.operationId || (counts.get(r.operationId) ?? 1) === 1) continue;
+    if (!firstSeen.has(r.operationId)) {
+      firstSeen.add(r.operationId);
+      continue;
+    }
+    let n = 2;
+    let candidate = `${r.operationId}_${n}`;
+    while (used.has(candidate)) {
+      n += 1;
+      candidate = `${r.operationId}_${n}`;
+    }
+    used.delete(r.operationId);
+    r.operationId = candidate;
+    used.add(candidate);
+  }
 }
