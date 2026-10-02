@@ -113,9 +113,20 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
           cls.namedChildren.find((c) => c.type === "identifier")?.text
             .replace(/Controller$/, "")
             .replace(/^./, (c) => c.toLowerCase()) ?? "default";
+        // Bare method names collide across controllers (50 duplicates on a real
+        // app), so qualify the operationId with the controller class. Two Spring
+        // methods never share a name inside one class, which keeps the id unique.
+        const controllerShort =
+          cls.namedChildren.find((c) => c.type === "identifier")?.text ?? "controller";
 
         const body = childrenOfType(cls, "class_body")[0];
         if (!body) continue;
+
+        // Injected bean fields (constructor / @Autowired / @Resource / Lombok
+        // @AllArgsConstructor all materialise as ordinary private fields here).
+        // Mapping field name -> declared type lets a raw-ResponseEntity handler
+        // follow `return service.method(...)` to the service method's return type.
+        const fieldTypes = fieldTypesOf(cls);
 
         for (const method of childrenOfType(body, "method_declaration")) {
           const annotations = listAnnotations(method);
@@ -167,8 +178,8 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             (returnType === null && /text\/event-stream/.test(method.text));
 
           const responses = isSse
-            ? collectSseResponse(returnType, model, gaps, rel)
-            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps, rel);
+            ? collectSseResponse(method, returnType, model, gaps, rel)
+            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps, rel, fieldTypes);
 
           const extensions = isSse ? { "x-protocol": "sse" } : undefined;
 
@@ -176,9 +187,9 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             method: verb,
             path: fullPath,
             fullPath,
-            operationId:
-              method.namedChildren.find((c) => c.type === "identifier")?.text ??
-              undefined,
+            operationId: `${controllerShort}_${
+              method.namedChildren.find((c) => c.type === "identifier")?.text ?? "op"
+            }`,
             origin,
             parameters,
             ...(requestBody ? { requestBody } : {}),
@@ -201,9 +212,27 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
     const securitySchemes: DiscoveredSecurityScheme[] = [];
     const servers = detectServers(ctx);
 
-    return { routes: dedupe(candidates), unresolved, components, securitySchemes, servers };
+    const routes = disambiguateOperationIds(dedupe(candidates));
+    return { routes, unresolved, components, securitySchemes, servers };
   },
 };
+
+/**
+ * Two controllers in different packages can share a simple name, which makes
+ * `<Class>_<method>` collide. As a last resort, suffix the 2nd and later
+ * collisions with an occurrence number; the first occurrence keeps its name.
+ */
+function disambiguateOperationIds(routes: RouteCandidate[]): RouteCandidate[] {
+  const seen = new Map<string, number>();
+  for (const route of routes) {
+    const base = route.operationId;
+    if (!base) continue;
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    if (count > 1) route.operationId = `${base}_${count}`;
+  }
+  return routes;
+}
 
 function resolveMapping(
   node: TsNode,
@@ -559,6 +588,7 @@ function collectJsonResponse(
   model: JavaModelIndex,
   gaps: GapCode[],
   rel: string,
+  fieldTypes: Map<string, TsNode>,
 ): DiscoveredResponse[] {
   const status = resolveStatus(method) ?? "200";
   void mapping;
@@ -583,6 +613,21 @@ function collectJsonResponse(
   }
   const schema = javaTypeToSchema(returnType, model, 0, undefined, rel);
   if (!schema || !Object.keys(schema).length) {
+    // Raw envelopes (e.g. `ResponseEntity` with no type argument) unwrap to an
+    // empty schema. When the handler body ends in `return service.method(...)`,
+    // follow the call to the bean method's DECLARED return type rather than
+    // fabricating an empty response.
+    const followed = followServiceReturnType(method, fieldTypes, model, rel);
+    if (followed && Object.keys(followed).length) {
+      return [
+        {
+          statusCode: status,
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: followed }],
+        },
+      ];
+    }
     gaps.push("response-unknown");
     return [
       {
@@ -603,14 +648,173 @@ function collectJsonResponse(
   ];
 }
 
+/**
+ * Injected bean fields declared on the controller, keyed by field name. Both
+ * concrete `@Service` classes and interface-typed collaborators are recorded;
+ * the interface's own method signatures already carry the return types we need,
+ * so a separate impl lookup is unnecessary.
+ */
+function fieldTypesOf(cls: TsNode): Map<string, TsNode> {
+  const map = new Map<string, TsNode>();
+  const body = childrenOfType(cls, "class_body")[0];
+  if (!body) return map;
+  for (const field of childrenOfType(body, "field_declaration")) {
+    const mods = field.namedChildren.find((c) => c.type === "modifiers");
+    if (mods && /\bstatic\b/.test(mods.text)) continue;
+    const typeNode = field.namedChildren.find((c) =>
+      [
+        "type_identifier",
+        "generic_type",
+        "scoped_identifier",
+        "scoped_type_identifier",
+      ].includes(c.type),
+    );
+    if (!typeNode) continue;
+    for (const declarator of findAll(field, (n) => n.type === "variable_declarator")) {
+      const name = declarator.namedChildren.find((c) => c.type === "identifier");
+      if (name) map.set(name.text, typeNode);
+    }
+  }
+  return map;
+}
+
+/** Resolve a method-invocation receiver to an injected field name. */
+function receiverFieldName(receiver: TsNode): string | null {
+  if (receiver.type === "identifier") return receiver.text;
+  // `this.service.method(...)`.
+  if (receiver.type === "field_access") {
+    const usesThis = receiver.namedChildren.some((c) => c.type === "this");
+    const tail = receiver.namedChildren.find((c) => c.type === "identifier");
+    if (usesThis && tail) return tail.text;
+  }
+  return null;
+}
+
+/** Find a method declaration by name within a class/interface body. */
+function findMethodNode(container: TsNode, name: string): TsNode | null {
+  const body = container.namedChildren.find(
+    (c) => c.type === "class_body" || c.type === "interface_body",
+  );
+  if (!body) return null;
+  for (const method of childrenOfType(body, "method_declaration")) {
+    const id = method.namedChildren.find((c) => c.type === "identifier");
+    if (id && id.text === name) return method;
+  }
+  return null;
+}
+
+/** Extract the declared return-type node of a method/abstract-method declaration. */
+function declaredReturnTypeOf(method: TsNode): TsNode | null {
+  return (
+    method.namedChildren.find(
+      (c) =>
+        c.type === "type_identifier" ||
+        c.type === "generic_type" ||
+        c.type === "void_type" ||
+        c.type === "array_type" ||
+        c.type === "scoped_identifier" ||
+        c.type === "scoped_type_identifier",
+    ) ?? null
+  );
+}
+
+/**
+ * A followed schema is only committed when it names a concrete shape: a $ref to
+ * a project component, an array of such, or a scalar / populated object. Free
+ * forms (`Object`, `Map<,>`, `JsonNode` -> bare object) are deliberately
+ * rejected so dynamic responses keep their honest gap instead of being laundered
+ * into a fabricated schema.
+ */
+function isConcreteFollowedSchema(schema: JsonSchema | undefined): boolean {
+  if (!schema) return false;
+  if ((schema as { $ref?: string }).$ref) return true;
+  const asObject = schema as {
+    type?: string;
+    items?: JsonSchema;
+    properties?: Record<string, unknown>;
+  };
+  if (asObject.type === "array") {
+    return Boolean(asObject.items) && isConcreteFollowedSchema(asObject.items);
+  }
+  if (
+    asObject.type === "string" ||
+    asObject.type === "integer" ||
+    asObject.type === "number" ||
+    asObject.type === "boolean"
+  ) {
+    return true;
+  }
+  if (asObject.type === "object" && asObject.properties) {
+    return Object.keys(asObject.properties).length > 0;
+  }
+  return false;
+}
+
+/**
+ * Follow the service call(s) inside the handler's return statements to the bean
+ * method's declared return type. Bounded to the handler's own block and the
+ * direct injected fields; recursion depth and O(n^2) scans are avoided because
+ * this path only runs when the declared return type did not already resolve.
+ */
+function followServiceReturnType(
+  method: TsNode,
+  fieldTypes: Map<string, TsNode>,
+  model: JavaModelIndex,
+  rel: string,
+): JsonSchema | undefined {
+  if (fieldTypes.size === 0) return undefined;
+  const block = childrenOfType(method, "block")[0];
+  if (!block) return undefined;
+  const returns = findAll(block, (n) => n.type === "return_statement");
+  for (const ret of returns) {
+    for (const call of findAll(ret, (n) => n.type === "method_invocation")) {
+      const schema = schemaFromServiceCall(call, fieldTypes, model, rel);
+      if (schema) return schema;
+    }
+  }
+  return undefined;
+}
+
+function schemaFromServiceCall(
+  call: TsNode,
+  fieldTypes: Map<string, TsNode>,
+  model: JavaModelIndex,
+  rel: string,
+): JsonSchema | undefined {
+  const receiver = call.namedChildren[0];
+  const methodName = call.namedChildren[1];
+  if (!receiver || !methodName || methodName.type !== "identifier") return undefined;
+  const fieldName = receiverFieldName(receiver);
+  if (!fieldName) return undefined;
+  const fieldTypeNode = fieldTypes.get(fieldName);
+  if (!fieldTypeNode) return undefined;
+  const serviceTypeName = typeNameOf(fieldTypeNode);
+  if (!serviceTypeName) return undefined;
+  const serviceDef = model.resolveDef(serviceTypeName, rel);
+  if (!serviceDef) return undefined;
+  const target = findMethodNode(serviceDef.node, methodName.text);
+  if (!target) return undefined;
+  const returnType = declaredReturnTypeOf(target);
+  if (!returnType || returnType.type === "void_type") return undefined;
+  const schema = javaTypeToSchema(returnType, model, 0, undefined, serviceDef.file);
+  return isConcreteFollowedSchema(schema) ? schema : undefined;
+}
+
 function collectSseResponse(
+  method: TsNode,
   returnType: TsNode | null,
   model: JavaModelIndex,
   gaps: GapCode[],
   rel: string,
 ): DiscoveredResponse[] {
   let itemSchema: JsonSchema | undefined;
-  if (returnType) {
+  // Prefer events statically extractable from `emitter.send(...)` chains inside
+  // the handler body; fall back to the declared generic (Flux<ServerSentEvent<X>>).
+  const bodyEvents = extractSseEvents(method, model, rel);
+  if (bodyEvents.length) {
+    itemSchema = describeSseEvents(bodyEvents);
+  }
+  if ((!itemSchema || !Object.keys(itemSchema).length) && returnType) {
     // Flux<Foo> or Flux<ServerSentEvent<Foo>>.
     const genericArgs = findFirst(returnType, (n) => n.type === "type_arguments");
     const firstArg = genericArgs?.namedChildren[0];
@@ -642,6 +846,133 @@ function collectSseResponse(
       ],
     },
   ];
+}
+
+interface SseEvent {
+  name?: string;
+  data?: JsonSchema;
+}
+
+/** Build local-variable declared types from the handler body. */
+function localVarTypes(method: TsNode): Map<string, TsNode> {
+  const map = new Map<string, TsNode>();
+  for (const decl of findAll(method, (n) => n.type === "local_variable_declaration")) {
+    const typeNode = decl.namedChildren.find((c) =>
+      [
+        "type_identifier",
+        "generic_type",
+        "scoped_identifier",
+        "scoped_type_identifier",
+      ].includes(c.type),
+    );
+    if (!typeNode) continue;
+    for (const declarator of childrenOfType(decl, "variable_declarator")) {
+      const name = declarator.namedChildren.find((c) => c.type === "identifier");
+      if (name) map.set(name.text, typeNode);
+    }
+  }
+  return map;
+}
+
+/** Extract `SseEmitter.event().name("x").data(...)` chains from the handler. */
+function extractSseEvents(
+  method: TsNode,
+  model: JavaModelIndex,
+  rel: string,
+): SseEvent[] {
+  const localVars = localVarTypes(method);
+  const events: SseEvent[] = [];
+  const dataCalls = findAll(method, (n) => {
+    if (n.type !== "method_invocation") return false;
+    return n.namedChildren[1]?.type === "identifier" && n.namedChildren[1].text === "data";
+  });
+  for (const call of dataCalls) {
+    const event = sseEventFromDataCall(call, localVars, model, rel);
+    if (event) events.push(event);
+  }
+  return events;
+}
+
+function sseEventFromDataCall(
+  dataCall: TsNode,
+  localVars: Map<string, TsNode>,
+  model: JavaModelIndex,
+  rel: string,
+): SseEvent | null {
+  // Walk the receiver chain: .data(...) <- .name("x")? <- .event() <- SseEmitter.
+  let name: string | undefined;
+  let isSse = false;
+  let node: TsNode | undefined = dataCall;
+  let guard = 0;
+  while (node && guard++ < 8) {
+    const receiver: TsNode | undefined = node.namedChildren[0];
+    if (!receiver || receiver.type !== "method_invocation") break;
+    const methodName = receiver.namedChildren[1]?.text;
+    if (methodName === "name") {
+      const literal = findFirst(receiver, (n) => n.type === "string_literal");
+      const fragment = literal?.namedChildren.find((c) => c.type === "string_fragment");
+      if (fragment) name = fragment.text;
+    }
+    if (methodName === "event") {
+      const base = receiver.namedChildren[0];
+      if (base?.type === "identifier" && base.text === "SseEmitter") isSse = true;
+    }
+    node = receiver;
+  }
+  if (!isSse) return null;
+
+  const argList = childrenOfType(dataCall, "argument_list")[0];
+  const dataArg = argList?.namedChildren.find((c) =>
+    ["class_literal", "object_creation_expression", "identifier", "string_literal"].includes(
+      c.type,
+    ),
+  );
+  let data: JsonSchema | undefined;
+  if (dataArg?.type === "class_literal") {
+    const typeId = findFirst(dataArg, (n) => n.type === "type_identifier");
+    if (typeId) data = javaTypeToSchema(typeId, model, 0, undefined, rel);
+  } else if (dataArg?.type === "object_creation_expression") {
+    const typeId = dataArg.namedChildren.find((c) =>
+      ["type_identifier", "generic_type", "scoped_type_identifier"].includes(c.type),
+    );
+    if (typeId) data = javaTypeToSchema(typeId, model, 0, undefined, rel);
+  } else if (dataArg?.type === "identifier") {
+    const typeNode = localVars.get(dataArg.text);
+    if (typeNode) data = javaTypeToSchema(typeNode, model, 0, undefined, rel);
+  } else if (dataArg?.type === "string_literal") {
+    data = { type: "string" };
+  }
+  if (!data || !Object.keys(data).length) return null;
+  return name ? { name, data } : { data };
+}
+
+/**
+ * Render extracted SSE events as an item schema. When every event names itself,
+ * emit an envelope with an `event` enum and the `data` payload; otherwise the
+ * payload schema stands on its own (data type known, names are not).
+ */
+function describeSseEvents(events: SseEvent[]): JsonSchema {
+  const names = events.map((e) => e.name).filter((x): x is string => Boolean(x));
+  const dataSchemas = events.map((e) => e.data).filter((x): x is JsonSchema => Boolean(x));
+  if (!dataSchemas.length) return {};
+  const mergedData = mergeSchemas(dataSchemas);
+  if (names.length === events.length) {
+    return {
+      type: "object",
+      properties: {
+        event: { type: "string", enum: [...new Set(names)].sort() },
+        data: mergedData,
+      },
+      required: ["event", "data"],
+    };
+  }
+  return mergedData;
+}
+
+function mergeSchemas(schemas: JsonSchema[]): JsonSchema {
+  const first = schemas[0]!;
+  if (schemas.every((s) => JSON.stringify(s) === JSON.stringify(first))) return first;
+  return { oneOf: schemas };
 }
 
 function resolveStatus(method: TsNode): string | null {
