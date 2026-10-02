@@ -1,0 +1,9 @@
+{
+  "name": "elysia-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "elysia": "^1.0.0"
+  }
+}
