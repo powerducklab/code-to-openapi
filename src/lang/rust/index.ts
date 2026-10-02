@@ -37,7 +37,9 @@ export interface RustFile {
 export interface RustAnalysis {
   files: Map<string, RustFile>;
   types: Map<string, RustTypeDef>;
-  functions: Map<string, TsNode>;
+  /** Named functions by unqualified name; modules may each define their own
+   *  `router()`, so all same-named functions are retained. */
+  functions: Map<string, TsNode[]>;
 }
 
 const TYPE_DECL_TYPES = new Set(["struct_item", "enum_item"]);
@@ -123,7 +125,7 @@ export const createRustAnalysis: LanguagePack<RustAnalysis>["analyze"] = async (
   const index: FileIndex = ctx.index;
   const files = new Map<string, RustFile>();
   const types = new Map<string, RustTypeDef>();
-  const functions = new Map<string, TsNode>();
+  const functions = new Map<string, TsNode[]>();
 
   for (const file of index.files) {
     if (file.language !== "rust") continue;
@@ -141,7 +143,10 @@ export const createRustAnalysis: LanguagePack<RustAnalysis>["analyze"] = async (
     }
     for (const fn of findAll(root, (n) => n.type === "function_item")) {
       const name = fn.namedChildren.find((c) => c.type === "identifier")?.text;
-      if (name && !functions.has(name)) functions.set(name, fn);
+      if (!name) continue;
+      const list = functions.get(name);
+      if (list) list.push(fn);
+      else functions.set(name, [fn]);
     }
   }
 

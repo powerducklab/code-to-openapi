@@ -132,9 +132,11 @@ export const axumPack: FrameworkPack<RustAnalysis> = {
         const routerCall = argNodes.find((a) => a.type === "call_expression");
         const fnName = routerCall ? calleeIdentifier(routerCall) : null;
         if (!fnName) continue;
-        const routerFn = analysis.functions.get(fnName);
-        if (!routerFn) continue;
-        collectRouterFunctionRoutes(analysis, model, routerFn, rel, prefix, candidates);
+        // Modules commonly each define their own `router()`; all same-named
+        // builders are expanded and deduped by method+path downstream.
+        for (const routerFn of analysis.functions.get(fnName) ?? []) {
+          collectRouterFunctionRoutes(analysis, model, routerFn, rel, prefix, candidates);
+        }
       }
     }
 
@@ -207,7 +209,11 @@ function collectVerbHandlers(expr: TsNode): VerbHandler[] {
   let current: TsNode | null = expr;
   while (current && current.type === "call_expression") {
     const args = childrenOfType(current, "arguments")[0];
-    const handlerArg = args?.namedChildren.find((c) => c.type === "identifier");
+    // Handlers may be plain identifiers (`get(index)`) or scoped paths
+    // (`get(listing::list_articles)`).
+    const handlerArg = args?.namedChildren.find(
+      (c) => c.type === "identifier" || c.type === "scoped_identifier",
+    );
     const callee: TsNode | undefined = current.namedChildren.find(
       (c) =>
         c.type === "identifier" ||
@@ -267,8 +273,11 @@ function buildCandidate(
   line: number,
   _prefix: string,
 ): RouteCandidate | null {
-  const fnName = handlerRef.type === "identifier" ? handlerRef.text : null;
-  const fn = fnName ? analysis.functions.get(fnName) ?? null : null;
+  const fnName =
+    handlerRef.type === "identifier" || handlerRef.type === "scoped_identifier"
+      ? handlerRef.text.split("::").pop()!
+      : null;
+  const fn = fnName ? analysis.functions.get(fnName)?.[0] ?? null : null;
   if (!fn) return null;
 
   const fullPath = normalizeRoute(route);
@@ -464,6 +473,18 @@ function genericArgumentsOf(node: TsNode): TsNode[] {
   return list ? list.namedChildren : [];
 }
 
+/** Last path segment of a generic's base type, handling scoped paths such as
+ *  `http::Result` or `std::result::Result`. */
+function genericBaseName(node: TsNode): string | null {
+  const base = node.namedChildren.find(
+    (c) =>
+      c.type === "type_identifier" ||
+      c.type === "scoped_identifier" ||
+      c.type === "scoped_type_identifier",
+  );
+  return base?.text.split("::").pop() ?? null;
+}
+
 function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
   const returnType = findReturnType(fn);
   if (!returnType) {
@@ -626,7 +647,7 @@ function unwrapNamedGeneric(node: TsNode, name: string): TsNode | null {
   let current: TsNode | null = node;
   while (current) {
     if (current.type === "generic_type") {
-      const base = current.namedChildren.find((c) => c.type === "type_identifier")?.text;
+      const base = genericBaseName(current);
       const args = genericArgumentsOf(current);
       if (base === name) return args[0] ?? null;
       if (base === "Result" || base === "Response") {
@@ -635,6 +656,7 @@ function unwrapNamedGeneric(node: TsNode, name: string): TsNode | null {
       }
     }
     if (current.type === "type_identifier" && current.text === name) return current;
+    if (current.type === "scoped_identifier" && current.text.split("::").pop() === name) return current;
     return null;
   }
   return null;

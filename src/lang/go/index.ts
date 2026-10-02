@@ -47,6 +47,8 @@ export interface GoAnalysis {
   readonly structs: Map<string, GoStruct>;
   /** Package-level (non-method) functions by name, across files of the package. */
   readonly functions: Map<string, GoFunction[]>;
+  /** Receiver methods, e.g. `func (g *Gin) Response(...)`. */
+  readonly methods: GoFunction[];
 }
 
 function parseTag(raw: string | null): string | null {
@@ -136,17 +138,47 @@ function collectStructs(file: GoFile): GoStruct[] {
 
 function collectFunctions(file: GoFile): GoFunction[] {
   const result: GoFunction[] = [];
-  for (const node of findAll(file.root, (n) => n.type === "function_declaration")) {
+  // tree-sitter Go uses `function_declaration` for plain functions and
+  // `method_declaration` for receiver methods `func (r *T) M(...)`.
+  for (const node of findAll(
+    file.root,
+    (n) => n.type === "function_declaration" || n.type === "method_declaration",
+  )) {
     const children = node.namedChildren;
     // Methods: parameter_list(receiver) precedes the identifier.
     const hasReceiver = children[0]?.type === "parameter_list";
     const nameNode = hasReceiver ? children[1] : children[0];
-    if (!nameNode || nameNode.type !== "identifier") continue;
+    // tree-sitter Go names methods with field_identifier, plain funcs with identifier.
+    if (!nameNode || (nameNode.type !== "identifier" && nameNode.type !== "field_identifier")) continue;
     const receiver = hasReceiver ? children[0] : null;
     const body = findFirst(node, (n) => n.type === "block");
     result.push({ name: nameNode.text, file: file.path, node, body, receiver });
   }
   return result;
+}
+
+/**
+ * Unqualified receiver type name of a method, e.g. `Gin` from
+ * `func (g *Gin) Response(...)`. Returns null for non-methods.
+ */
+export function receiverTypeName(fn: GoFunction): string | null {
+  if (!fn.receiver) return null;
+  const decl = childrenOfType(fn.receiver, "parameter_declaration")[0];
+  if (!decl) return null;
+  const typeNode = decl.namedChildren.find(
+    (c) =>
+      c.type === "pointer_type" ||
+      c.type === "type_identifier" ||
+      c.type === "selector_expression" ||
+      c.type === "qualified_type",
+  );
+  if (!typeNode) return null;
+  const inner = typeNode.type === "pointer_type" ? typeNode.namedChildren[0] : typeNode;
+  if (!inner) return null;
+  if (inner.type === "type_identifier") return inner.text;
+  if (inner.type === "selector_expression") return inner.namedChildren[1]?.text ?? null;
+  if (inner.type === "qualified_type") return inner.namedChildren[1]?.text ?? null;
+  return null;
 }
 
 export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | null> {
@@ -156,6 +188,7 @@ export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | n
   const files = new Map<string, GoFile>();
   const structs = new Map<string, GoStruct>();
   const functions = new Map<string, GoFunction[]>();
+  const methods: GoFunction[] = [];
 
   for (const entry of goFiles) {
     const root = await parseSource("go", entry.content);
@@ -172,14 +205,17 @@ export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | n
       structs.set(`${entry.path}::${struct.name}`, struct);
     }
     for (const fn of collectFunctions(file)) {
-      if (fn.receiver) continue; // package-level handlers only
+      if (fn.receiver) {
+        methods.push(fn);
+        continue; // package-level handlers only
+      }
       const bucket = functions.get(fn.name) ?? [];
       bucket.push(fn);
       functions.set(fn.name, bucket);
     }
   }
 
-  return { id: "go", files, structs, functions };
+  return { id: "go", files, structs, functions, methods };
 }
 
 export type { FileEntry };

@@ -155,9 +155,22 @@ function scalarLiteral(node: TsNode): JsonSchema | null {
 }
 
 function joinPath(prefix: string, path: string): string {
-  if (!prefix) return path || "/";
-  if (!path) return prefix;
-  return `${prefix.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+  const cleanPrefix = prefix.replace(/\/$/, "");
+  // A group-relative route "/" maps onto the group prefix itself, avoiding a
+  // trailing slash (e.g. Route("/articles") + Get("/") -> "/articles").
+  if (!path || path === "/") return cleanPrefix || "/";
+  const cleanPath = path.replace(/^\//, "");
+  if (!cleanPath) return cleanPrefix || "/";
+  return `${cleanPrefix}/${cleanPath}`;
+}
+
+/**
+ * Normalize a chi route pattern to OpenAPI path syntax. Chi supports regex
+ * constraints in params, e.g. `{articleSlug:[a-z-]+}`, which OpenAPI does not
+ * model; keep only the parameter name.
+ */
+function normalizeChiPath(raw: string): string {
+  return raw.replace(/\{([^}:]+):[^}]*\}/g, "{$1}");
 }
 
 function operationId(method: string, path: string): string {
@@ -244,11 +257,31 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
           for (const child of node.namedChildren) walk(child);
         };
 
+        // Resolve the router that a verb call targets, unwrapping middleware
+        // chains such as `r.With(mw).Get(...)` or `r.Group(...).Get(...)`.
+        const routerBase = (call: TsNode): string | null => {
+          const sel = selectorCall(call);
+          if (!sel) return null;
+          if (sel.receiver.type === "identifier") return sel.receiver.text;
+          if (sel.receiver.type === "call_expression") {
+            let cur: TsNode = sel.receiver;
+            while (cur.type === "call_expression") {
+              const s = selectorCall(cur);
+              if (!s) return null;
+              if (s.receiver.type === "identifier") {
+                return s.method === "With" || s.method === "Group" ? s.receiver.text : null;
+              }
+              cur = s.receiver;
+            }
+          }
+          return null;
+        };
+
         const handleCall = (call: TsNode) => {
           const sel = selectorCall(call);
-          if (!sel || sel.receiver.type !== "identifier" || sel.receiver.text !== receiverName) {
-            return;
-          }
+          if (!sel) return;
+          const base = routerBase(call);
+          if (base !== receiverName) return;
           const args = positionalArguments(call);
 
           if (HTTP_METHODS.has(sel.method.toLowerCase())) {
@@ -264,7 +297,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
             const handler = args[1];
             sites.push({
               method: sel.method.toLowerCase(),
-              path: joinPath(prefix, rawPath),
+              path: joinPath(prefix, normalizeChiPath(rawPath)),
               handlerName: handler?.type === "identifier" ? handler.text : null,
               handlerNode: handler?.type === "func_literal" ? handler : null,
               origin: { file: file.path, line: call.startPosition.row + 1 },
@@ -332,15 +365,39 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
       };
 
       // Entry points: routers declared in main-like top-level functions.
+      // Follow registration helpers such as `setupRoutes(r)` so apps that
+      // factor route groups out of main are still fully discovered.
+      const followQueue: Array<{ fn: GoFunction; routerParam: string; prefix: string }> = [];
+      const enqueueSetupCalls = (body: TsNode, knownRouters: Set<string>) => {
+        for (const call of findAll(body, (n) => n.type === "call_expression")) {
+          const callee = call.namedChildren[0];
+          if (!callee || callee.type !== "identifier") continue;
+          const args = positionalArguments(call);
+          const routerArg = args.find(
+            (a) => a.type === "identifier" && knownRouters.has(a.text),
+          );
+          if (!routerArg) continue;
+          const target = analysis.functions.get(callee.text)?.[0];
+          if (!target?.body) continue;
+          const paramList = target.node.namedChildren.find((c) => c.type === "parameter_list");
+          const routerParam =
+            paramList?.namedChildren.find((c) => /chi\.Router|Router/.test(c.text))
+              ?.namedChildren.find((c) => c.type === "identifier")?.text;
+          if (routerParam) followQueue.push({ fn: target, routerParam, prefix: "" });
+        }
+      };
+
       for (const fn of file.root.namedChildren.filter((c) => c.type === "function_declaration")) {
         const name = fn.namedChildren[0];
         const body = fn.namedChildren.find((c) => c.type === "block");
         if (!body) continue;
         const isMain = name?.type === "identifier" && name.text === "main";
         if (!isMain) continue;
-        for (const routerName of routersInBody(body)) {
+        const mainRouters = routersInBody(body);
+        for (const routerName of mainRouters) {
           collectCalls(body, routerName, "", new Set());
         }
+        enqueueSetupCalls(body, mainRouters);
         for (const call of findAll(body, (n) => n.type === "call_expression")) {
           const sel = selectorCall(call);
           if (
@@ -353,6 +410,18 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
             if (addr) servers.add(addrToUrl(addr));
           }
         }
+      }
+
+      // Breadth-first expansion of setup helpers.
+      const visitedSetups = new Set<string>();
+      while (followQueue.length) {
+        const item = followQueue.shift()!;
+        const key = `${item.fn.file}::${item.fn.name}`;
+        if (visitedSetups.has(key)) continue;
+        visitedSetups.add(key);
+        const body = item.fn.body!;
+        collectCalls(body, item.routerParam, item.prefix, new Set());
+        enqueueSetupCalls(body, new Set([item.routerParam]));
       }
     }
 

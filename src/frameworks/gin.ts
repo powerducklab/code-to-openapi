@@ -20,7 +20,7 @@ import type {
 } from "../core/types.js";
 import type { JsonSchema, DiscoveredUnresolved } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
-import { formTag } from "../lang/go/index.js";
+import { formTag, receiverTypeName } from "../lang/go/index.js";
 import {
   buildGoModelIndex,
   ensureGoComponent,
@@ -98,6 +98,24 @@ function callName(node: TsNode | null | undefined): string | null {
     return field?.text ?? null;
   }
   return null;
+}
+
+/** Unqualified function name from a handler argument: `GetTags` or `v1.GetTags`. */
+function handlerIdentifierName(node: TsNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") return node.text;
+  if (node.type === "selector_expression") {
+    const field = node.namedChildren[1];
+    return field?.type === "field_identifier" ? field.text : null;
+  }
+  return null;
+}
+
+/** True when the function signature declares a `*gin.Context` parameter. */
+function isGinContextHandler(fn: GoFunction): boolean {
+  const params = findFirst(fn.node, (n) => n.type === "parameter_list");
+  if (!params) return false;
+  return params.namedChildren.some((decl) => /\bgin\.Context\b/.test(decl.text));
 }
 
 function statusCode(node: TsNode | null | undefined): string | null {
@@ -216,6 +234,43 @@ function analyzeHandler(
   const body = fn.body;
   let requestBody: RouteCandidate["requestBody"];
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
+  let multipartField: string | null = null;
+
+  // Adapter wrappers around *gin.Context, e.g. `appG := app.Gin{C: c}`. Their
+  // methods are resolved below when they delegate to c.JSON.
+  const wrapperVars = new Map<string, string>();
+  const noteWrapperLiteral = (idNode: TsNode | undefined, expr: TsNode | undefined) => {
+    if (idNode?.type !== "identifier" || !expr) return;
+    const composite = findFirst(expr, (n) => n.type === "composite_literal");
+    const typeNode = composite?.namedChildren[0];
+    const recvName =
+      typeNode?.type === "selector_expression" || typeNode?.type === "qualified_type"
+        ? typeNode.namedChildren[typeNode.namedChildren.length - 1]?.text
+        : undefined;
+    if (recvName) wrapperVars.set(idNode.text, recvName);
+  };
+  if (body) {
+    // `appG := app.Gin{C: c}` short variable declarations.
+    for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+      const left = decl.namedChildren.find((c) => c.type === "expression_list");
+      const right = decl.namedChildren.filter((c) => c.type === "expression_list")[1];
+      if (!left || !right) continue;
+      for (let i = 0; i < left.namedChildren.length; i++) {
+        noteWrapperLiteral(left.namedChildren[i], right.namedChildren[i]);
+      }
+    }
+    // Parenthesized `var ( appG = app.Gin{C: c} )` declarations.
+    for (const decl of findAll(body, (n) => n.type === "var_declaration")) {
+      for (const spec of childrenOfType(decl, "var_spec")) {
+        const names = spec.namedChildren.filter((c) => c.type === "identifier");
+        const value = spec.namedChildren.find((c) => c.type === "expression_list");
+        if (!value) continue;
+        for (let i = 0; i < names.length; i++) {
+          noteWrapperLiteral(names[i], value.namedChildren[i]);
+        }
+      }
+    }
+  }
 
   const addResponse = (status: string, response: RouteCandidate["responses"][number]) => {
     responseStatus.set(status, response);
@@ -235,9 +290,22 @@ function analyzeHandler(
     for (const call of calls) {
       const sel = selectorCall(call);
       if (!sel) continue;
-      if (sel.receiver.type !== "identifier") continue;
+      // Allow chained context calls such as c.Request.FormFile("image").
+      const isChainedFormFile =
+        sel.receiver.type === "selector_expression" && sel.method === "FormFile";
+      if (sel.receiver.type !== "identifier" && !isChainedFormFile) continue;
       const args = positionalArguments(sel.call);
       const method = sel.method;
+
+      // Adapter wrapper method, e.g. appG.Response(http.StatusOK, code, data).
+      if (
+        sel.receiver.type === "identifier" &&
+        wrapperVars.has(sel.receiver.text) &&
+        method !== "JSON"
+      ) {
+        resolveWrapperResponse(analysis, modelIndex, fn, method, args, wrapperVars.get(sel.receiver.text)!, addResponse);
+        continue;
+      }
 
       if (method === "Param" && args[0]) {
         const name = literalString(args[0]);
@@ -264,6 +332,29 @@ function analyzeHandler(
             confidence: "high",
           });
         }
+        continue;
+      }
+
+      // c.PostForm / c.DefaultPostForm read ad-hoc form fields. With no bound
+      // struct they cannot form a grouped requestBody, so they surface as
+      // string query parameters, matching c.Query.
+      if (method === "PostForm" || method === "DefaultPostForm") {
+        const name = literalString(args[0]);
+        if (name && !parameters.some((p) => p.name === name)) {
+          parameters.push({
+            name,
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            confidence: "high",
+          });
+        }
+        continue;
+      }
+
+      // c.FormFile / c.Request.FormFile / c.SaveUploadedFile: multipart upload.
+      if (method === "FormFile" || method === "SaveUploadedFile") {
+        multipartField = literalString(args[0]) ?? multipartField;
         continue;
       }
 
@@ -434,6 +525,13 @@ function analyzeHandler(
       }
     }
 
+    // Binding helpers that wrap the context, e.g. app.BindAndValid(c, &form),
+    // bind a form-tagged struct without a direct c.ShouldBind call.
+    if (!requestBody) {
+      const bound = detectBoundForm(body, modelIndex);
+      if (bound) requestBody = bound;
+    }
+
     // Declared path params never read via c.Param are still valid (middleware).
     for (const name of routeParams) {
       if (!parameters.some((p) => p.name === name && p.in === "path")) {
@@ -466,6 +564,25 @@ function analyzeHandler(
     };
   }
 
+  // Multipart upload detected via c.FormFile / c.Request.FormFile.
+  if (multipartField && !requestBody) {
+    requestBody = {
+      required: true,
+      confidence: "high",
+      content: [
+        {
+          mediaType: "multipart/form-data",
+          schema: {
+            type: "object",
+            properties: { [multipartField]: { type: "string", format: "binary" } },
+            required: [multipartField],
+          },
+          confidence: "high",
+        },
+      ],
+    };
+  }
+
   if (responsesEmpty(responseStatus)) {
     gaps.add("response-unknown");
   }
@@ -481,9 +598,133 @@ function analyzeHandler(
   };
 }
 
+/**
+ * Resolve an adapter wrapper method call such as `appG.Response(status, code, data)`
+ * by following the receiver method `(g *Gin) Response(...)` to its internal
+ * `g.C.JSON(...)` call. Only methods that demonstrably delegate to c.JSON emit a
+ * response; otherwise the gap stays honest.
+ */
+function resolveWrapperResponse(
+  analysis: GoAnalysis,
+  modelIndex: GoModelIndex,
+  _handlerFn: GoFunction,
+  method: string,
+  callArgs: TsNode[],
+  recvTypeName: string,
+  addResponse: (status: string, response: RouteCandidate["responses"][number]) => void,
+): void {
+  const methodFn = analysis.methods.find(
+    (m) => receiverTypeName(m) === recvTypeName && m.name === method,
+  );
+  if (!methodFn?.body) return;
+
+  // Locate the JSON-producing call inside the wrapper method body.
+  const jsonCall = findAll(methodFn.body, (n) => n.type === "call_expression").find((call) => {
+    const sel = selectorCall(call);
+    return sel?.method === "JSON" || sel?.method === "IndentedJSON" || sel?.method === "PureJSON";
+  });
+  if (!jsonCall) return;
+
+  const jsonArgs = positionalArguments(jsonCall);
+  const statusExpr = jsonArgs[0];
+  const payloadExpr = jsonArgs[1];
+
+  // Ordered parameter names of the wrapper method, e.g. [httpCode, errCode, data].
+  const paramLists = findAll(methodFn.node, (n) => n.type === "parameter_list");
+  const paramsList = paramLists[paramLists.length - 1];
+  const paramNames: string[] = [];
+  if (paramsList) {
+    for (const decl of childrenOfType(paramsList, "parameter_declaration")) {
+      for (const id of childrenOfType(decl, "identifier")) paramNames.push(id.text);
+    }
+  }
+
+  // The JSON status argument may reference a method parameter; map it back to
+  // the corresponding call-site argument.
+  let resolvedStatus: string | null = null;
+  if (statusExpr?.type === "identifier") {
+    const idx = paramNames.indexOf(statusExpr.text);
+    if (idx >= 0) resolvedStatus = statusCode(callArgs[idx]) ?? null;
+  }
+  if (!resolvedStatus) resolvedStatus = statusCode(statusExpr) ?? "200";
+
+  let schema: JsonSchema | null = null;
+  if (payloadExpr) {
+    const composite =
+      payloadExpr.type === "composite_literal" ? payloadExpr : findFirst(payloadExpr, (n) => n.type === "composite_literal");
+    const typeNode = composite?.namedChildren[0];
+    if (composite && typeNode?.type === "type_identifier" && modelIndex.byName.has(typeNode.text)) {
+      ensureGoComponent(typeNode.text, modelIndex);
+      schema = { $ref: `#/components/schemas/${typeNode.text}` };
+    } else {
+      schema = literalSchema(payloadExpr, modelIndex);
+    }
+  }
+
+  addResponse(resolvedStatus, {
+    statusCode: resolvedStatus,
+    description: "",
+    confidence: schema ? "high" : "medium",
+    ...(schema
+      ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
+      : {}),
+  });
+}
+
+/**
+ * Detect a form-tagged struct bound through a context wrapper helper such as
+ * `app.BindAndValid(c, &form)` or `c.Bind(&form)`. Builds a urlencoded request
+ * body from the struct's `form:` fields. Returns null when the resolved type is
+ * not a known struct with form tags.
+ */
+function detectBoundForm(
+  body: TsNode,
+  modelIndex: GoModelIndex,
+): RouteCandidate["requestBody"] | null {
+  for (const call of findAll(body, (n) => n.type === "call_expression")) {
+    const callee = call.namedChildren[0];
+    const calleeName =
+      callee?.type === "identifier" ? callee.text : callName(callee);
+    if (!calleeName || !/bind/i.test(calleeName)) continue;
+
+    const args = positionalArguments(call);
+    for (const arg of args) {
+      // `&form` address-of local variable.
+      const target = arg.type === "unary_expression" ? arg.namedChildren[0] : arg;
+      if (!target || target.type !== "identifier") continue;
+      const typeNode = resolveLocalType(body, target.text);
+      if (!typeNode || typeNode.type !== "type_identifier") continue;
+      const struct = modelIndex.byName.get(typeNode.text);
+      if (!struct) continue;
+
+      const properties: Record<string, JsonSchema> = {};
+      const required: string[] = [];
+      let hasFormTag = false;
+      for (const field of struct.fields) {
+        const name = formTag(field);
+        if (!name) continue;
+        hasFormTag = true;
+        properties[name] = goTypeToSchema(field.typeNode, modelIndex);
+        if (/binding:"[^"]*required/.test(field.tag ?? "")) required.push(name);
+      }
+      if (!hasFormTag) continue;
+
+      const schema: JsonSchema = { type: "object", properties };
+      if (required.length) schema.required = required;
+      return {
+        required: true,
+        confidence: "high",
+        content: [{ mediaType: "application/x-www-form-urlencoded", schema, confidence: "high" }],
+      };
+    }
+  }
+  return null;
+}
+
 function isSseExtension(
   responses: Map<string, RouteCandidate["responses"][number]>,
 ): RouteCandidate["extensions"] {
+
   for (const response of responses.values()) {
     if (response.content?.some((media) => media.mediaType === "text/event-stream")) {
       return { "x-protocol": "sse" };
@@ -645,18 +886,19 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
             const converted = ginPathToOas(rawPath);
             const fullPath = joinPath(instance.prefix, converted.path);
             // Gin accepts a handler chain; the final handler owns the response
-            // contract. Both named functions and inline closures are supported.
+            // contract. Named functions (including package-qualified selectors
+            // such as v1.GetTags) and inline closures are supported.
             const handlerArgs = args.slice(pathNode === args[0] ? 1 : 2);
             const terminal = [...handlerArgs]
               .reverse()
-              .find((a) => a.type === "identifier" || a.type === "func_literal");
+              .find((a) => a.type === "identifier" || a.type === "selector_expression" || a.type === "func_literal");
 
+            // Unqualified function name used to look up the package-level handler.
+            // A selector handler `v1.GetTags` resolves to the registered `GetTags`.
+            const handlerSymbol = handlerIdentifierName(terminal);
             let handlerFn: GoFunction | null = null;
             let handlerNode: TsNode | null = null;
-            if (terminal?.type === "identifier") {
-              handlerFn = analysis.functions.get(terminal.text)?.[0] ?? null;
-              handlerNode = handlerFn?.node ?? null;
-            } else if (terminal?.type === "func_literal") {
+            if (terminal?.type === "func_literal") {
               const block = findFirst(terminal, (c) => c.type === "block") ?? null;
               if (block) {
                 handlerFn = {
@@ -668,9 +910,16 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
                 };
                 handlerNode = terminal;
               }
+            } else if (handlerSymbol) {
+              const candidates = analysis.functions.get(handlerSymbol) ?? [];
+              // A package may declare same-named helpers (e.g. a data-layer
+              // `GetTags(page, size, maps)` alongside the HTTP handler
+              // `GetTags(c *gin.Context)`). Prefer the function whose
+              // signature actually accepts *gin.Context.
+              handlerFn = candidates.find(isGinContextHandler) ?? candidates[0] ?? null;
+              handlerNode = handlerFn?.node ?? null;
             }
-            const primaryHandler =
-              terminal?.type === "identifier" ? terminal.text : undefined;
+            const primaryHandler = terminal ? terminal.text : undefined;
 
             const origin: SourceLocation = {
               file: handlerFn?.file ?? scopeFile.path,
