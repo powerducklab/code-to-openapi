@@ -141,7 +141,9 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
     const securitySchemes: DiscoveredSecurityScheme[] = [];
     const servers = detectServers(ctx);
 
-    return { routes: dedupe(candidates), unresolved, components, securitySchemes, servers };
+    const routes = dedupe(candidates);
+    disambiguateOperationIds(routes);
+    return { routes, unresolved, components, securitySchemes, servers };
   },
 };
 
@@ -274,7 +276,22 @@ function buildRoute(
     [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!),
   );
 
-  const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
+  let handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
+  if (!handler) {
+    // Route::controller(C::class)->prefix('x')->group(function () {
+    //     Route::get('path', 'someMethod');   // bare string handler
+    // });
+    // The controller comes from the enclosing ->controller(...) chain.
+    const inherited = resolveInheritedController(call, analysis, rel);
+    if (inherited && handlerArg) {
+      const methodName = phpStringText(
+        handlerArg.type === "string" ? handlerArg : handlerArg.namedChildren.find((c) => c.type === "string"),
+      );
+      const cls = analysis.classes.get(inherited);
+      const node = methodName && cls ? cls.methods.get(methodName) ?? null : null;
+      if (node) handler = { node, controller: inherited, method: methodName };
+    }
+  }
   const handlerNode = handler?.node ?? null;
   const controllerName = handler?.controller ?? null;
   const methodName = handler?.method ?? null;
@@ -403,6 +420,65 @@ function resolveHandler(
     if (node) return { node, controller, method: "__invoke" };
   }
 
+  return null;
+}
+
+/**
+ * Resolve the controller class introduced by an enclosing
+ * `Route::controller(C::class)->prefix(...)->group(closure)` chain, so that
+ * inner routes registered with a bare string handler (`Route::get('p', 'method')`)
+ * resolve to the right controller. Returns null when no such chain exists.
+ */
+function resolveInheritedController(
+  call: TsNode,
+  analysis: PhpAnalysis,
+  rel: string,
+): string | null {
+  let closure: TsNode | null = null;
+  let cur: TsNode | null = call.parent ?? null;
+  while (cur) {
+    if (cur.type === "anonymous_function_creation_expression" || cur.type === "closure_expression") {
+      closure = cur;
+      break;
+    }
+    cur = cur.parent ?? null;
+  }
+  if (!closure) return null;
+  const groupCall = findEnclosingGroupCall(closure);
+  if (!groupCall) return null;
+
+  let cursor: TsNode | null = groupCall;
+  for (let depth = 0; depth < 6 && cursor; depth += 1) {
+    if (cursor.type === "scoped_call_expression") {
+      const names = childrenOfType(cursor, "name");
+      const scope = names[names.length - 2]?.text;
+      const method = names[names.length - 1]?.text;
+      if (scope === "Route" && method === "controller") {
+        const args = callArguments(cursor);
+        const first = args[0];
+        const inner = first ? first.namedChildren[0] ?? first : null;
+        const acc =
+          inner?.type === "class_constant_access_expression"
+            ? inner
+            : findFirst(inner, (n) => n.type === "class_constant_access_expression");
+        const short = acc ? childrenOfType(acc, "name")[0]?.text : null;
+        if (short) {
+          const imports = analysis.files.get(rel)?.imports;
+          const declared = imports?.get(short)?.split("\\").pop() ?? short;
+          return analysis.classes.has(declared) ? declared : short;
+        }
+      }
+      return null;
+    }
+    if (cursor.type === "member_call_expression") {
+      cursor =
+        cursor.namedChildren.find(
+          (c) => c.type === "member_call_expression" || c.type === "scoped_call_expression",
+        ) ?? null;
+      continue;
+    }
+    break;
+  }
   return null;
 }
 
@@ -709,6 +785,13 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     for (const expression of expressions) {
       let response = interpretResponse(expression, model, gaps, handler, factoryVisited);
       if (!response && expression.type === "variable_name") {
+        // $r = new StreamedResponse(...); ... return $r; — interpret the
+        // response-producing assignment RHS before the generic value inference.
+        const assigned = interpretAssignment(handler, expression, model, gaps);
+        if (assigned) {
+          responses.push(assigned);
+          continue;
+        }
         const schema = inferVariableModel(handler, expression, model);
         if (schema) {
           response = {
@@ -791,6 +874,8 @@ function interpretResponse(
       "download",
       "stream",
       "streamdownload",
+      "file",
+      "make",
     ]);
     if (method && !TERMINAL_RESPONSE_METHODS.has(method.toLowerCase())) {
       const terminal = findFirst(
@@ -830,54 +915,31 @@ function interpretResponse(
       return { statusCode: status, description: "", confidence: "high" };
     }
 
-    if (method === "download") {
-      const status = integerText(argNodes[2]) ?? "200";
-      return {
-        statusCode: status,
-        description: "",
-        confidence: "high",
-        content: [
-          { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
-        ],
-      };
+    // Base-class response helpers such as $this->respondDownload($path): resolve
+    // the helper on the enclosing controller (and its parent chain) and follow
+    // the response its return statement builds.
+    const receiverVar = expression.namedChildren.find((c) => c.type === "variable_name");
+    if (receiverVar?.text === "$this" && method && /^respond[A-Z]/.test(method)) {
+      const helper = resolveControllerHelper(method, model, gaps, handler, factoryVisited);
+      if (helper) return helper;
     }
 
-    if (method === "stream" || method === "streamDownload") {
-      const status = integerText(argNodes[1]) ?? "200";
-      const headersArray = argNodes[2]?.namedChildren.find((c) => c.type === "array_creation_expression");
-      const isSse = headersArray
-        ? childrenOfType(headersArray, "array_element_initializer").some((element) => {
-            const strings = childrenOfType(element, "string");
-            return phpStringText(strings[0])?.toLowerCase() === "content-type" &&
-              phpStringText(strings[1])?.includes("text/event-stream");
-          })
-        : false;
-      if (isSse) {
-        gaps.push("sse-events-unknown");
-        return {
-          statusCode: status,
-          description: "Server-sent events",
-          confidence: "medium",
-          content: [{ mediaType: "text/event-stream", itemSchema: {} }],
-        };
-      }
-      if (method === "streamDownload") {
-        return {
-          statusCode: "200",
-          description: "",
-          confidence: "medium",
-          content: [
-            { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
-          ],
-        };
-      }
-      return { statusCode: status, description: "", confidence: "low" };
-    }
+    const downloadLike = downloadLikeResponse(method ?? "", argNodes, gaps);
+    if (downloadLike) return downloadLike;
 
     if (method === "json") {
       const status = integerText(argNodes[1]) ?? "200";
       const payload = argNodes[0];
-      const schema = payload ? inferValueSchema(payload, model, handler) : undefined;
+      if (!payload) {
+        // response()->json() with no data is an intentionally empty success body.
+        return {
+          statusCode: status,
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: {} }],
+        };
+      }
+      const schema = inferValueSchema(payload, model, handler);
       if (!schema || !Object.keys(schema).length) {
         gaps.push("response-schema-unknown");
         return {
@@ -946,6 +1008,10 @@ function interpretResponse(
 
   // User::all(), User::find($id), User::create(...).
   if (expression.type === "scoped_call_expression") {
+    // Illuminate\Support\Facades\Response::download/streamDownload/make/file/...
+    const facade = facadeResponse(expression, gaps);
+    if (facade) return facade;
+
     // self::/static:: factory methods on the enclosing controller class.
     const selfFactory = resolveSelfFactory(expression, model, gaps, handler, factoryVisited);
     if (selfFactory) return selfFactory;
@@ -963,7 +1029,14 @@ function interpretResponse(
 
   // new User(...).
   if (expression.type === "object_creation_expression") {
-    const name = expression.namedChildren.find((c) => c.type === "name")?.text;
+    const nameNode = expression.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
+    const name = nameNode?.text.split("\\").pop();
+    // new StreamedResponse(closure, $status, $headers) / new BinaryFileResponse($path, $status, ...)
+    if (name === "StreamedResponse" || name === "BinaryFileResponse") {
+      const args = expression.namedChildren.find((c) => c.type === "arguments");
+      const argNodes = args ? childrenOfType(args, "argument") : [];
+      return binaryResponse(integerText(argNodes[1]) ?? "200");
+    }
     if (name && model.analysis.classes.has(name)) {
       const ref = ensurePhpComponent(name, model);
       if (ref) {
@@ -977,6 +1050,38 @@ function interpretResponse(
     }
   }
 
+  return null;
+}
+
+/**
+ * When a controller returns a bare variable (`return $response;`), check whether
+ * that variable was assigned a response-producing expression (e.g.
+ * `$response = new StreamedResponse(...)` or `$response = response()->download(...)`).
+ * Returns the interpreted response, or null when the assignment is not a
+ * response factory (callers then fall back to generic value inference).
+ */
+function interpretAssignment(
+  handler: TsNode,
+  variable: TsNode,
+  model: PhpModelIndex,
+  gaps: GapCode[],
+): DiscoveredResponse | null {
+  const varText = variable.text;
+  for (const assignment of findAll(handler, (n) => n.type === "assignment_expression")) {
+    const lhs = assignment.namedChildren.find((c) => c.type === "variable_name");
+    if (lhs?.text !== varText) continue;
+    const rhs = assignment.namedChildren.find(
+      (c) =>
+        c !== lhs &&
+        (c.type === "member_call_expression" ||
+          c.type === "scoped_call_expression" ||
+          c.type === "object_creation_expression" ||
+          c.type === "function_call_expression"),
+    );
+    if (!rhs) continue;
+    const resolved = interpretResponse(rhs, model, gaps, handler);
+    if (resolved) return resolved;
+  }
   return null;
 }
 
@@ -1031,6 +1136,17 @@ function inferVariableModel(
 function inferValueSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode): JsonSchema | undefined {
   const inner = node.namedChildren[0] ?? node;
 
+  // apply_filters(Filter::X, [ ... ]) — unwrap a wrapper helper around a literal
+  // array payload and infer the array itself.
+  if (inner.type === "function_call_expression") {
+    const args = inner.namedChildren.find((c) => c.type === "arguments");
+    const argNodes = args ? childrenOfType(args, "argument") : [];
+    const arrayArg = argNodes
+      .map((a) => a.namedChildren[0] ?? a)
+      .find((c) => c.type === "array_creation_expression");
+    if (arrayArg) return inferArraySchema(arrayArg, model, handler);
+  }
+
   if (inner.type === "scoped_call_expression") {
     return inferStaticModel(inner, model);
   }
@@ -1039,6 +1155,8 @@ function inferValueSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode):
     const chained = inferChainedModel(inner, model);
     if (chained) return chained;
     if (method === "paginate" || method === "simplepaginate") return { type: "object" };
+    // $dto->toArray() / ->toArrayWithoutApiKey() always yields a JSON object.
+    if (method === "toarray" || method?.startsWith("toarray")) return { type: "object" };
   }
   if (inner.type === "object_creation_expression") {
     const name = inner.namedChildren.find((c) => c.type === "name")?.text;
@@ -1273,6 +1391,86 @@ function resolveSelfFactory(
 }
 
 /**
+ * Interpret `Illuminate\Support\Facades\Response::download/streamDownload/
+ * make/file/stream(...)` facade calls. The HTTP\Response value class only ever
+ * uses `Response::HTTP_*` constants (not calls), so a `Response::` call to a
+ * response-factory method unambiguously targets the facade.
+ */
+function facadeResponse(call: TsNode, gaps: GapCode[]): DiscoveredResponse | null {
+  const qualified = call.namedChildren.find((c) => c.type === "qualified_name");
+  const names = childrenOfType(call, "name");
+  const method = names[names.length - 1]?.text;
+  const scope = qualified
+    ? qualified.text.split("\\").filter(Boolean).pop()
+    : names.length >= 2
+      ? names[names.length - 2]?.text
+      : null;
+  if (scope !== "Response" || !method) return null;
+  const args = call.namedChildren.find((c) => c.type === "arguments");
+  const argNodes = args ? childrenOfType(args, "argument") : [];
+  if (method.toLowerCase() === "nocontent") {
+    return { statusCode: integerText(argNodes[0]) ?? "204", description: "", confidence: "high" };
+  }
+  if (method.toLowerCase() === "view") {
+    return {
+      statusCode: "200",
+      description: "",
+      confidence: "medium",
+      content: [{ mediaType: "text/html", schema: { type: "string" } }],
+    };
+  }
+  return downloadLikeResponse(method, argNodes, gaps);
+}
+
+/**
+ * Resolve a `$this->respondXxx(...)` controller helper by following its return
+ * statement on the enclosing class (walking the parent controller chain).
+ * Recursion is bounded by the shared visited set.
+ */
+function resolveControllerHelper(
+  methodName: string,
+  model: PhpModelIndex,
+  gaps: GapCode[],
+  handler: TsNode,
+  visited: Set<TsNode>,
+): DiscoveredResponse | null {
+  let classNode: TsNode | null = handler;
+  while (classNode && classNode.type !== "class_declaration") {
+    classNode = classNode.parent ?? null;
+  }
+  let className: string | null = classNode?.namedChildren.find((c) => c.type === "name")?.text ?? null;
+  const seen = new Set<string>();
+  while (className && !seen.has(className)) {
+    seen.add(className);
+    const cls = model.analysis.classes.get(className);
+    if (!cls) break;
+    const methodNode = cls.methods.get(methodName);
+    if (methodNode) {
+      if (visited.has(methodNode)) return null;
+      visited.add(methodNode);
+      for (const ret of findAll(methodNode, (n) => n.type === "return_statement")) {
+        const expression = ret.namedChildren.find(
+          (c) =>
+            c.type === "member_call_expression" ||
+            c.type === "scoped_call_expression" ||
+            c.type === "function_call_expression" ||
+            c.type === "object_creation_expression" ||
+            c.type === "variable_name" ||
+            c.type === "array_creation_expression",
+        );
+        if (expression) {
+          const resolved = interpretResponse(expression, model, gaps, methodNode, visited);
+          if (resolved) return resolved;
+        }
+      }
+      return null;
+    }
+    className = cls.extends?.split("\\").pop() ?? null;
+  }
+  return null;
+}
+
+/**
  * Resolve chains rooted in a static resource factory, e.g.
  * `SongResource::make($model)->for($user)` or
  * `SongResource::collection($models)->additional(['meta' => true])`.
@@ -1367,6 +1565,83 @@ function integerText(node: TsNode | undefined): string | null {
   if (!node) return null;
   const int = node.type === "integer" ? node : node.namedChildren.find((c) => c.type === "integer");
   return int?.text ?? null;
+}
+
+/** Read a static string literal argument, or null when it is dynamic. */
+function staticString(node: TsNode | undefined): string | null {
+  if (!node) return null;
+  const str = node.type === "string" ? node : node.namedChildren.find((c) => c.type === "string");
+  return str ? phpStringText(str) : null;
+}
+
+/**
+ * A file / binary / streamed response is always an opaque octet-stream body.
+ * When a download filename is a static string, emit a Content-Disposition
+ * attachment header backed by that literal.
+ */
+function binaryResponse(status: string, filename?: string | null): DiscoveredResponse {
+  const response: DiscoveredResponse = {
+    statusCode: status,
+    description: "",
+    confidence: "high",
+    content: [
+      { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+    ],
+  };
+  if (filename) {
+    response.headers = {
+      "Content-Disposition": { type: "string", enum: [`attachment; filename="${filename}"`] },
+    };
+  }
+  return response;
+}
+
+/**
+ * Shared interpretation of the response-factory method family
+ * (download / streamDownload / stream / file / make). Used by both the
+ * `response()->...` member chain and the `Response::...` facade static call.
+ */
+function downloadLikeResponse(
+  method: string,
+  argNodes: TsNode[],
+  gaps: GapCode[],
+): DiscoveredResponse | null {
+  const m = method.toLowerCase();
+  if (m === "download") {
+    return binaryResponse(integerText(argNodes[2]) ?? "200", staticString(argNodes[1]));
+  }
+  if (m === "streamdownload" || m === "stream") {
+    const headersArray = argNodes[2]?.namedChildren.find((c) => c.type === "array_creation_expression");
+    const isSse = headersArray
+      ? childrenOfType(headersArray, "array_element_initializer").some((element) => {
+          const strings = childrenOfType(element, "string");
+          return (
+            phpStringText(strings[0])?.toLowerCase() === "content-type" &&
+            phpStringText(strings[1])?.includes("text/event-stream")
+          );
+        })
+      : false;
+    if (isSse) {
+      gaps.push("sse-events-unknown");
+      return {
+        statusCode: integerText(argNodes[1]) ?? "200",
+        description: "Server-sent events",
+        confidence: "medium",
+        content: [{ mediaType: "text/event-stream", itemSchema: {} }],
+      };
+    }
+    if (m === "streamdownload") return binaryResponse("200", staticString(argNodes[1]));
+    return { statusCode: integerText(argNodes[1]) ?? "200", description: "", confidence: "low" };
+  }
+  if (m === "file") {
+    // response()->file($path, $headers = [], $status = null)
+    return binaryResponse(integerText(argNodes[2]) ?? "200");
+  }
+  if (m === "make") {
+    // response()->make($content = '', $status = 200, $headers = [])
+    return binaryResponse(integerText(argNodes[1]) ?? "200");
+  }
+  return null;
 }
 
 function parseResourceCall(
@@ -1573,6 +1848,31 @@ function dedupe(routes: RouteCandidate[]): RouteCandidate[] {
     if (score(route) > score(existing)) seen.set(key, route);
   }
   return [...seen.values()];
+}
+
+/**
+ * Laravel aliases the same controller#method at multiple paths (e.g.
+ * `Route::apiResource('users')` and `Route::apiResource('user')`, or a
+ * deprecated `songs/favorite` next to `songs/favorites`). Keep every path but
+ * make operationIds unique by suffixing later collisions with a path slug.
+ */
+function disambiguateOperationIds(routes: RouteCandidate[]): void {
+  const used = new Set<string>();
+  for (const route of routes) {
+    if (!route.operationId) continue;
+    if (!used.has(route.operationId)) {
+      used.add(route.operationId);
+      continue;
+    }
+    const slug = (route.fullPath ?? route.path)
+      .replace(/[^a-zA-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    let candidate = `${route.operationId}_${slug}`;
+    let n = 2;
+    while (used.has(candidate)) candidate = `${route.operationId}_${slug}_${n++}`;
+    route.operationId = candidate;
+    used.add(candidate);
+  }
 }
 
 function detectServers(ctx: ScanContext): DiscoveredServer[] {
