@@ -63,6 +63,36 @@ const MINIMAL_VERB_METHODS = new Map<string, string>([
 
 const HTTP_VERB_SET = new Set(["get", "post", "put", "delete", "patch", "head", "options"]);
 
+/** Results.* / TypedResults.* helper methods -> HTTP status code. */
+const RESULT_STATUS_METHODS: Record<string, string> = {
+  BadRequest: "400",
+  Unauthorized: "401",
+  PaymentRequired: "402",
+  Forbidden: "403",
+  NotFound: "404",
+  Conflict: "409",
+  UnprocessableEntity: "422",
+  TooManyRequests: "429",
+  ValidationProblem: "400",
+};
+
+const RESULT_METHOD_NAMES = new Set([
+  "Ok",
+  "Created",
+  "CreatedAtRoute",
+  "CreatedAtAction",
+  "NoContent",
+  "Json",
+  "Accepted",
+  "Stream",
+  "Redirect",
+  "RedirectPermanent",
+  "File",
+  "Bytes",
+  "FileStream",
+  ...Object.keys(RESULT_STATUS_METHODS),
+]);
+
 const INJECTED_PARAMETER_TYPES = new Set([
   "CancellationToken",
   "HttpContext",
@@ -518,6 +548,7 @@ function extractMinimalApis(
   out: RouteCandidate[],
 ): void {
   const invocations = findAll(root, (n) => n.type === "invocation_expression");
+  const groupVarPrefixes = collectGroupVarPrefixes(root);
   for (const invocation of invocations) {
     const methodAccess = invocation.namedChildren.find(
       (c) => c.type === "member_access_expression",
@@ -583,7 +614,23 @@ function extractMinimalApis(
       }
     }
 
-    const rawCombined = [prefix, routeText].filter(Boolean).join("/").replace(/\/+/g, "/");
+    // MapGroup prefix: either chained (app.MapGroup("/p").MapGet(...)) or via a
+    // variable (var g = app.MapGroup("/p"); g.MapGet(...)).
+    const receiver = methodAccess.namedChildren[0];
+    let groupPrefix = "";
+    if (receiver?.type === "invocation_expression") {
+      const recvAccess = receiver.namedChildren.find((c) => c.type === "member_access_expression");
+      const recvName = recvAccess?.namedChildren[recvAccess.namedChildren.length - 1]?.text;
+      if (recvName === "MapGroup") {
+        groupPrefix = routeTextFromArg(
+          receiver.namedChildren.find((c) => c.type === "argument_list")?.namedChildren[0],
+        ) ?? "";
+      }
+    } else if (receiver?.type === "identifier" && groupVarPrefixes.has(receiver.text)) {
+      groupPrefix = groupVarPrefixes.get(receiver.text)!;
+    }
+
+    const rawCombined = [prefix, groupPrefix, routeText].filter(Boolean).join("/").replace(/\/+/g, "/");
     const fullPath = normalizeRoute(rawCombined || "/");
     const pathParams = new Set(
       [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => stripConstraint(m[1]!)),
@@ -635,6 +682,33 @@ function enclosingNode(node: TsNode, type: string): TsNode | null {
   return null;
 }
 
+/**
+ * Maps a local variable to its MapGroup prefix, e.g.
+ * `var v1 = app.MapGroup("/api/v1");` -> v1 => "/api/v1". Lets later
+ * `v1.MapGet(...)` calls inherit the group prefix.
+ */
+function collectGroupVarPrefixes(root: TsNode): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const call of findAll(root, (n) => n.type === "invocation_expression")) {
+    const access = call.namedChildren.find((c) => c.type === "member_access_expression");
+    const name = access?.namedChildren[access.namedChildren.length - 1]?.text;
+    if (name !== "MapGroup") continue;
+    const prefix = routeTextFromArg(
+      call.namedChildren.find((c) => c.type === "argument_list")?.namedChildren[0],
+    );
+    if (!prefix) continue;
+    // The assigned variable is the identifier on the enclosing declarator:
+    // `var v1 = app.MapGroup(...)` -> variable_declaration > variable_declarator > v1.
+    const varDecl = enclosingNode(call, "variable_declaration");
+    const declarator = varDecl
+      ? findFirst(varDecl, (n) => n.type === "variable_declarator")
+      : null;
+    const varName = declarator?.namedChildren.find((c) => c.type === "identifier")?.text;
+    if (varName) map.set(varName, prefix);
+  }
+  return map;
+}
+
 // Find a method declaration in the current file by name (method-group handler).
 function findMethodByName(root: TsNode, name: string): TsNode | null {
   for (const m of findAll(root, (n) => n.type === "method_declaration")) {
@@ -666,21 +740,7 @@ function inferMinimalResponses(
     if (n.type !== "invocation_expression") return false;
     const access = n.namedChildren.find((c) => c.type === "member_access_expression");
     const name = access?.namedChildren[access.namedChildren.length - 1]?.text;
-    return (
-      name === "Ok" ||
-      name === "Created" ||
-      name === "CreatedAtRoute" ||
-      name === "CreatedAtAction" ||
-      name === "NoContent" ||
-      name === "Json" ||
-      name === "Accepted" ||
-      name === "Stream" ||
-      name === "Redirect" ||
-      name === "RedirectPermanent" ||
-      name === "File" ||
-      name === "Bytes" ||
-      name === "FileStream"
-    );
+    return name !== undefined && RESULT_METHOD_NAMES.has(name);
   });
 
   if (!resultCalls.length) {
@@ -721,6 +781,20 @@ function inferMinimalResponses(
 
     if (name === "NoContent") {
       responses.push({ statusCode: "204", description: "", confidence: "high" });
+      continue;
+    }
+    if (RESULT_STATUS_METHODS[name]) {
+      // TypedResults.BadRequest(problem) / Results.NotFound() / Conflict(value):
+      // the first argument, when present, is the (optional) error payload.
+      const schema = firstArg ? inferExpressionSchema(firstArg, model, lambda) : undefined;
+      responses.push({
+        statusCode: RESULT_STATUS_METHODS[name]!,
+        description: "",
+        confidence: schema ? "high" : "medium",
+        ...(schema
+          ? { content: [{ mediaType: "application/json", schema }] }
+          : {}),
+      });
       continue;
     }
     if (name === "Redirect") {
