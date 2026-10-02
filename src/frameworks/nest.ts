@@ -259,11 +259,17 @@ export const nestPack: FrameworkPack<TsAnalysis> = {
                     schemaOfValue,
                     gaps,
                   );
+              const methodName = member.name?.getText(source) ?? "";
+              const className = node.name?.text ?? "";
+              // Qualify with the controller class so shared method names
+              // (findAll/create/update) across controllers stay unique.
+              const operationId =
+                className && methodName ? `${className}_${methodName}` : methodName || undefined;
               const candidate: RouteCandidate = {
                 method: verb.toLowerCase() === "all" ? "get" : verb.toLowerCase(),
                 path: normalized,
                 fullPath: normalized,
-                operationId: member.name?.getText(source) ?? undefined,
+                operationId,
                 origin,
                 parameters,
                 ...(requestBody ? { requestBody } : {}),
