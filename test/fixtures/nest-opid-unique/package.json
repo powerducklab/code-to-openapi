@@ -1,0 +1,1 @@
+{ "name": "nest-opid-unique", "private": true, "dependencies": { "@nestjs/common": "^10.0.0" } }
