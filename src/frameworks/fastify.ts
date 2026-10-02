@@ -75,7 +75,9 @@ function joinPrefix(...parts: string[]): string {
     .map((p) => p.replace(/^\/+|\/+$/g, ""))
     .filter(Boolean)
     .join("/");
-  return joined ? `/${joined}` : "";
+  // OAS paths are absolute: a route mounted at the application root must be
+  // "/", never an empty string (which would be rejected by the OAS validator).
+  return joined ? `/${joined}` : "/";
 }
 
 /**
@@ -420,12 +422,26 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
         );
 
         const schemaFacts = extractRouteSchema(ts, analysis, site.schemaNode);
-        let resolvedHandler = site.handler;
+        let resolvedHandler: any = site.handler;
+        let handlerFile: any = model.source;
+        // Resolve imported handlers (`listProjects`) and namespaced handlers
+        // (`controllers.login`) to their declared function before analysis.
+        if (
+          resolvedHandler &&
+          (ts.isIdentifier(resolvedHandler) ||
+            ts.isPropertyAccessExpression(resolvedHandler))
+        ) {
+          const resolved = resolveHandler(analysis, model.source, resolvedHandler, new Set());
+          if (resolved) {
+            resolvedHandler = resolved.node;
+            handlerFile = resolved.file;
+          }
+        }
         if (!resolvedHandler && site.handlerFactoryName) {
           resolvedHandler = resolveLocalHandlerFactory(site.handlerFactoryName);
         }
         const handlerFacts = resolvedHandler
-          ? analyzeFastifyHandler(analysis, model.source, resolvedHandler, site.origin, pathParams, site.genericNode)
+          ? analyzeFastifyHandler(analysis, handlerFile, resolvedHandler, site.origin, pathParams, site.genericNode)
           : { parameters: [], responses: [], gaps: ["response-unknown" as GapCode], sse: false, bodyKnown: false };
 
         // Merge: explicit JSON Schema (high confidence) wins over inferred.
@@ -449,7 +465,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           confidence: rankConfidence(merged.gaps),
           gaps: merged.gaps,
           components: [],
-          handlerSource: sliceNode(ts, model.source, resolvedHandler),
+          handlerSource: sliceNode(ts, handlerFile, resolvedHandler),
         };
         candidates.push(candidate);
       }
@@ -732,7 +748,8 @@ function collectSites(
               lastArg &&
               (ts.isArrowFunction(lastArg) ||
                 ts.isFunctionExpression(lastArg) ||
-                ts.isIdentifier(lastArg))
+                ts.isIdentifier(lastArg) ||
+                ts.isPropertyAccessExpression(lastArg))
             ) {
               handler = lastArg;
             } else if (

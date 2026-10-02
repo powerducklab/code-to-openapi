@@ -424,10 +424,22 @@ function collectParameters(
           break;
         }
         case "Body": {
+          // `@Body('article') dto` selects req.body.article; the wire body still
+          // carries the envelope key, so wrap the DTO schema in `{article: dto}`.
+          const keyArg = info.args[0];
+          const bodyKey =
+            keyArg && ts.isStringLiteralLike(keyArg) ? keyArg.text : undefined;
           if (schema) {
+            const wrapped: JsonSchema = bodyKey
+              ? {
+                  type: "object",
+                  properties: { [bodyKey]: schema },
+                  required: [bodyKey],
+                }
+              : schema;
             requestBody = {
               required: true,
-              content: [{ mediaType: "application/json", schema }],
+              content: [{ mediaType: "application/json", schema: wrapped }],
               confidence: "high",
             };
           } else {

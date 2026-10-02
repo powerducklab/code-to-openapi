@@ -124,31 +124,23 @@ function schemaFromNode(
 }
 
 /** Resolves an identifier to a function-like node across local/imported files. */
-export function resolveHandler(
+/**
+ * Resolves an exported symbol `name` to a function-like node declared in
+ * `file`, following `export { a } from './x'` and `export * from './x'`
+ * re-exports. Only project files are traversed. Returns null when the symbol
+ * cannot be grounded in a real declaration.
+ */
+function findExportedDeclaration(
   analysis: TsAnalysis,
-  sourceFile: any,
-  node: any,
-  seen: Set<string> = new Set(),
+  file: any,
+  name: string,
+  seen: Set<string>,
 ): { node: any; file: any } | null {
   const { ts } = analysis;
-  if (!node) return null;
+  if (!file || seen.has(file.fileName)) return null;
+  seen.add(file.fileName);
 
-  if (
-    ts.isArrowFunction(node) ||
-    ts.isFunctionExpression(node) ||
-    ts.isFunctionDeclaration(node)
-  ) {
-    return { node, file: sourceFile };
-  }
-
-  if (!ts.isIdentifier(node)) return null;
-  const key = `${sourceFile.fileName}:${node.text}`;
-  if (seen.has(key)) return null;
-  seen.add(key);
-
-  let found: { node: any; file: any } | null = null;
-
-  const visit = (sf: any, identifier: string): any => {
+  const findDirect = (sf: any, identifier: string): any => {
     let target: any;
     sf.forEachChild((child: any) => {
       if (target) return;
@@ -182,49 +174,149 @@ export function resolveHandler(
     return target;
   };
 
-  const local = visit(sourceFile, node.text);
-  if (local) found = { node: local, file: sourceFile };
+  const localDirect = findDirect(file, name);
+  if (localDirect) return { node: localDirect, file };
 
-  if (!found) {
-    // Follow imports / requires into other project files.
-    const imported = resolveImportedFile(analysis, sourceFile, node.text);
-    if (imported) {
-      const { file, exportName } = imported;
-      const target = visit(file, exportName);
-      if (target) found = { node: target, file };
-      else {
-        // module.exports = function ...
-        let exported: any;
-        file.forEachChild((child: any) => {
-          if (exported) return;
-          if (
-            ts.isExpressionStatement(child) &&
-            ts.isBinaryExpression(child.expression) &&
-            child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
-          ) {
-            const lhs = child.expression.left;
-            if (
-              ts.isPropertyAccessExpression(lhs) &&
-              ((lhs.expression.getText(file) === "module" && lhs.name.text === "exports") ||
-                lhs.expression.getText(file) === "exports")
-            ) {
-              const rhs = child.expression.right;
-              if (ts.isArrowFunction(rhs) || ts.isFunctionExpression(rhs) ||
-                  ts.isFunctionDeclaration(rhs)) {
-                exported = rhs;
-              } else if (ts.isIdentifier(rhs)) {
-                const nested = resolveHandler(analysis, file, rhs, seen);
-                if (nested) exported = nested.node;
-              }
-            }
-          }
-        });
-        if (exported) found = { node: exported, file };
+  // Collect every re-export that could carry `name`:
+  //  - `export { a as b } from './x'` (named, matching public name)
+  //  - `export * from './x'` (wildcard re-exports the whole target module)
+  // Wildcards must all be tried in order: a barrel such as
+  //   export * from './changePassword'; export * from './login';
+  // re-exports `login` from the second file, not the first.
+  const candidates: { spec: string; orig: string }[] = [];
+  file.forEachChild((child: any) => {
+    if (!ts.isExportDeclaration(child)) return;
+    const moduleSpec = child.moduleSpecifier;
+    if (!moduleSpec || !ts.isStringLiteral(moduleSpec)) return;
+    if (!child.exportClause) {
+      candidates.push({ spec: moduleSpec.text, orig: name });
+      return;
+    }
+    if (ts.isNamedExports(child.exportClause)) {
+      for (const el of child.exportClause.elements) {
+        const exported = el.propertyName?.text ?? el.name.text;
+        if (exported === name) {
+          candidates.push({ spec: moduleSpec.text, orig: el.name.text });
+          return;
+        }
       }
     }
+  });
+
+  for (const candidate of candidates) {
+    const resolved = ts.resolveModuleName
+      ? ts.resolveModuleName(
+          candidate.spec,
+          file.fileName,
+          analysis.program.getCompilerOptions(),
+          ts.sys,
+        )?.resolvedModule?.resolvedFileName
+      : undefined;
+    if (!resolved || !analysis.isProjectFile(resolved)) continue;
+    const target = analysis.program.getSourceFile(resolved);
+    if (!target) continue;
+    const nested = findExportedDeclaration(
+      analysis,
+      target,
+      candidate.orig,
+      seen,
+    );
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export function resolveHandler(
+  analysis: TsAnalysis,
+  sourceFile: any,
+  node: any,
+  seen: Set<string> = new Set(),
+): { node: any; file: any } | null {
+  const { ts } = analysis;
+  if (!node) return null;
+
+  if (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node)
+  ) {
+    return { node, file: sourceFile };
   }
 
-  return found;
+  // Namespaced handler: `controllers.login` where `controllers` is an imported
+  // namespace (`import * as controllers from './controllers'`).
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    const imported = resolveImportedFile(
+      analysis,
+      sourceFile,
+      node.expression.text,
+    );
+    if (!imported) return null;
+    const decl = findExportedDeclaration(
+      analysis,
+      imported.file,
+      node.name.text,
+      new Set(),
+    );
+    return decl;
+  }
+
+  if (!ts.isIdentifier(node)) return null;
+  const key = `${sourceFile.fileName}:${node.text}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+
+  const local = findExportedDeclaration(
+    analysis,
+    sourceFile,
+    node.text,
+    new Set(),
+  );
+  if (local) return local;
+
+  // Follow imports / requires into other project files.
+  const imported = resolveImportedFile(analysis, sourceFile, node.text);
+  if (imported) {
+    const { file, exportName } = imported;
+    if (exportName !== "*") {
+      const target = findExportedDeclaration(
+        analysis,
+        file,
+        exportName,
+        new Set(),
+      );
+      if (target) return target;
+    }
+    // module.exports = function ...
+    let exported: any;
+    file.forEachChild((child: any) => {
+      if (exported) return;
+      if (
+        ts.isExpressionStatement(child) &&
+        ts.isBinaryExpression(child.expression) &&
+        child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ) {
+        const lhs = child.expression.left;
+        if (
+          ts.isPropertyAccessExpression(lhs) &&
+          ((lhs.expression.getText(file) === "module" && lhs.name.text === "exports") ||
+            lhs.expression.getText(file) === "exports")
+        ) {
+          const rhs = child.expression.right;
+          if (ts.isArrowFunction(rhs) || ts.isFunctionExpression(rhs) ||
+              ts.isFunctionDeclaration(rhs)) {
+            exported = rhs;
+          } else if (ts.isIdentifier(rhs)) {
+            const nested = resolveHandler(analysis, file, rhs, seen);
+            if (nested) exported = nested.node;
+          }
+        }
+      }
+    });
+    if (exported) return { node: exported, file };
+  }
+
+  return null;
 }
 
 export function resolveImportedFile(
@@ -252,6 +344,12 @@ export function resolveImportedFile(
             element.propertyName?.text ?? element.name.text;
         }
       }
+    } else if (bindings && ts.isNamespaceImport(bindings)) {
+      // `import * as controllers from './controllers'`
+      if (bindings.name.text === localName) {
+        specifier = moduleSpec.text;
+        exportName = "*";
+      }
     }
   });
 
@@ -277,8 +375,10 @@ export function resolveImportedFile(
     });
   }
 
-  if (!specifier || !specifier.startsWith(".")) return null;
-
+  if (!specifier) return null;
+  // Do NOT require a relative specifier: tsconfig `baseUrl` / `paths` aliases
+  // (e.g. `controllers/auth`) resolve to project files. External packages are
+  // still filtered out by the `isProjectFile` check below.
   const resolved = ts.resolveModuleName
     ? ts.resolveModuleName(specifier, sourceFile.fileName, program.getCompilerOptions(), ts.sys)
         ?.resolvedModule?.resolvedFileName
