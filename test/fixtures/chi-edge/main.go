@@ -63,6 +63,10 @@ func streamProducts(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("event: tick\ndata: {}\n\n"))
 }
 
+func health(w http.ResponseWriter, r *http.Request) {
+	_, _ = w.Write([]byte("ok"))
+}
+
 func adminRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Delete("/products/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +84,7 @@ func main() {
 			r.Get("/products/{id}", getProduct)
 			r.Get("/products/events", streamProducts)
 		})
+		r.Get("/health", health)
 		r.Mount("/admin", adminRouter())
 	})
 	http.ListenAndServe(":8092", r)

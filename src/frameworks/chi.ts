@@ -596,6 +596,27 @@ function buildRoute(
         }
         continue;
       }
+
+      // w.Write([]byte("...")): plain-text body written directly to the
+      // ResponseWriter (very common in net/http and chi handlers). The
+      // conversion function is a slice_type node, so match by source text.
+      if (sel.receiver.type === "identifier" && sel.method === "Write") {
+        const arg = args[0];
+        const writesBytes =
+          (arg?.type === "call_expression" || arg?.type === "type_conversion_expression") &&
+          /^\s*\[\s*\]byte\s*\(/.test(arg.text);
+        if (writesBytes && !responseStatus.has("200")) {
+          responseStatus.set("200", {
+            statusCode: "200",
+            description: "",
+            confidence: "medium",
+            content: [
+              { mediaType: "text/plain", schema: { type: "string" }, confidence: "medium" },
+            ],
+          });
+        }
+        continue;
+      }
     }
 
     // json.NewEncoder(w).Encode(x): status follows statement order within

@@ -1,0 +1,7 @@
+{
+    "name": "acme/laravel-response-patterns",
+    "require": {
+        "php": "^8.2",
+        "laravel/framework": "^11.0"
+    }
+}

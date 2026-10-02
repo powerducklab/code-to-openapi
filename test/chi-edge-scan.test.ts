@@ -70,4 +70,13 @@ describe("chi edge cases", () => {
 
     expect(result.project.servers).toContainEqual({ url: "http://127.0.0.1:8092" });
   });
+
+  it("infers text/plain responses from w.Write([]byte(...))", async () => {
+    const { result } = await scan();
+    const health = op(result.project.operations, "get", "/v1/health");
+    const response = health.responses.find((r: any) => r.statusCode === "200");
+    expect(response).toBeDefined();
+    expect(response.content[0].mediaType).toBe("text/plain");
+    expect(response.content[0].schema).toEqual({ type: "string" });
+  });
 });

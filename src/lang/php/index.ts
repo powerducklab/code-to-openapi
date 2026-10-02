@@ -289,7 +289,13 @@ export const createPhpAnalysis: LanguagePack<PhpAnalysis>["analyze"] = async (
     for (const use of findAll(root, (n) => n.type === "namespace_use_declaration")) {
       for (const clause of childrenOfType(use, "namespace_use_clause")) {
         const qualified = findFirst(clause, (n) => n.type === "qualified_name" || n.type === "name");
-        const alias = clause.namedChildren.find((c) => c.type === "name")?.text;
+        // An explicit alias lives in a namespace_aliasing_clause child; the
+        // direct name child of the clause is the last FQCN segment, not the
+        // alias (which previously shadowed aliased imports).
+        const aliasing = clause.namedChildren.find(
+          (c) => c.type === "namespace_aliasing_clause",
+        );
+        const alias = aliasing?.namedChildren.find((c) => c.type === "name")?.text;
         if (!qualified) continue;
         const fqcn = qualified.text.replace(/^\\/, "");
         const shortName = alias ?? fqcn.split("\\").pop()!;

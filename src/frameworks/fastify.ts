@@ -15,7 +15,11 @@ import type {
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
-import { resolveHandler, resolveImportedFile } from "./express-handler.js";
+import {
+  findExportedDeclaration,
+  resolveHandler,
+  resolveImportedFile,
+} from "./express-handler.js";
 
 const HTTP_METHODS = new Set([
   "get",
@@ -200,30 +204,138 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
       if (!binding) return null;
       const imported = resolveImportedFile(analysis, model.source, name);
       if (!imported) return null;
-      const { file, exportName } = imported;
-      let target: any = null;
-      file.forEachChild((child: any) => {
-        if (target) return;
-        if (
-          (ts.isFunctionDeclaration(child) || ts.isArrowFunction(child)) &&
-          (exportName === "default" || child.name?.text === exportName)
-        ) {
-          target = child;
+
+      // Resolve a plugin export to its function node, following `export *`
+      // barrels and `fastifyPlugin(fn)` wrapper calls.
+      const resolveExport = (
+        sf: any,
+        exportName: string,
+        seen: Set<string>,
+      ): { file: any; node: any } | null => {
+        const direct0 = findExportedDeclaration(analysis, sf, exportName, new Set());
+        let direct = direct0;
+        // `export default usersPlugin` resolves to the local binding name.
+        if (direct && ts.isIdentifier(direct.node)) {
+          const local = findExportedDeclaration(analysis, sf, direct.node.text, new Set());
+          if (local) direct = local;
         }
-        if (ts.isExportAssignment(child)) {
-          if (ts.isArrowFunction(child.expression) || ts.isFunctionExpression(child.expression)) {
-            target = child.expression;
-          } else if (ts.isIdentifier(child.expression)) {
-            const ownerRel = relOfSource(file, models);
-            const owner = ownerRel ? models.get(ownerRel) : undefined;
-            const nested = resolvePlugin(owner ?? model, child.expression.text);
-            if (nested) target = nested.node;
+        if (direct) return direct;
+        if (seen.has(sf.fileName)) return null;
+        seen.add(sf.fileName);
+
+        // Unwrap a function node or a `fastifyPlugin(fn)` wrapper call.
+        const unwrap = (node: any, ownerFile: any): { file: any; node: any } | null => {
+          if (
+            ts.isArrowFunction(node) ||
+            ts.isFunctionExpression(node) ||
+            ts.isFunctionDeclaration(node)
+          ) {
+            return { file: ownerFile, node };
           }
+          if (ts.isCallExpression(node)) {
+            const arg = node.arguments[0];
+            if (
+              arg &&
+              (ts.isArrowFunction(arg) ||
+                ts.isFunctionExpression(arg) ||
+                ts.isFunctionDeclaration(arg))
+            ) {
+              return { file: ownerFile, node: arg };
+            }
+            if (arg && ts.isIdentifier(arg)) {
+              // Fresh seen set: the owner file itself must remain searchable.
+              const inner = findExportedDeclaration(analysis, ownerFile, arg.text, new Set());
+              if (inner) return inner;
+            }
+          }
+          return null;
+        };
+
+        // Raw binding with any initializer (e.g. wrapper calls).
+        let raw: any = null;
+        sf.forEachChild((child: any) => {
+          if (raw) return;
+          if (ts.isExportAssignment(child)) {
+            if (
+              ts.isArrowFunction(child.expression) ||
+              ts.isFunctionExpression(child.expression)
+            ) {
+              raw = child.expression;
+              return;
+            }
+            if (ts.isIdentifier(child.expression) && exportName === "default") {
+              const local = findExportedDeclaration(analysis, sf, child.expression.text, new Set());
+              if (local) raw = local.node;
+            }
+          }
+          if (!ts.isVariableStatement(child)) return;
+          for (const decl of child.declarationList.declarations) {
+            if (
+              ts.isIdentifier(decl.name) &&
+              decl.name.text === exportName &&
+              decl.initializer
+            ) {
+              raw = decl.initializer;
+            }
+          }
+        });
+        if (raw) {
+          const unwrapped = unwrap(raw, sf);
+          if (unwrapped) return unwrapped;
         }
-      });
-      if (!target) return null;
-      const param = target.parameters?.[0]?.name?.getText?.(file);
-      return param ? { file, node: target, instanceParam: param } : null;
+
+        // Follow named and wildcard re-exports.
+        const candidates: { spec: string; orig: string }[] = [];
+        sf.forEachChild((child: any) => {
+          if (!ts.isExportDeclaration(child) || !child.moduleSpecifier) return;
+          if (!ts.isStringLiteral(child.moduleSpecifier)) return;
+          if (!child.exportClause) {
+            candidates.push({ spec: child.moduleSpecifier.text, orig: exportName });
+            return;
+          }
+          if (ts.isNamedExports(child.exportClause)) {
+            for (const el of child.exportClause.elements) {
+              const publicName = el.propertyName?.text ?? el.name.text;
+              if (publicName === exportName) {
+                candidates.push({ spec: child.moduleSpecifier.text, orig: el.name.text });
+              }
+            }
+          }
+        });
+        for (const candidate of candidates) {
+          const resolvedName = ts.resolveModuleName
+            ? ts.resolveModuleName(
+                candidate.spec,
+                sf.fileName,
+                analysis.program.getCompilerOptions(),
+                ts.sys,
+              )?.resolvedModule?.resolvedFileName
+            : undefined;
+          if (!resolvedName || !analysis.isProjectFile(resolvedName)) continue;
+          const target = analysis.program.getSourceFile(resolvedName);
+          if (!target) continue;
+          const nested = resolveExport(target, candidate.orig, seen);
+          if (nested) return nested;
+        }
+        return null;
+      };
+
+      const resolvedExport = resolveExport(imported.file, imported.exportName, new Set());
+      const target = resolvedExport?.node;
+      if (
+        !target ||
+        !(
+          ts.isFunctionDeclaration(target) ||
+          ts.isArrowFunction(target) ||
+          ts.isFunctionExpression(target)
+        )
+      ) {
+        return null;
+      }
+      const param = target.parameters?.[0]?.name?.getText?.(resolvedExport.file);
+      return param
+        ? { file: resolvedExport.file, node: target, instanceParam: param }
+        : null;
     };
 
     // Locate a function-like binding by name in a model's file or an imported
@@ -421,7 +533,8 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           [...fullPath.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!),
         );
 
-        const schemaFacts = extractRouteSchema(ts, analysis, site.schemaNode);
+        const schemaLiteral = resolveSchemaLiteral(ts, model, site.schemaNode);
+        const schemaFacts = extractRouteSchema(ts, analysis, schemaLiteral);
         let resolvedHandler: any = site.handler;
         let handlerFile: any = model.source;
         // Resolve imported handlers (`listProjects`) and namespaced handlers
@@ -635,7 +748,9 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     }
   });
 
-  // Root instances: const app = Fastify(...) / fastify({...})
+  // Root instances: const app = fastify(...), plus class services that own the
+  // server through a property assignment (`this.server = fastify(...)` inside a
+  // constructor or field initializer).
   const visit = (node: any) => {
     if (
       ts.isVariableDeclaration(node) &&
@@ -647,6 +762,16 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       if (ts.isIdentifier(callee) && model.factoryBindings.has(callee.text)) {
         model.roots.add(node.name.text);
       }
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      ts.isCallExpression(node.right) &&
+      ts.isIdentifier(node.right.expression) &&
+      model.factoryBindings.has(node.right.expression.text)
+    ) {
+      model.roots.add(node.left.getText(source));
     }
     ts.forEachChild(node, visit);
   };
@@ -684,7 +809,17 @@ function collectSites(
       const receiver = access.expression;
       const method = access.name.text;
 
+      let matchReceiver = false;
       if (ts.isIdentifier(receiver) && receiver.text === instanceName) {
+        matchReceiver = true;
+      } else if (
+        ts.isPropertyAccessExpression(receiver) &&
+        receiver.getText(model.source) === instanceName
+      ) {
+        // Class-owned root instance, e.g. `this.server.register(...)`.
+        matchReceiver = true;
+      }
+      if (matchReceiver) {
         const origin = originOf(ts, model.rel, model.source, node);
 
         if (method === "listen") {
@@ -777,14 +912,24 @@ function collectSites(
           const obj = node.arguments[0];
           const get = (key: string) =>
             obj.properties.find(
-              (p: any) =>
-                ts.isPropertyAssignment(p) &&
-                p.name.getText(model.source).replace(/['"]/g, "") === key,
-            )?.initializer ?? null;
-          const methodNode = get("method");
-          const urlNode = get("url") ?? get("path");
-          const schemaNode = get("schema");
-          const handlerNode = get("handler");
+              (p: any) => {
+                const name = p.name?.getText?.(model.source)?.replace(/['"]/g, "");
+                if (name !== key) return false;
+                return ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p);
+              },
+            ) ?? null;
+          const propOf = (p: any) =>
+            !p
+              ? null
+              : ts.isPropertyAssignment(p)
+                ? p.initializer
+                : ts.isShorthandPropertyAssignment(p)
+                  ? p.name
+                  : null;
+          const methodNode = propOf(get("method"));
+          const urlNode = propOf(get("url")) ?? propOf(get("path"));
+          const schemaNode = propOf(get("schema"));
+          const handlerNode = propOf(get("handler"));
           const methodText = methodNode
             ? String(literalValue(ts, methodNode) ?? methodNode.getText(model.source)).toLowerCase()
             : null;
@@ -794,7 +939,7 @@ function collectSites(
               instance: instanceName,
               method: methodText,
               url: urlText,
-              schemaNode: schemaNode && ts.isObjectLiteralExpression(schemaNode) ? schemaNode : null,
+              schemaNode,
               genericNode: null,
               optionsText: obj.getText(model.source),
               handler: handlerNode,
@@ -816,10 +961,41 @@ function getObjectProperty(ts: any, obj: any, key: string): any | null {
   if (!obj || !ts.isObjectLiteralExpression(obj)) return null;
   const prop = obj.properties.find(
     (p: any) =>
-      ts.isPropertyAssignment(p) &&
-      p.name.getText().replace(/^['"]|['"]$/g, "") === key,
+      (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+      p.name?.getText?.().replace(/^['"]|['"]$/g, "") === key,
   );
-  return prop?.initializer ?? null;
+  if (!prop) return null;
+  // Shorthand `{ schema }` resolves to the identifier itself so callers can
+  // follow it to the enclosing const declaration.
+  return ts.isPropertyAssignment(prop) ? prop.initializer : prop.name;
+}
+
+/**
+ * Follows a schema reference (`schema` identifier or shorthand binding) to the
+ * object literal it aliases within the same file. Fastify projects commonly
+ * declare route schemas as top-level consts and reference them by name.
+ */
+function resolveSchemaLiteral(ts: any, model: FileModel, node: any): any | null {
+  if (!node) return null;
+  if (ts.isObjectLiteralExpression(node)) return node;
+  if (!ts.isIdentifier(node)) return null;
+  let found: any = null;
+  const visit = (n: any) => {
+    if (found) return;
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === node.text &&
+      n.initializer &&
+      ts.isObjectLiteralExpression(n.initializer)
+    ) {
+      found = n.initializer;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  model.source.forEachChild((child: any) => visit(child));
+  return found;
 }
 
 /**

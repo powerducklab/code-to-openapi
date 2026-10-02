@@ -97,6 +97,7 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
         const name = routeCallName(call)!;
         const args = callArguments(call);
         if (RESOURCE_VERBS.has(name)) {
+          const { only, except } = resourceModifiers(call);
           const resource = parseResourceCall(
             args,
             name === "resource",
@@ -104,6 +105,8 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
             model,
             rel,
             joinRoute(groupPrefixChain(call), ""),
+            only,
+            except,
           );
           candidates.push(...resource);
           continue;
@@ -271,7 +274,7 @@ function buildRoute(
     [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!),
   );
 
-  const handler = resolveHandler(handlerArg, analysis);
+  const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
   const handlerNode = handler?.node ?? null;
   const controllerName = handler?.controller ?? null;
   const methodName = handler?.method ?? null;
@@ -335,15 +338,34 @@ interface ResolvedHandler {
 function resolveHandler(
   handlerArg: TsNode | undefined,
   analysis: PhpAnalysis,
+  routeImports?: Map<string, string>,
 ): ResolvedHandler | null {
   if (!handlerArg) return null;
   const inner = handlerArg.namedChildren[0] ?? handlerArg;
 
-  // Closure.
+  // Resolve a use-alias to the short name of the declared class, e.g.
+  // `use ...\EnrollController as EnrollTwoFactorController` maps the route
+  // reference back to "EnrollController" as indexed.
+  const resolveClassName = (name: string | null): string | null => {
+    if (!name) return null;
+    if (analysis.classes.has(name)) return name;
+    const fqcn = routeImports?.get(name);
+    const declared = fqcn?.split("\\").pop();
+    return declared && analysis.classes.has(declared) ? declared : name;
+  };
+
+  // Closure (traditional closure or arrow function).
   const closure =
     inner.type === "anonymous_function_creation_expression"
       ? inner
-      : findFirst(inner, (n) => n.type === "anonymous_function_creation_expression");
+      : inner.type === "arrow_function"
+        ? inner
+        : findFirst(
+            inner,
+            (n) =>
+              n.type === "anonymous_function_creation_expression" ||
+              n.type === "arrow_function",
+          );
   if (closure && inner.type !== "array_creation_expression") {
     return { node: closure, controller: null, method: null };
   }
@@ -357,9 +379,10 @@ function resolveHandler(
     const methodString = elements
       .map((e) => e.namedChildren.find((c) => c.type === "string"))
       .find(Boolean);
-    const controller = classAccess
+    const controllerRaw = classAccess
       ? (childrenOfType(classAccess!, "name")[0]?.text ?? null)
       : null;
+    const controller = resolveClassName(controllerRaw);
     const method = methodString ? phpStringText(methodString) : null;
     const cls = controller ? analysis.classes.get(controller) : null;
     const node = cls && method ? cls.methods.get(method) ?? null : null;
@@ -373,7 +396,8 @@ function resolveHandler(
 
   // Invokable controller: Controller::class.
   if (inner.type === "class_constant_access_expression") {
-    const controller = childrenOfType(inner, "name")[0]?.text ?? null;
+    const controllerRaw = childrenOfType(inner, "name")[0]?.text ?? null;
+    const controller = resolveClassName(controllerRaw);
     const cls = controller ? analysis.classes.get(controller) : null;
     const node = cls?.methods.get("__invoke") ?? null;
     if (node) return { node, controller, method: "__invoke" };
@@ -610,11 +634,27 @@ function collectRequestCalls(
 }
 
 function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
+  // Arrow functions use an expression body without a return statement, e.g.
+  // Route::get('ping', fn () => null) or fn () => response()->json(...).
+  if (handler.type === "arrow_function") {
+    const body = handler.namedChildren[handler.namedChildren.length - 1];
+    if (body) {
+      if (body.type === "null") {
+        return [{ statusCode: "200", description: "", confidence: "medium" }];
+      }
+      const direct = interpretResponse(body, model, gaps, handler);
+      if (direct) return [direct];
+    }
+  }
+
   const returns = findAll(handler, (n) => n.type === "return_statement");
   const responses: DiscoveredResponse[] = [];
+  const factoryVisited = new Set<TsNode>();
 
-  for (const ret of returns) {
-    const expression = ret.namedChildren.find(
+  // Resolve every response-producing expression a return can yield, including
+  // ternary branches (`return $ok ? Resource::make($x) : response()->noContent()`).
+  const candidateExpressions = (ret: TsNode): TsNode[] => {
+    const direct = ret.namedChildren.find(
       (c) =>
         c.type === "member_call_expression" ||
         c.type === "scoped_call_expression" ||
@@ -623,20 +663,64 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
         c.type === "variable_name" ||
         c.type === "array_creation_expression",
     );
-    if (!expression) continue;
-    let response = interpretResponse(expression, model, gaps, handler);
-    if (!response && expression.type === "variable_name") {
-      const schema = inferVariableModel(handler, expression, model);
-      if (schema) {
-        response = {
-          statusCode: "200",
-          description: "",
-          confidence: "medium",
-          content: [{ mediaType: "application/json", schema }],
-        };
-      }
+    if (direct) return [direct];
+    const conditional = ret.namedChildren.find((c) => c.type === "conditional_expression");
+    if (conditional) {
+      return conditional.namedChildren.filter(
+        (c) =>
+          c.type === "member_call_expression" ||
+          c.type === "scoped_call_expression" ||
+          c.type === "function_call_expression" ||
+          c.type === "object_creation_expression" ||
+          c.type === "variable_name" ||
+          c.type === "array_creation_expression",
+      );
     }
-    if (response) responses.push(response);
+    // `return match ($x) { ... arm => response(), ... }`: collect each arm body.
+    const match = ret.namedChildren.find((c) => c.type === "match_expression");
+    if (match) {
+      const armBodies: TsNode[] = [];
+      for (const arm of findAll(match, (n) => n.type === "match_conditional_expression")) {
+        const body = arm.namedChildren[arm.namedChildren.length - 1];
+        if (
+          body &&
+          (body.type === "member_call_expression" ||
+            body.type === "scoped_call_expression" ||
+            body.type === "function_call_expression" ||
+            body.type === "object_creation_expression" ||
+            body.type === "variable_name" ||
+            body.type === "array_creation_expression")
+        ) {
+          armBodies.push(body);
+        }
+      }
+      return armBodies;
+    }
+    return [];
+  };
+
+  for (const ret of returns) {
+    const rawNull = ret.namedChildren.find((c) => c.type === "null");
+    const expressions = candidateExpressions(ret);
+    if (!expressions.length && rawNull) {
+      responses.push({ statusCode: "200", description: "", confidence: "medium" });
+      continue;
+    }
+    for (const expression of expressions) {
+      let response = interpretResponse(expression, model, gaps, handler, factoryVisited);
+      if (!response && expression.type === "variable_name") {
+        const schema = inferVariableModel(handler, expression, model);
+        if (schema) {
+          response = {
+            statusCode: "200",
+            description: "",
+            confidence: "medium",
+            content: [{ mediaType: "application/json", schema }],
+          };
+        }
+      }
+      if (response) responses.push(response);
+    }
   }
 
   if (!responses.length) {
@@ -664,6 +748,7 @@ function interpretResponse(
   model: PhpModelIndex,
   gaps: GapCode[],
   handler: TsNode,
+  factoryVisited: Set<TsNode> = new Set(),
 ): DiscoveredResponse | null {
   // response()->json($data, 201)
   if (expression.type === "member_call_expression") {
@@ -678,9 +763,62 @@ function interpretResponse(
       };
     }
 
+    // SongResource::make($model)->for($user) and similar resource factory
+    // chains (additional()/withResponse()/...): the resource is the payload.
+    const staticResource = chainedStaticResource(expression, model);
+    if (staticResource) {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema: staticResource }],
+      };
+    }
+
     const method = expression.namedChildren.find((c) => c.type === "name")?.text;
     const args = expression.namedChildren.find((c) => c.type === "arguments");
     const argNodes = args ? childrenOfType(args, "argument") : [];
+
+    // Decorator chains such as response()->noContent()->header(...) or
+    // response()->json($data)->setStatusCode(201): locate the terminal call
+    // that actually describes the response and interpret that instead.
+    const TERMINAL_RESPONSE_METHODS = new Set([
+      "json",
+      "nocontent",
+      "redirect",
+      "redirectroute",
+      "redirectguest",
+      "download",
+      "stream",
+      "streamdownload",
+    ]);
+    if (method && !TERMINAL_RESPONSE_METHODS.has(method.toLowerCase())) {
+      const terminal = findFirst(
+        expression,
+        (n) =>
+          n !== expression &&
+          n.type === "member_call_expression" &&
+          TERMINAL_RESPONSE_METHODS.has(
+            (n.namedChildren.find((c) => c.type === "name")?.text ?? "").toLowerCase(),
+          ),
+      );
+      if (terminal) {
+        const inner = interpretResponse(terminal, model, gaps, handler);
+        if (inner) return inner;
+      }
+      // redirect('/')->with('key', $value) or redirect()->away($url): the
+      // redirect helper is the terminal response even though with()/away()
+      // are the outer member calls.
+      const redirectRoot = findFirst(
+        expression,
+        (n) =>
+          n.type === "function_call_expression" &&
+          n.namedChildren.find((c) => c.type === "name")?.text === "redirect",
+      );
+      if (redirectRoot) {
+        return { statusCode: "302", description: "", confidence: "high" };
+      }
+    }
 
     if (method === "noContent" || method === "noContent") {
       const status = integerText(argNodes[0]) ?? "204";
@@ -780,10 +918,38 @@ function interpretResponse(
       const status = integerText(argNodes[1]) ?? "302";
       return { statusCode: status, description: "", confidence: "high" };
     }
+    // view('page') renders an HTML document.
+    if (fnName === "view") {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "medium",
+        content: [
+          { mediaType: "text/html", schema: { type: "string" } },
+        ],
+      };
+    }
+  }
+
+  // Bare array/table return (Laravel serializes it as JSON).
+  if (expression.type === "array_creation_expression") {
+    const schema = inferArraySchema(expression, model, handler);
+    if (schema && Object.keys(schema).length) {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema }],
+      };
+    }
   }
 
   // User::all(), User::find($id), User::create(...).
   if (expression.type === "scoped_call_expression") {
+    // self::/static:: factory methods on the enclosing controller class.
+    const selfFactory = resolveSelfFactory(expression, model, gaps, handler, factoryVisited);
+    if (selfFactory) return selfFactory;
+
     const schema = inferStaticModel(expression, model);
     if (schema) {
       return {
@@ -924,7 +1090,9 @@ function inferArraySchema(
     const key = keyNode?.type === "string" ? phpStringText(keyNode) : null;
     if (!key || !valueNode) continue;
     const schema = inferArrayValue(valueNode, model, handler, depth + 1);
-    if (schema && Object.keys(schema).length) properties[key] = schema;
+    // An empty-object schema means "any type, not statically known": the key
+    // itself is certain, so keep the property instead of silently dropping it.
+    if (schema) properties[key] = schema;
   }
   return { type: "object", properties };
 }
@@ -946,7 +1114,7 @@ function inferArrayValue(
     const name = node.namedChildren.find((c) => c.type === "name")?.text;
     if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? {};
   }
-  if (node.type === "scoped_call_expression") return inferStaticModel(node, model);
+  if (node.type === "scoped_call_expression") return inferStaticModel(node, model) ?? {};
   if (node.type === "member_call_expression") {
     const method = node.namedChildren.find((c) => c.type === "name")?.text;
     // $request->input/query/get/post('key') and $request->file('x')->store(...)
@@ -964,6 +1132,10 @@ function inferArrayValue(
     }
     const chained = inferChainedModel(node, model);
     if (chained) return chained;
+    // A known array key whose value comes from an untyped service/repository
+    // call keeps the property with an unconstrained schema rather than being
+    // silently dropped (the property name itself is certain).
+    return {};
   }
   if (node.type === "member_access_expression") {
     const prop = node.namedChildren.filter((c) => c.type === "name").pop()?.text ?? "";
@@ -1039,8 +1211,116 @@ function chainedResourceResponse(
   return null;
 }
 
-function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | undefined {
+/**
+ * Resolve `self::factoryMethod(...)` / `static::factoryMethod(...)` calls by
+ * interpreting the return statements of the named static method on the class
+ * enclosing the handler. Used for private response-shaping helpers such as
+ * `self::createResourceCollection($models)`. Recursion is bounded by the
+ * shared visited set.
+ */
+function resolveSelfFactory(
+  call: TsNode,
+  model: PhpModelIndex,
+  gaps: GapCode[],
+  handler: TsNode,
+  visited: Set<TsNode>,
+): DiscoveredResponse | null {
   const names = childrenOfType(call, "name");
+  const relative = call.namedChildren.find((c) => c.type === "relative_scope");
+  const scope = (relative?.text ?? names[0]?.text ?? "").toLowerCase();
+  const methodName = names[names.length - 1]?.text;
+  if ((scope !== "self" && scope !== "static") || !methodName) return null;
+
+  let classNode: TsNode | null = handler;
+  while (classNode && classNode.type !== "class_declaration") {
+    classNode = classNode.parent ?? null;
+  }
+  const className = classNode?.namedChildren.find((c) => c.type === "name")?.text;
+  if (!className) return null;
+  const methodNode = model.analysis.classes.get(className)?.methods.get(methodName) ?? null;
+  if (!methodNode || visited.has(methodNode)) return null;
+  visited.add(methodNode);
+
+  for (const ret of findAll(methodNode, (n) => n.type === "return_statement")) {
+    const expressions = ret.namedChildren.filter(
+      (c) =>
+        c.type === "member_call_expression" ||
+        c.type === "scoped_call_expression" ||
+        c.type === "function_call_expression" ||
+        c.type === "object_creation_expression" ||
+        c.type === "variable_name" ||
+        c.type === "array_creation_expression" ||
+        c.type === "conditional_expression",
+    );
+    for (const expression of expressions) {
+      const branches =
+        expression.type === "conditional_expression"
+          ? expression.namedChildren.filter(
+              (c) =>
+                c.type === "member_call_expression" ||
+                c.type === "scoped_call_expression" ||
+                c.type === "function_call_expression" ||
+                c.type === "object_creation_expression",
+            )
+          : [expression];
+      for (const branch of branches) {
+        const resolved = interpretResponse(branch, model, gaps, methodNode, visited);
+        if (resolved) return resolved;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve chains rooted in a static resource factory, e.g.
+ * `SongResource::make($model)->for($user)` or
+ * `SongResource::collection($models)->additional(['meta' => true])`.
+ * Returns the resource item/array schema, or null when the chain is not rooted
+ * in a known API Resource class.
+ */
+function chainedStaticResource(expression: TsNode, model: PhpModelIndex): JsonSchema | null {
+  let cursor: TsNode | null = expression;
+  for (let depth = 0; depth < 6 && cursor; depth += 1) {
+    if (cursor.type === "scoped_call_expression") {
+      const names = childrenOfType(cursor, "name");
+      const qualified = cursor.namedChildren.find((c) => c.type === "qualified_name");
+      const method = names[names.length - 1]?.text?.toLowerCase();
+      const className = qualified
+        ? qualified.text.split("\\").filter(Boolean).pop()
+        : names.length >= 2
+          ? names[names.length - 2]?.text
+          : undefined;
+      if (className && /(?:Resource|Response|Result|Dto)$/.test(className) && model.analysis.classes.has(className)) {
+        const ref = ensurePhpComponent(className, model);
+        if (!ref) return null;
+        return method === "collection" ? { type: "array", items: ref } : ref;
+      }
+      return null;
+    }
+    if (cursor.type === "object_creation_expression") {
+      const name = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      if (name && /(?:Resource|Response|Result|Dto)$/.test(name) && model.analysis.classes.has(name)) {
+        return ensurePhpComponent(name, model);
+      }
+      return null;
+    }
+    if (cursor.type === "member_call_expression") {
+      cursor =
+        cursor.namedChildren.find(
+          (c) =>
+            c.type === "member_call_expression" ||
+            c.type === "scoped_call_expression" ||
+            c.type === "object_creation_expression",
+        ) ?? null;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema | undefined {  const names = childrenOfType(call, "name");
   const qualified = call.namedChildren.find((c) => c.type === "qualified_name");
   // Qualified calls (\App\Models\Order::all) carry a qualified_name scope.
   const method = names[names.length - 1]?.text.toLowerCase();
@@ -1096,10 +1376,12 @@ function parseResourceCall(
   model: PhpModelIndex,
   rel: string,
   groupPrefix: string,
+  onlyActions: Set<string> | null = null,
+  exceptActions: Set<string> = new Set(),
 ): RouteCandidate[] {
   const pathArg = args[0]?.namedChildren.find((c) => c.type === "string");
   const handlerArg = args[1];
-  const handler = resolveHandler(handlerArg, analysis);
+  const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
   const controller = handler?.controller ?? resourceControllerName(handlerArg);
 
   // Dot-nested resources ('albums.songs') expand to a nested URI: the
@@ -1136,9 +1418,16 @@ function parseResourceCall(
     );
   }
 
-  return operations.map(({ verb, path, method }) => {
+  return operations.flatMap(({ verb, path, method }) => {
+    if (onlyActions && !onlyActions.has(method)) return [];
+    if (exceptActions.has(method)) return [];
     const cls = controller ? analysis.classes.get(controller) : null;
     const methodNode = cls?.methods.get(method) ?? null;
+    // apiResource registers only the actions the controller actually
+    // implements. Skip phantom routes for unresolved methods instead of
+    // emitting low-confidence response-unknown operations. When the
+    // controller itself cannot be resolved, keep the conventional set.
+    if (controller && cls && !methodNode) return [];
     const gaps: GapCode[] = [];
     // update() serves both PUT and PATCH; keep operationIds unique and explicit.
     const operationId =
@@ -1169,7 +1458,7 @@ function parseResourceCall(
     const responses: DiscoveredResponse[] = methodNode
       ? collectResponses(methodNode, model, gaps)
       : [{ statusCode: "200", description: "", confidence: "low" }];
-    if (!methodNode) gaps.push("response-unknown");
+    if (!methodNode && !cls) gaps.push("response-unknown");
 
     return {
       method: verb,
@@ -1194,8 +1483,49 @@ function parseResourceCall(
   });
 }
 
-function resourceControllerName(handlerArg: TsNode | undefined): string | null {
-  if (!handlerArg) return null;
+/**
+ * Read ->only([...]) / ->except([...]) modifiers chained on a resource
+ * registration. Walks the parent member-call chain so multiple decorators
+ * (->names()->except(...)) are all considered.
+ */
+function resourceModifiers(call: TsNode): { only: Set<string> | null; except: Set<string> } {
+  const only: string[] = [];
+  const except: string[] = [];
+  let cursor: TsNode | null = call.parent ?? null;
+  for (let depth = 0; depth < 6 && cursor; depth += 1) {
+    if (cursor.type === "member_call_expression") {
+      const modifier = cursor.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+      if (modifier === "only" || modifier === "except") {
+        const argsNode = cursor.namedChildren.find((c) => c.type === "arguments");
+        const values: string[] = [];
+        if (argsNode) {
+          for (const arg of childrenOfType(argsNode, "argument")) {
+            const root = arg.namedChildren[0] ?? arg;
+            if (root.type === "string") {
+              const text = phpStringText(root);
+              if (text) values.push(text);
+            } else if (root.type === "array_creation_expression") {
+              for (const element of childrenOfType(root, "array_element_initializer")) {
+                const textNode = element.namedChildren.find((c) => c.type === "string");
+                const text = textNode ? phpStringText(textNode) : null;
+                if (text) values.push(text);
+              }
+            }
+          }
+        }
+        if (modifier === "only") only.push(...values);
+        else except.push(...values);
+      }
+    }
+    cursor = cursor.parent ?? null;
+  }
+  return {
+    only: only.length ? new Set(only) : null,
+    except: new Set(except),
+  };
+}
+
+function resourceControllerName(handlerArg: TsNode | undefined): string | null {  if (!handlerArg) return null;
   const access = findFirst(handlerArg, (n) => n.type === "class_constant_access_expression");
   return access ? childrenOfType(access, "name")[0]?.text ?? null : null;
 }

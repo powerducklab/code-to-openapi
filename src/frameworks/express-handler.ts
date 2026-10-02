@@ -226,6 +226,8 @@ function findExportedDeclaration(
   return null;
 }
 
+export { findExportedDeclaration };
+
 export function resolveHandler(
   analysis: TsAnalysis,
   sourceFile: any,
