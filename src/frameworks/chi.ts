@@ -21,6 +21,7 @@ import {
   buildGoModelIndex,
   ensureGoComponent,
   goTypeToSchema,
+  resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
 } from "../lang/go/schema.js";
@@ -295,10 +296,18 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
               return;
             }
             const handler = args[1];
+            const methodHandlerName =
+              handler?.type === "identifier"
+                ? handler.text
+                : handler?.type === "selector_expression"
+                  ? (handler.namedChildren[1]?.type === "field_identifier"
+                      ? handler.namedChildren[1].text
+                      : null)
+                  : null;
             sites.push({
               method: sel.method.toLowerCase(),
               path: joinPath(prefix, normalizeChiPath(rawPath)),
-              handlerName: handler?.type === "identifier" ? handler.text : null,
+              handlerName: methodHandlerName,
               handlerNode: handler?.type === "func_literal" ? handler : null,
               origin: { file: file.path, line: call.startPosition.row + 1 },
             });
@@ -449,7 +458,10 @@ function buildRoute(
   let isSse = false;
 
   const namedFn = site.handlerName
-    ? analysis.functions.get(site.handlerName)?.[0]
+    ? analysis.functions.get(site.handlerName)?.[0] ??
+      // Method-value handlers such as `r.Get("/notes", notesHandler.ReadNotes)`
+      // resolve to the receiver method rather than a package-level function.
+      analysis.methods.find((method) => method.name === site.handlerName)
     : undefined;
   const inlineBlock = site.handlerNode
     ? (findFirst(site.handlerNode, (c) => c.type === "block") ?? null)
@@ -636,6 +648,21 @@ function buildRoute(
       if (!schema) gaps.add("response-schema-unknown");
     });
 
+    // go-chi/render idiom: render.Render / render.RenderList / render.Status.
+    collectRenderResponses(body, analysis, modelIndex, (status, schema) => {
+      const existing = responseStatus.get(status);
+      if (existing?.content) return;
+      responseStatus.set(status, {
+        statusCode: status,
+        description: "",
+        confidence: schema ? "high" : "medium",
+        ...(schema
+          ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
+          : {}),
+      });
+      if (!schema) gaps.add("response-schema-unknown");
+    });
+
     // Declared but unproven path params.
     for (const name of declaredParams) {
       if (!parameters.some((p) => p.name === name && p.in === "path")) {
@@ -753,6 +780,69 @@ function collectEncodeResponses(
         if (sel.method === "Encode" && call.text.includes("NewEncoder")) {
           const arg = positionalArguments(call)[0];
           emit(status ?? "200", responsePayloadSchema(arg, body, index));
+        }
+      }
+    }
+  };
+
+  walkBlock(body, null);
+}
+
+/**
+ * Recognize the go-chi/render idiom: render.Status(r, code) sets the status for
+ * the following render.Render / render.RenderList call, whose payload is a
+ * constructor returning a render.Renderer (or a list of them). Payloads resolve
+ * to a real JSON schema by following the constructor's return type (and body
+ * when that return is an opaque interface). Status codes set on error renderer
+ * composite literals (HTTPStatusCode: 400) are proven and emitted; anything we
+ * cannot derive statically stays an honest gap rather than a guess.
+ */
+function collectRenderResponses(
+  body: TsNode,
+  analysis: GoAnalysis,
+  index: GoModelIndex,
+  emit: (status: string, schema: JsonSchema | null) => void,
+): void {
+  const shallowCalls = (statement: TsNode): TsNode[] => {
+    const result: TsNode[] = [];
+    const walk = (node: TsNode, isRoot: boolean) => {
+      if (!isRoot && (node.type === "block" || node.type === "func_literal")) return;
+      if (node.type === "call_expression") result.push(node);
+      for (const child of node.namedChildren) walk(child, false);
+    };
+    walk(statement, true);
+    return result;
+  };
+
+  const walkBlock = (block: TsNode, pending: string | null) => {
+    let status = pending;
+    for (const statement of block.namedChildren) {
+      const isBranch =
+        statement.type === "if_statement" || statement.type === "for_statement" ||
+        statement.type === "range_statement" || statement.type === "switch_statement" ||
+        statement.type === "select_statement";
+      // Process calls directly on this statement first (this catches render calls
+      // in if-initializers, e.g. `if err := render.RenderList(...); err != nil {`).
+      for (const call of shallowCalls(statement)) {
+        const sel = selectorCall(call);
+        if (!sel) continue;
+        const isRenderPkg = sel.receiver.type === "identifier" && sel.receiver.text === "render";
+        if (!isRenderPkg) continue;
+        if (sel.method === "Status") {
+          // render.Status(r *http.Request, code int) — the code is the 2nd arg.
+          status = statusCode(positionalArguments(call)[1]) ?? status;
+          continue;
+        }
+        if (sel.method === "Render" || sel.method === "RenderList") {
+          const args = positionalArguments(call);
+          const resolved = resolveGoPayloadValue(args[2], body, analysis, index, analysis.vars);
+          emit(status ?? resolved.status ?? "200", resolved.schema);
+          status = null;
+        }
+      }
+      if (isBranch) {
+        for (const child of statement.namedChildren) {
+          if (child.type === "block") walkBlock(child, null);
         }
       }
     }

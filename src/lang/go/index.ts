@@ -33,6 +33,14 @@ export interface GoFunction {
   readonly receiver: TsNode | null;
 }
 
+/** A package-level variable, e.g. `var ErrNotFound = &ErrResponse{...}`. */
+export interface GoVar {
+  readonly name: string;
+  readonly file: string;
+  /** The right-hand value expression, or null when the var is not initialized inline. */
+  readonly value: TsNode | null;
+}
+
 export interface GoFile {
   readonly path: string;
   readonly content: string;
@@ -49,6 +57,8 @@ export interface GoAnalysis {
   readonly functions: Map<string, GoFunction[]>;
   /** Receiver methods, e.g. `func (g *Gin) Response(...)`. */
   readonly methods: GoFunction[];
+  /** Package-level variables keyed by name (first declaration wins). */
+  readonly vars: Map<string, GoVar>;
 }
 
 function parseTag(raw: string | null): string | null {
@@ -158,6 +168,28 @@ function collectFunctions(file: GoFile): GoFunction[] {
 }
 
 /**
+ * Collect package-level variable declarations (`var X = expr`, including
+ * parenthesized `var ( ... )`). Only top-level specs are collected so local
+ * variables inside functions stay out of scope.
+ */
+function collectVars(file: GoFile): GoVar[] {
+  const result: GoVar[] = [];
+  for (const declaration of file.root.namedChildren.filter(
+    (child) => child.type === "var_declaration",
+  )) {
+    for (const spec of childrenOfType(declaration, "var_spec")) {
+      const names = spec.namedChildren.filter((child) => child.type === "identifier");
+      const valueList = spec.namedChildren.find((child) => child.type === "expression_list");
+      const values = valueList?.namedChildren ?? [];
+      names.forEach((name, index) => {
+        result.push({ name: name.text, file: file.path, value: values[index] ?? null });
+      });
+    }
+  }
+  return result;
+}
+
+/**
  * Unqualified receiver type name of a method, e.g. `Gin` from
  * `func (g *Gin) Response(...)`. Returns null for non-methods.
  */
@@ -189,6 +221,7 @@ export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | n
   const structs = new Map<string, GoStruct>();
   const functions = new Map<string, GoFunction[]>();
   const methods: GoFunction[] = [];
+  const vars = new Map<string, GoVar>();
 
   for (const entry of goFiles) {
     const root = await parseSource("go", entry.content);
@@ -213,9 +246,13 @@ export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | n
       bucket.push(fn);
       functions.set(fn.name, bucket);
     }
+    for (const variable of collectVars(file)) {
+      // First declaration wins, matching struct indexing.
+      if (!vars.has(variable.name)) vars.set(variable.name, variable);
+    }
   }
 
-  return { id: "go", files, structs, functions, methods };
+  return { id: "go", files, structs, functions, methods, vars };
 }
 
 export type { FileEntry };

@@ -25,6 +25,7 @@ import {
   buildGoModelIndex,
   ensureGoComponent,
   goTypeToSchema,
+  resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
 } from "../lang/go/schema.js";
@@ -147,13 +148,15 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
       return { type: "array", items: {} };
     }
 
-    // Named struct literal: Type{} -> $ref (or inline for anonymous structs).
-    if (typeNode && typeNode.type === "type_identifier") {
-      if (index.byName.has(typeNode.text)) {
-        ensureGoComponent(typeNode.text, index);
-        return { $ref: `#/components/schemas/${typeNode.text}` };
+    // Named struct literal: Type{} or pkg.Type{} -> $ref (or inline for
+    // anonymous structs). The package qualifier is stripped before lookup.
+    const typeText = typeNode?.text ?? "";
+    const baseName = typeText.includes(".") ? typeText.split(".").pop() ?? typeText : typeText;
+    if (typeNode && (typeNode.type === "type_identifier" || typeNode.type === "selector_expression" || typeNode.type === "qualified_type") && baseName) {
+      if (index.byName.has(baseName)) {
+        ensureGoComponent(baseName, index);
+        return { $ref: `#/components/schemas/${baseName}` };
       }
-      return {};
     }
 
     // gin.H{...} (selector type) or map literal.
@@ -497,7 +500,11 @@ function analyzeHandler(
         let schema: JsonSchema | null = null;
         const payload = payloadArg;
         if (payload) {
-          if (payload.type === "identifier") {
+          if (payload.type === "call_expression") {
+            // c.JSON(200, NewUserResponse(u)) / c.JSON(200, svc.GetOrders(ctx)):
+            // follow the constructor/service function's return type.
+            schema = resolveGoPayloadValue(payload, body, analysis, modelIndex, analysis.vars).schema;
+          } else if (payload.type === "identifier") {
             const typeNode = resolveLocalType(body, payload.text);
             if (typeNode) schema = goTypeToSchema(typeNode, modelIndex);
           } else {
@@ -849,6 +856,34 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
         // Pass 2: routes.
         for (const call of findAll(scopeRoot, (n) => n.type === "call_expression")) {
           const sel = selectorCall(call);
+
+          // Registration helper call: registerProductRoutes(api) or the
+          // qualified form route.Setup(env, ..., gin). The guard below only
+          // accepts functions that actually take a *gin.Engine/*RouterGroup,
+          // so ordinary selector calls are not mistaken for route helpers.
+          const callee = call.namedChildren[0];
+          const helperName =
+            callee?.type === "identifier"
+              ? callee.text
+              : callee?.type === "selector_expression"
+                ? callee.namedChildren[1]?.text ?? null
+                : null;
+          if (helperName) {
+            const helperArgs = positionalArguments(call);
+            const instanceArg = helperArgs.find(
+              (a) => a.type === "identifier" && instances.has(a.text),
+            );
+            const caller = instanceArg ? instances.get(instanceArg.text) : undefined;
+            const candidates = analysis.functions.get(helperName) ?? [];
+            const helperFn = candidates.find(
+              (candidate) => groupParameterName(candidate) !== null,
+            );
+            const paramName = helperFn ? groupParameterName(helperFn) : null;
+            if (caller && helperFn && paramName) {
+              registrationCalls.push({ fn: helperFn, paramName, caller });
+            }
+          }
+
           if (sel) {
             if (!sel.receiver.type || sel.receiver.type !== "identifier") continue;
             const instance = instances.get(sel.receiver.text);
@@ -915,8 +950,14 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
               // A package may declare same-named helpers (e.g. a data-layer
               // `GetTags(page, size, maps)` alongside the HTTP handler
               // `GetTags(c *gin.Context)`). Prefer the function whose
-              // signature actually accepts *gin.Context.
-              handlerFn = candidates.find(isGinContextHandler) ?? candidates[0] ?? null;
+              // signature actually accepts *gin.Context. Method-value handlers
+              // such as `tc.Fetch` resolve against receiver methods.
+              handlerFn =
+                candidates.find(isGinContextHandler) ??
+                candidates[0] ??
+                analysis.methods.find((m) => m.name === handlerSymbol && isGinContextHandler(m)) ??
+                analysis.methods.find((m) => m.name === handlerSymbol) ??
+                null;
               handlerNode = handlerFn?.node ?? null;
             }
             const primaryHandler = terminal ? terminal.text : undefined;
@@ -964,21 +1005,6 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
                 components: analyzed.components,
                 handlerSource: handlerNode?.text.slice(0, 8192),
               });
-            }
-          }
-
-          // Plain helper call: registerProductRoutes(api).
-          if (!sel) {
-            const callee = call.namedChildren[0];
-            const args = positionalArguments(call);
-            if (callee?.type === "identifier" && args[0]?.type === "identifier") {
-              const caller = instances.get(args[0].text);
-              const candidates = analysis.functions.get(callee.text) ?? [];
-              const fn = candidates.find((candidate) => groupParameterName(candidate) !== null);
-              const paramName = fn ? groupParameterName(fn) : null;
-              if (caller && fn && paramName) {
-                registrationCalls.push({ fn, paramName, caller });
-              }
             }
           }
         }
