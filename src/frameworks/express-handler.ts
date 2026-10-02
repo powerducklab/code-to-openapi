@@ -1081,6 +1081,12 @@ export function analyzeHandler(
         recordResponse("302", "text/html", undefined, "medium");
         return;
       }
+      if (step.name === "render") {
+        // res.render('view', locals) renders an HTML view; the response is a
+        // complete 200 text/html described entirely by its media type.
+        recordResponse(status, "text/html", undefined, "medium");
+        return;
+      }
       if (step.name === "end") {
         recordResponse("204", "application/json", undefined, "medium");
         return;
@@ -1325,7 +1331,17 @@ export function analyzeHandler(
       gaps.add("response-unknown");
     } else if (
       [...responses.values()].some(
-        (r) => !r.content || r.content.some((m) => !m.schema && !m.itemSchema),
+        (r) =>
+          !r.content ||
+          r.content.some(
+            (m) =>
+              !m.schema &&
+              !m.itemSchema &&
+              m.mediaType !== "text/html" &&
+              m.mediaType !== "text/plain" &&
+              m.mediaType !== "text/css" &&
+              m.mediaType !== "text/event-stream",
+          ),
       )
     ) {
       gaps.add("response-schema-unknown");

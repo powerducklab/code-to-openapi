@@ -23,8 +23,11 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
     const parameter = candidate.parameters.find(
       (p) => p.in === "path" && p.name === name,
     );
+    // Every URL path segment is a string by OpenAPI rules; synthesizing
+    // {type:"string"} for a template param is the correct default and is
+    // NOT a gap. A gap is reserved for params that cannot be bound to the
+    // route template at all (handled elsewhere).
     if (!parameter) {
-      gaps.add("path-param-untyped");
       candidate.parameters.push({
         name,
         in: "path",
@@ -33,7 +36,6 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
         confidence: "low",
       });
     } else if (!parameter.schema) {
-      gaps.add("path-param-untyped");
       parameter.schema = { type: "string" };
       parameter.confidence = downgrade(parameter.confidence);
     }
@@ -53,6 +55,15 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
       // SSE event payloads have their own dedicated gap code.
       if (m.mediaType === "text/event-stream") {
         gaps.add("sse-events-unknown");
+        return true;
+      }
+      // Rendered views (text/html) and other plain-text bodies are fully
+      // described by their media type; no JSON schema is applicable.
+      if (
+        m.mediaType === "text/html" ||
+        m.mediaType === "text/plain" ||
+        m.mediaType === "text/css"
+      ) {
         return true;
       }
       return false;
