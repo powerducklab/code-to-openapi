@@ -499,12 +499,10 @@ function extractMinimalApis(
     const args = invocation.namedChildren.find((c) => c.type === "argument_list");
     if (!args) continue;
     const argumentNodes = childrenOfType(args, "argument");
-    const routeArg = argumentNodes[0];
-    const routeText = routeTextFromArg(routeArg);
-    if (routeText === null) continue;
 
     let verbs: string[];
     let handlerArg: TsNode | undefined;
+    let routeText: string;
     if (methodName === "MapMethods") {
       // MapMethods(route, new[] { "GET", "POST" }, handler)
       const methods: string[] = [];
@@ -514,16 +512,49 @@ function extractMinimalApis(
       }
       if (!methods.length) continue;
       verbs = methods;
+      routeText = routeTextFromArg(argumentNodes[0]) ?? "";
       handlerArg = argumentNodes[2];
     } else {
       verbs = [MINIMAL_VERB_METHODS.get(methodName)!];
-      handlerArg = argumentNodes[1];
+      // Standard minimal API: MapGet("/path", handler). The IEndpointGroup
+      // convention swaps them: MapPost(handler) / MapPut(handler, "{id}").
+      const firstIsRoute = routeTextFromArg(argumentNodes[0]) !== null;
+      if (firstIsRoute) {
+        routeText = routeTextFromArg(argumentNodes[0]) ?? "";
+        handlerArg = argumentNodes[1];
+      } else {
+        routeText = routeTextFromArg(argumentNodes[1]) ?? "";
+        handlerArg = argumentNodes[0];
+      }
     }
     if (!handlerArg) continue;
 
-    const lambda = findFirst(handlerArg, (n) => n.type === "lambda_expression") ?? handlerArg;
-    const paramsNode = lambda.namedChildren.find((c) => c.type === "parameter_list");
-    const fullPath = normalizeRoute(routeText);
+    // Resolve a method-group handler (e.g. MapPost(CreateTodoItem)) to the
+    // static method declaration so its parameters/return shape drive the op.
+    const lambda = findFirst(handlerArg, (n) => n.type === "lambda_expression") ?? null;
+    let handlerMethod: TsNode | null = null;
+    if (!lambda && handlerArg.type === "identifier") {
+      handlerMethod = findMethodByName(root, handlerArg.text);
+    }
+    const handlerSource = lambda ?? handlerMethod ?? handlerArg;
+    const paramsNode = handlerSource.namedChildren.find((c) => c.type === "parameter_list");
+
+    // IEndpointGroup convention: Map(RouteGroupBuilder) on a class gets an
+    // implicit /api/{ClassName} route prefix.
+    let prefix = "";
+    const mapMethod = enclosingNode(invocation, "method_declaration");
+    if (mapMethod) {
+      const pl = mapMethod.namedChildren.find((c) => c.type === "parameter_list");
+      const firstParam = pl?.namedChildren[0];
+      const firstParamType = firstParam?.namedChildren[0]?.text ?? "";
+      if (firstParamType.includes("RouteGroupBuilder")) {
+        const className = enclosingNode(mapMethod, "class_declaration")?.childForFieldName("name")?.text;
+        if (className) prefix = `/api/${className}`;
+      }
+    }
+
+    const rawCombined = [prefix, routeText].filter(Boolean).join("/").replace(/\/+/g, "/");
+    const fullPath = normalizeRoute(rawCombined || "/");
     const pathParams = new Set(
       [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => stripConstraint(m[1]!)),
     );
@@ -537,7 +568,7 @@ function extractMinimalApis(
     );
 
     const gaps: GapCode[] = [];
-    const responses = inferMinimalResponses(lambda, model, gaps);
+    const responses = inferMinimalResponses(handlerSource, model, gaps);
     const withName = findChainedString(invocation, "WithName");
     const isSse = responses.some((r) =>
       r.content?.some((media) => media.mediaType === "text/event-stream"),
@@ -562,6 +593,24 @@ function extractMinimalApis(
       });
     }
   }
+}
+
+// Walk up the parent chain to the nearest ancestor of the given node type.
+function enclosingNode(node: TsNode, type: string): TsNode | null {
+  let cur: TsNode | null = node.parent;
+  while (cur) {
+    if (cur.type === type) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+// Find a method declaration in the current file by name (method-group handler).
+function findMethodByName(root: TsNode, name: string): TsNode | null {
+  for (const m of findAll(root, (n) => n.type === "method_declaration")) {
+    if (m.childForFieldName("name")?.text === name) return m;
+  }
+  return null;
 }
 
 function routeTextFromArg(arg: TsNode | undefined): string | null {
