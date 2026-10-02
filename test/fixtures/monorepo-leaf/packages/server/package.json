@@ -1,0 +1,5 @@
+{
+  "name": "@demo/server",
+  "private": true,
+  "dependencies": { "express": "^4.19.0" }
+}

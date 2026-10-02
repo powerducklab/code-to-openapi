@@ -12,7 +12,7 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
-import { analyzeHandler, resolveHandler, resolveImportedFile } from "./express-handler.js";
+import { analyzeHandler, resolveHandler, resolveImportedFile, extractCustomResponseMethods } from "./express-handler.js";
 import { convertValidatorChain, type ValidatedField } from "../lang/typescript/validate.js";
 
 const HTTP_METHODS = new Set([
@@ -148,6 +148,10 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
       models.set(rel, modelFile(analysis, ctx.index, rel, source));
     }
 
+    // Project-wide map of monkey-patched Express Response methods (e.g.
+    // response.customSuccess = ...) so handlers can expand them.
+    const customResponseMethods = extractCustomResponseMethods(analysis);
+
     // Resolve cross-file mounts and build the router graph.
     const allRouters = new Map<string, RouterVar>();
     const edges: MountEdge[] = [];
@@ -235,6 +239,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
           pathParams,
           validators,
           unresolved,
+          customResponseMethods,
         );
         const facts = analysisResult.facts;
 
@@ -769,6 +774,7 @@ function resolveAndAnalyze(
   pathParams: Set<string>,
   validators: ValidatedField[],
   unresolved: DiscoveredUnresolved[],
+  customResponseMethods: Map<string, import("./express-handler.js").CustomResponseMethod>,
 ): { facts: import("./express-handler.js").HandlerFacts; handlerSource?: string } {
   const noFacts: import("./express-handler.js").HandlerFacts = {
     parameters: [],
@@ -794,6 +800,7 @@ function resolveAndAnalyze(
   const facts = analyzeHandler(analysis, resolved.file, resolved.node, origin, {
     pathParams,
     validators,
+    customResponseMethods,
   });
   return {
     facts,

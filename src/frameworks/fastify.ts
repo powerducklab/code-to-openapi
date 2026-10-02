@@ -1190,6 +1190,13 @@ function analyzeFastifyHandler(
   const queryFields = new Map<string, JsonSchema | undefined>();
   const headerFields = new Map<string, JsonSchema | undefined>();
 
+  // Local aliases of request.body / request.query / request.params, e.g.
+  // `const payload = request.body; payload.slug`. Property accesses on these
+  // aliases are attributed to the same source as the original request member.
+  const bodyAliases = new Set<string>();
+  const queryAliases = new Set<string>();
+  const paramAliases = new Set<string>();
+
   const rootIdentifier = (node: any): string | undefined => {
     let cur = node;
     while (cur) {
@@ -1298,6 +1305,29 @@ function analyzeFastifyHandler(
     };
 
     const visit = (node: any, roots: { req: string; reply: string }, helperDepth: number) => {
+      // `const alias = request.body | .query | .params` records a local alias so
+      // later `alias.field` accesses are attributed to the right request member.
+      if (
+        ts.isVariableDeclaration(node) &&
+        node.initializer &&
+        ts.isPropertyAccessExpression(node.initializer) &&
+        rootIdentifier(node.initializer) === roots.req &&
+        ts.isIdentifier(node.name)
+      ) {
+        const aliasMember = node.initializer.name.text;
+        const aliasName = node.name.text;
+        if (aliasMember === "body") {
+          bodyAliases.add(aliasName);
+          factsBody.referenced = true;
+          const bodyType = typeAt(node.initializer);
+          if (bodyType) factsBody.schema = bodyType;
+        } else if (aliasMember === "query") {
+          queryAliases.add(aliasName);
+        } else if (aliasMember === "params") {
+          paramAliases.add(aliasName);
+        }
+      }
+
       // request.<member> access
       if (ts.isPropertyAccessExpression(node) && rootIdentifier(node) === roots.req) {
         const full = node.getText(file);
@@ -1330,6 +1360,27 @@ function analyzeFastifyHandler(
         } else if (full.startsWith(`${roots.req}.body.`) && member !== "body") {
           factsBody.referenced = true;
           factsBody.fields.set(member, schema);
+        }
+      }
+
+      // Alias.<field> access: `const payload = request.body; payload.slug`.
+      // Only a single hop directly on the alias identifier counts as a field;
+      // chained calls like `payload.heading.toLowerCase()` must not leak method
+      // names into the body schema.
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        ts.isIdentifier(node.expression)
+      ) {
+        const root = node.expression.text;
+        const member = node.name.text;
+        const schema = typeAt(node);
+        if (bodyAliases.has(root)) {
+          factsBody.referenced = true;
+          factsBody.fields.set(member, schema);
+        } else if (queryAliases.has(root)) {
+          queryFields.set(member, schema);
+        } else if (paramAliases.has(root)) {
+          addParam("path", member, schema, schema ? "high" : "low");
         }
       }
 
