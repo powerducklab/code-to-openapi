@@ -45,6 +45,23 @@ import { fastapiPack } from "../frameworks/fastapi.js";
 import { flaskPack } from "../frameworks/flask.js";
 import { ginPack } from "../frameworks/gin.js";
 import { chiPack } from "../frameworks/chi.js";
+import { honoPack } from "../frameworks/hono.js";
+import { koaPack } from "../frameworks/koa.js";
+import { nextjsPack } from "../frameworks/nextjs.js";
+import { elysiaPack } from "../frameworks/elysia.js";
+import { drfPack } from "../frameworks/djangorestframework.js";
+import { starlettePack } from "../frameworks/starlette.js";
+import { nethttpPack } from "../frameworks/nethttp.js";
+import { gorillamuxPack } from "../frameworks/gorillamux.js";
+import { echoPack } from "../frameworks/echo.js";
+import { fiberPack } from "../frameworks/fiber.js";
+import { jaxrsPack } from "../frameworks/jaxrs.js";
+import { micronautPack } from "../frameworks/micronaut.js";
+import { actixPack } from "../frameworks/actix.js";
+import { rocketPack } from "../frameworks/rocket.js";
+import { fastendpointsPack } from "../frameworks/fastendpoints.js";
+import { symfonyPack } from "../frameworks/symfony.js";
+import { slimPack } from "../frameworks/slim.js";
 import type { GapResolver } from "../ai/gapResolver.js";
 
 interface LanguageRegistryEntry {
@@ -63,6 +80,10 @@ const REGISTRY: LanguageRegistryEntry[] = [
       expressPack as FrameworkPack,
       fastifyPack as FrameworkPack,
       nestPack as FrameworkPack,
+      honoPack as FrameworkPack,
+      koaPack as FrameworkPack,
+      nextjsPack as FrameworkPack,
+      elysiaPack as FrameworkPack,
     ],
   },
   {
@@ -71,7 +92,12 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".py", ".pyi"],
       analyze: (ctx) => createPythonAnalysis(ctx),
     },
-    frameworks: [fastapiPack as FrameworkPack, flaskPack as FrameworkPack],
+    frameworks: [
+      fastapiPack as FrameworkPack,
+      flaskPack as FrameworkPack,
+      drfPack as FrameworkPack,
+      starlettePack as FrameworkPack,
+    ],
   },
   {
     pack: {
@@ -79,7 +105,14 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".go"],
       analyze: (ctx) => createGoAnalysis(ctx),
     },
-    frameworks: [ginPack as FrameworkPack, chiPack as FrameworkPack],
+    frameworks: [
+      ginPack as FrameworkPack,
+      chiPack as FrameworkPack,
+      nethttpPack as FrameworkPack,
+      gorillamuxPack as FrameworkPack,
+      echoPack as FrameworkPack,
+      fiberPack as FrameworkPack,
+    ],
   },
   {
     pack: {
@@ -87,7 +120,11 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".java"],
       analyze: (ctx) => createJavaAnalysis(ctx),
     },
-    frameworks: [springPack as FrameworkPack],
+    frameworks: [
+      springPack as FrameworkPack,
+      jaxrsPack as FrameworkPack,
+      micronautPack as FrameworkPack,
+    ],
   },
   {
     pack: {
@@ -95,7 +132,7 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".cs"],
       analyze: (ctx) => createCSharpAnalysis(ctx),
     },
-    frameworks: [aspnetPack as FrameworkPack],
+    frameworks: [aspnetPack as FrameworkPack, fastendpointsPack as FrameworkPack],
   },
   {
     pack: {
@@ -103,7 +140,11 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".rs"],
       analyze: (ctx) => createRustAnalysis(ctx),
     },
-    frameworks: [axumPack as FrameworkPack],
+    frameworks: [
+      axumPack as FrameworkPack,
+      actixPack as FrameworkPack,
+      rocketPack as FrameworkPack,
+    ],
   },
   {
     pack: {
@@ -111,7 +152,11 @@ const REGISTRY: LanguageRegistryEntry[] = [
       extensions: [".php"],
       analyze: (ctx) => createPhpAnalysis(ctx),
     },
-    frameworks: [laravelPack as FrameworkPack],
+    frameworks: [
+      laravelPack as FrameworkPack,
+      symfonyPack as FrameworkPack,
+      slimPack as FrameworkPack,
+    ],
   },
 ];
 
@@ -452,7 +497,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       }
     } else {
       throw new Error(
-        "No supported HTTP framework detected. Supported packs: Express, Fastify, NestJS, FastAPI, Flask, Gin, Chi, Spring Boot, ASP.NET Core, Axum, Laravel.",
+        "No supported HTTP framework detected. Supported packs: Express, Fastify, NestJS, Hono, Koa, Next.js, Elysia, FastAPI, Flask, Django REST Framework, Starlette, Gin, Chi, net/http, gorilla/mux, Echo, Fiber, Spring Boot, JAX-RS (Jersey/Quarkus/Dropwizard), Micronaut, ASP.NET Core, FastEndpoints, Axum, actix-web, Rocket, Laravel, Symfony, Slim.",
       );
     }
   }
