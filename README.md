@@ -49,17 +49,46 @@ indexer  →  language packs (AST + type checker)
 
 | Language   | Framework | Status |
 | ---------- | --------- | ------ |
-| TypeScript / JavaScript | Express, Fastify, NestJS | 0.6.x |
-| Python     | FastAPI, Flask | 0.5.x |
-| Go         | Gin, Chi | 0.5.x |
-| Java       | Spring Boot | 0.6.x |
-| C#         | ASP.NET Core (controllers + minimal API) | 0.6.x |
-| Rust       | Axum | 0.6.x |
-| PHP        | Laravel | 0.6.x |
+| TypeScript / JavaScript | Express, Fastify, NestJS (CommonJS + ESM, monorepo leaves) | 0.8.x |
+| Python     | FastAPI, Flask (Flask-RESTful resources), SQLModel | 0.8.x |
+| Go         | Gin, Chi (go-chi/render) | 0.8.x |
+| Java       | Spring Boot (service return following, SSE events) | 0.8.x |
+| C#         | ASP.NET Core (controllers + minimal API) | 0.8.x |
+| Rust       | Axum | 0.8.x |
+| PHP        | Laravel (resources, transformers, facades, downloads) | 0.8.x |
 
 HTTP is fully supported; SSE endpoints are emitted with the canonical
 `x-protocol: "sse"` extension and a `text/event-stream` media type carrying
-`itemSchema`.
+`itemSchema` (including named Spring `SseEmitter` events when the event name
+and payload type are statically provable).
+
+#### 0.8.0 real-world hardening
+
+The inference engine was validated against dozens of real, complex open-source
+backends (Koel, Bagisto, Snipe-IT, apipost-server, eladmin, novel-plus,
+Redash, Apache Superset, CleanArchitecture, hackathon-starter, the RealWorld
+family, go-chi/gin examples, Platformatic and others). Highlights:
+
+- **CommonJS Express** apps are traced like ESM: `require('express')`,
+  mounted sub-routers, middleware arrays, `module.exports` controller objects,
+  chained `Router().use()` composition and `res.render`/`res.redirect`.
+- **Monorepo leaf discovery**: a root with no server framework probes one
+  level of `packages/*`, `apps/*`, `services/*` and workspace globs, then
+  aggregates supported leaves into one document.
+- **Go**: `render.Render` / `render.RenderList` follow constructor return
+  structs; Gin `c.JSON` follows constructors and service calls; receiver
+  method handlers and qualified registration helpers resolve.
+- **Spring**: handlers returning `service.method()` follow the bean
+  implementation through generics and `ResponseEntity` / `Page` envelopes;
+  named SSE events extract their payload DTOs.
+- **Laravel**: array-callable and `Route::controller()->group()` handlers,
+  API Resources/transformers/static helpers, `JsonResponse`, `view()` HTML,
+  Facade chains and binary downloads (`application/octet-stream`).
+- **Python/.NET**: SQLModel models, FastAPI `Annotated[..., Depends]`
+  aliases and `Path(alias=...)`, Flask-RESTful `add_resource`, and ASP.NET
+  minimal-API `MapGet/MapPost` groups.
+- Path parameters default to the OpenAPI string segment type; duplicate
+  operationIds are qualified and disambiguated in every pack.
 
 The TypeScript/JavaScript layer uses the TypeScript compiler API (an optional
 peer dependency; the pack degrades to syntactic analysis with explicit gaps
