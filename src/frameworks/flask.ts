@@ -64,7 +64,7 @@ interface FlaskSite {
   instanceId: string;
   methods: string[];
   rawPath: string;
-  decorator: TsNode;
+  decorator?: TsNode;
   call: TsNode;
   fn: PyFunction;
   file: string;
@@ -381,6 +381,58 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
       }
     }
 
+    // Flask-RESTful: track Api instances (including Api subclasses and the
+    // no-arg `Api()` form wired later via `api.init_app(app)`). `apis` maps
+    // <file>::<api-var> -> wrapped app/blueprint instance id (null until wired).
+    const apiClassNames = new Set<string>(["Api"]);
+    for (const cls of analysis.classes) {
+      if (cls.bases.some((b) => marshBaseName(b) === "Api")) apiClassNames.add(cls.name);
+    }
+    const apis = new Map<string, string | null>();
+    const apiVars = new Map<string, { file: string; name: string }>();
+    for (const file of analysis.files.values()) {
+      for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+        const target = assignment.namedChildren[0];
+        const value = assignment.namedChildren[assignment.namedChildren.length - 1];
+        if (!target || target.type !== "identifier" || value?.type !== "call") continue;
+        const ctor = callName(value.namedChildren[0] ?? null);
+        if (!ctor || !apiClassNames.has(ctor)) continue;
+        const wrappedArg = positionalArguments(value)[0];
+        const wrapped = wrappedArg ? resolveInstanceRef(file.path, wrappedArg) : null;
+        const key = `${file.path}::${target.text}`;
+        apis.set(key, wrapped?.id ?? null);
+        apiVars.set(key, { file: file.path, name: target.text });
+      }
+    }
+
+    // Resolve an api variable reference (possibly imported) to its local key.
+    const resolveApiKey = (file: string, node: TsNode): string | null => {
+      if (node.type !== "identifier") return null;
+      const local = `${file}::${node.text}`;
+      if (apis.has(local)) return local;
+      const pyFile = analysis.files.get(file);
+      const imported = pyFile?.imports.get(node.text);
+      if (imported?.importedName) {
+        const targetFile = moduleToFile.get(imported.module);
+        const target = targetFile ? `${targetFile}::${imported.importedName}` : null;
+        if (target && apis.has(target)) return target;
+      }
+      return null;
+    };
+
+    // `api.init_app(app | blueprint)` wires a no-arg Api to its instance.
+    for (const file of analysis.files.values()) {
+      for (const call of findAll(file.root, (n) => n.type === "call")) {
+        const mc = methodCall(call);
+        if (!mc || mc.receiver.type !== "identifier" || mc.method !== "init_app") continue;
+        const key = resolveApiKey(file.path, mc.receiver);
+        if (!key || apis.get(key)) continue;
+        const target = positionalArguments(call)[0];
+        const wrapped = target ? resolveInstanceRef(file.path, target) : null;
+        if (wrapped) apis.set(key, wrapped.id);
+      }
+    }
+
     // Pass 2: resolve registration edges and server hints now that every
     // app/blueprint instance is visible.
     for (const file of analysis.files.values()) {
@@ -468,6 +520,83 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
           file: fn.file,
         });
       }
+    }
+
+    // Flask-RESTful: `api.add_resource(ResourceClass, "/path", ...)` and any
+    // Api subclass add_* helper (e.g. redash's add_org_resource). Each HTTP
+    // method on the Resource subclass becomes an operation on the api's wrapped
+    // app/blueprint (an unwired/no-arg Api defaults to the app root).
+    const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete"]);
+    const fnByNode = new Map(analysis.functions.map((f) => [f.node, f]));
+    const resolveClassNode = (file: string, node: TsNode | undefined): TsNode | null => {
+      if (!node || node.type !== "identifier") return null;
+      const pyFile = analysis.files.get(file);
+      if (!pyFile) return null;
+      const local = findAll(pyFile.root, (n) => n.type === "class_definition").find(
+        (cn) => cn.namedChildren[0]?.text === node.text,
+      );
+      if (local) return local;
+      const imported = pyFile.imports.get(node.text);
+      if (imported?.importedName) {
+        const targetFile = moduleToFile.get(imported.module);
+        const tf = targetFile ? analysis.files.get(targetFile) : null;
+        if (tf) {
+          return (
+            findAll(tf.root, (n) => n.type === "class_definition").find(
+              (cn) => cn.namedChildren[0]?.text === node.text,
+            ) ?? null
+          );
+        }
+      }
+      return null;
+    };
+    for (const file of analysis.files.values()) {
+      for (const call of findAll(file.root, (n) => n.type === "call")) {
+        const mc = methodCall(call);
+        if (!mc || mc.receiver.type !== "identifier") continue;
+        const apiKey = resolveApiKey(file.path, mc.receiver);
+        if (!apiKey || !/^add/.test(mc.method)) continue;
+        const args = positionalArguments(call);
+        const clsNode = resolveClassNode(file.path, args[0]);
+        if (!clsNode) continue;
+        // Which HTTP methods does the Resource class implement?
+        const present = new Map<string, TsNode>();
+        for (const def of findAll(clsNode, (n) => n.type === "function_definition")) {
+          const name = def.namedChildren[0]?.text;
+          if (name && HTTP_METHODS.has(name) && !present.has(name)) present.set(name, def);
+        }
+        if (present.size === 0) continue;
+        const wrappedId = apis.get(apiKey) ?? null;
+        for (const pathNode of args.slice(1)) {
+          const rawPath = literalString(pathNode);
+          if (rawPath === null) continue;
+          for (const [method, methodNode] of present) {
+            const fn = fnByNode.get(methodNode);
+            if (!fn) continue;
+            sites.push({
+              instanceId: wrappedId ?? "flask-restful-root",
+              methods: [method],
+              rawPath,
+              call,
+              fn,
+              file: file.path,
+            });
+          }
+        }
+      }
+    }
+    // An unwired/no-arg Api serves routes at the app root (prefix "").
+    if (
+      sites.some((s) => s.instanceId === "flask-restful-root") &&
+      !instances.has("flask-restful-root")
+    ) {
+      instances.set("flask-restful-root", {
+        id: "flask-restful-root",
+        file: "",
+        name: "flask-restful-root",
+        kind: "app",
+        prefix: "",
+      });
     }
 
     const orphanBlueprints = new Set<string>();
@@ -708,7 +837,7 @@ function buildFlaskRoute(
   const confidence: Confidence = gaps.size ? "medium" : "high";
   const origin: SourceLocation = {
     file,
-    line: site.decorator.startPosition.row + 1,
+    line: (site.decorator ?? fn.node).startPosition.row + 1,
     symbol: fn.name,
   };
 
