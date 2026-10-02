@@ -160,7 +160,12 @@ function parseFunction(node: TsNode, file: string, decorated: TsNode | null, dec
 
 function collectImports(root: TsNode): Map<string, PyImportedName> {
   const imports = new Map<string, PyImportedName>();
-  for (const statement of root.namedChildren) {
+  // Python allows imports at any nesting level (inside functions, conditionals,
+  // try/except blocks). Collect every import statement in the file recursively
+  // so local bindings referenced later in the same file resolve correctly.
+  for (const statement of findAll(root, (n) =>
+    n.type === "import_statement" || n.type === "import_from_statement",
+  )) {
     if (statement.type === "import_statement") {
       for (const imported of findAll(statement, (n) =>
         ["dotted_name", "aliased_import"].includes(n.type),

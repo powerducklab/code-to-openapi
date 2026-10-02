@@ -137,6 +137,18 @@ function callName(node: TsNode | null): string | null {
   return null;
 }
 
+// Resolve the callable referenced by a Depends(...) / Security(...) argument to
+// a bare function/class name. Handles both `Depends(get_current_user)` and
+// `Depends(deps.get_current_user)` (module-qualified attribute references).
+// Factory calls such as `Depends(get_repository(Repo))` return null because the
+// inner callable is not statically named.
+function depNameOf(node: TsNode | null): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") return node.text;
+  if (node.type === "attribute") return node.namedChildren[1]?.text ?? null;
+  return null;
+}
+
 function annotatedMetadata(param: PyParam): TsNode[] {
   if (!param.annotation) return [];
   const generic =
@@ -248,6 +260,22 @@ function numericLiteral(node: TsNode | null): number | null {
   if (node.type === "float") {
     const value = Number.parseFloat(node.text);
     return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+// Resolve an HTTP status code given either as a literal integer or as a
+// starlette/fastapi `status.HTTP_<CODE>_<NAME>` constant attribute (e.g.
+// status.HTTP_204_NO_CONTENT, starlette.status.HTTP_404_NOT_FOUND). Returns
+// null for anything we cannot pin to a concrete code.
+function statusCodeValue(node: TsNode | null): number | null {
+  if (!node) return null;
+  const direct = literalInteger(node);
+  if (direct !== null) return direct;
+  const match = /HTTP_(\d{3})/.exec(node.text);
+  if (match) {
+    const code = Number.parseInt(match[1]!, 10);
+    return Number.isFinite(code) ? code : null;
   }
   return null;
 }
@@ -725,9 +753,9 @@ function buildRoute(
         if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
         const nested = injectionKind(depParam);
         if (nested?.kind === "Depends") {
-          const nestedArg = positionalArguments(nested.call)[0];
-          if (nestedArg?.type === "identifier") {
-            expandDependency(nestedArg.text, owner, seen, depth + 1);
+          const nestedName = depNameOf(positionalArguments(nested.call)[0] ?? null);
+          if (nestedName) {
+            expandDependency(nestedName, owner, seen, depth + 1);
           }
           continue;
         }
@@ -744,9 +772,9 @@ function buildRoute(
         if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
         const nested = injectionKind(depParam);
         if (nested?.kind === "Depends") {
-          const nestedArg = positionalArguments(nested.call)[0];
-          if (nestedArg?.type === "identifier") {
-            expandDependency(nestedArg.text, depFn.file, seen, depth + 1);
+          const nestedName = depNameOf(positionalArguments(nested.call)[0] ?? null);
+          if (nestedName) {
+            expandDependency(nestedName, depFn.file, seen, depth + 1);
           }
           continue;
         }
@@ -770,12 +798,13 @@ function buildRoute(
         const inner = annotatedInnerType(param);
         if (inner?.type === "identifier") depArg = inner;
       }
-      if (depArg?.type === "identifier") {
+      const depName = depNameOf(depArg);
+      if (depName) {
         const binding = securityBindings.find(
-          (candidate) => candidate.file === file && candidate.name === depArg.text,
+          (candidate) => candidate.file === file && candidate.name === depName,
         );
         if (binding) security.push({ [binding.schemeName]: [] });
-        expandDependency(depArg.text, file, new Set(), 0);
+        expandDependency(depName, file, new Set(), 0);
       }
       continue;
     }
@@ -914,7 +943,6 @@ function buildRoute(
     if (parameterKeys.has(key)) parameters.splice(i, 1);
     else parameterKeys.add(key);
   }
-
   // Request body.
   let requestBody: RouteCandidate["requestBody"];
   if (formFields.size) {
@@ -1094,7 +1122,7 @@ function buildResponses(
   const responses: RouteCandidate["responses"] = [];
   const { call: decoratorCall, fn } = site;
   const statusNode = keywordArgument(decoratorCall, "status_code");
-  const successStatus = statusNode ? String(literalInteger(statusNode) ?? 200) : "200";
+  const successStatus = statusNode ? String(statusCodeValue(statusNode) ?? 200) : "200";
 
   // 204 No Content: explicitly empty success response.
   if (successStatus === "204") {
@@ -1169,7 +1197,7 @@ function buildResponses(
     if (excName !== "HTTPException") continue;
     const statusKw = keywordArgument(excCall, "status_code");
     const statusNode = statusKw ?? positionalArguments(excCall)[0] ?? null;
-    const status = statusNode ? literalInteger(statusNode) : null;
+    const status = statusNode ? statusCodeValue(statusNode) : null;
     if (!status || status < 400) continue;
     const statusKey = String(status);
     if (responses.some((r) => r.statusCode === statusKey)) continue;

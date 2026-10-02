@@ -19,7 +19,7 @@ import type {
   RouteParameter,
   SourceLocation,
 } from "../core/types.js";
-import type { PythonAnalysis, PyFunction } from "../lang/python/index.js";
+import type { PythonAnalysis, PyClass, PyFunction } from "../lang/python/index.js";
 import { isLooseLiteralSchema, literalToSchema } from "../lang/python/schema.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
@@ -85,6 +85,187 @@ function callName(node: TsNode | null): string | null {
   return null;
 }
 
+type JsonSchemaLocal = Record<string, unknown>;
+
+interface MarshmallowIndex {
+  /** Marshmallow Schema subclass name -> built component schema. */
+  componentsByName: Map<string, JsonSchemaLocal>;
+  /** Variable bound to a schema instance (`post_schema = PostSchema()`) -> class name. */
+  instanceToClass: Map<string, string>;
+  /** All known marshmallow Schema subclass names. */
+  classNames: Set<string>;
+  /** Full analysis, used to resolve parent classes. */
+  analysis: PythonAnalysis;
+}
+
+// Base class tails that identify a marshmallow Schema (including the
+// `ma.Schema` / `ma.SQLAlchemySchema` attribute forms and inherited subclasses).
+const MARSH_BASE_RE = /(^|\.)(Schema|SQLAlchemySchema|SQLAlchemyAutoSchema|ModelSchema)$/;
+
+function marshBaseName(base: TsNode): string | null {
+  if (base.type === "identifier") return base.text;
+  if (base.type === "attribute") return base.namedChildren[1]?.text ?? null;
+  return null;
+}
+
+// Map a marshmallow field call (`ma.String(...)`, `ma.Nested(UserSchema)`, ...)
+// to a JSON Schema. `ma.auto_field` and unknown field types yield an empty
+// schema (an honest, shape-less gap) rather than invented types.
+function marshFieldSchema(
+  call: TsNode,
+  index: MarshmallowIndex,
+  seen: Set<string>,
+): JsonSchemaLocal {
+  const name = callName(call.namedChildren[0] ?? null);
+  if (!name) return {};
+  switch (name) {
+    case "String":
+    case "Url":
+    case "URL":
+    case "Email":
+    case "UUID":
+      return { type: "string" };
+    case "Integer":
+      return { type: "integer" };
+    case "Boolean":
+      return { type: "boolean" };
+    case "Float":
+    case "Number":
+    case "Decimal":
+      return { type: "number" };
+    case "DateTime":
+      return { type: "string", format: "date-time" };
+    case "Date":
+      return { type: "string", format: "date" };
+    case "Time":
+      return { type: "string", format: "time" };
+    case "Nested": {
+      const inner = positionalArguments(call)[0] ?? null;
+      const innerName = callName(inner);
+      if (innerName && index.classNames.has(innerName)) {
+        const ref: JsonSchemaLocal = { $ref: `#/components/schemas/${innerName}` };
+        const many = keywordArgument(call, "many");
+        return many ? { type: "array", items: ref } : ref;
+      }
+      return {};
+    }
+    case "List": {
+      const inner = positionalArguments(call)[0] ?? null;
+      const innerSchema = inner && inner.type === "call" ? marshFieldSchema(inner, index, seen) : {};
+      return { type: "array", items: innerSchema };
+    }
+    default:
+      // auto_field, Raw, unknown field types: leave shape unspecified.
+      return {};
+  }
+}
+
+function buildMarshClassSchema(
+  cls: PyClass,
+  index: MarshmallowIndex,
+  seen: Set<string>,
+): JsonSchemaLocal {
+  const existing = index.componentsByName.get(cls.name);
+  if (existing) return existing;
+  if (seen.has(cls.name)) return { type: "object", properties: {} };
+  seen.add(cls.name);
+
+  const properties: Record<string, JsonSchemaLocal> = {};
+  const required: string[] = [];
+
+  // Inherit fields from marshmallow parent classes first (e.g. UpdateUserSchema
+  // extends UserSchema).
+  for (const base of cls.bases) {
+    const baseName = marshBaseName(base);
+    if (!baseName || !index.classNames.has(baseName) || baseName === cls.name) continue;
+    const parent = index.analysis.classes.find((c) => c.name === baseName);
+    if (!parent) continue;
+    const parentSchema = buildMarshClassSchema(parent, index, seen);
+    const parentProps = (parentSchema.properties ?? {}) as Record<string, JsonSchemaLocal>;
+    for (const [key, value] of Object.entries(parentProps)) properties[key] = value;
+    for (const key of ((parentSchema.required as string[]) ?? [])) required.push(key);
+  }
+
+  for (const field of cls.fields) {
+    const call = field.default;
+    if (!call || call.type !== "call") continue;
+    properties[field.name] = marshFieldSchema(call, index, seen);
+    if (keywordArgument(call, "required")?.type === "true") required.push(field.name);
+  }
+
+  const schema: JsonSchemaLocal = {
+    type: "object",
+    properties,
+    ...(required.length ? { required: [...new Set(required)] } : {}),
+  };
+  index.componentsByName.set(cls.name, schema);
+  return schema;
+}
+
+// Discover marshmallow Schema subclasses (fixpoint through inheritance) and the
+// schema instances bound to local variables, then build explicit components.
+// Only fields declared as `ma.<Type>(...)` assignments are emitted; SQLAlchemy
+// `ma.auto_field(...)` fields keep an empty, honest schema.
+function buildMarshmallowIndex(analysis: PythonAnalysis): MarshmallowIndex {
+  const index: MarshmallowIndex = {
+    componentsByName: new Map(),
+    instanceToClass: new Map(),
+    classNames: new Set(),
+    analysis,
+  };
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const cls of analysis.classes) {
+      if (index.classNames.has(cls.name)) continue;
+      const isMarshBase = cls.bases.some((base) => {
+        const text = base.text.trim();
+        return MARSH_BASE_RE.test(text) || index.classNames.has(marshBaseName(base) ?? "");
+      });
+      if (isMarshBase) {
+        index.classNames.add(cls.name);
+        changed = true;
+      }
+    }
+  }
+
+  // `x = PostSchema()` instance bindings.
+  for (const file of analysis.files.values()) {
+    for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+      const target = assignment.namedChildren[0];
+      const value = assignment.namedChildren[assignment.namedChildren.length - 1];
+      if (!target || target.type !== "identifier" || !value || value.type !== "call") continue;
+      const ctor = callName(value.namedChildren[0] ?? null);
+      if (ctor && index.classNames.has(ctor)) {
+        index.instanceToClass.set(target.text, ctor);
+      }
+    }
+  }
+
+  for (const cls of analysis.classes) {
+    if (index.classNames.has(cls.name)) buildMarshClassSchema(cls, index, new Set());
+  }
+
+  return index;
+}
+
+// Resolve a decorator argument (`post_schema`, `PostSchema()`, `ma.Schema()`)
+// to a known marshmallow component class name.
+function resolveMarshRef(node: TsNode | null, index: MarshmallowIndex): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") {
+    const viaInstance = index.instanceToClass.get(node.text);
+    return viaInstance ?? (index.classNames.has(node.text) ? node.text : null);
+  }
+  if (node.type === "call" || node.type === "attribute") {
+    const ctor = callName(node.namedChildren[0] ?? node);
+    return ctor && index.classNames.has(ctor) ? ctor : null;
+  }
+  return null;
+}
+
+
 function flaskPathParams(rawPath: string): RouteParameter[] {
   const parameters: RouteParameter[] = [];
   const regex = /<(?:([A-Za-z]+):)?([A-Za-z_][A-Za-z0-9_]*)>/g;
@@ -128,6 +309,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
     const unresolved: ExtractionResult["unresolved"] = [];
     const securitySchemes: ExtractionResult["securitySchemes"] = [];
     const servers: ExtractionResult["servers"] = [];
+    const marsh = buildMarshmallowIndex(analysis);
 
     const byVar = (file: string, name: string) =>
       instances.get(`${file}::${name}`);
@@ -168,6 +350,10 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
       return targetFile ? byVar(targetFile, attr.text) ?? null : null;
     };
 
+    // Pass 1: register every Flask app and Blueprint across all files first.
+    // Cross-file registration edges (app.py registering a blueprint defined in
+    // another module) must resolve against a fully populated instance table, so
+    // instance discovery and edge resolution run as separate passes.
     for (const file of analysis.files.values()) {
       for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
         const target = assignment.namedChildren[0];
@@ -193,7 +379,11 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
           });
         }
       }
+    }
 
+    // Pass 2: resolve registration edges and server hints now that every
+    // app/blueprint instance is visible.
+    for (const file of analysis.files.values()) {
       for (const call of findAll(file.root, (n) => n.type === "call")) {
         const mc = methodCall(call);
         if (!mc || mc.receiver.type !== "identifier") continue;
@@ -294,7 +484,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
         prefix = resolved;
       }
       for (const method of site.methods) {
-        routes.push(buildFlaskRoute(site, joinPrefix(prefix, site.rawPath), method));
+        routes.push(buildFlaskRoute(site, joinPrefix(prefix, site.rawPath), method, marsh));
       }
     }
 
@@ -322,7 +512,11 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
       });
     }
 
-    return { routes: [...deduped.values()], unresolved, components: [], securitySchemes, servers };
+    const components: ExtractionResult["components"] = [...marsh.componentsByName.entries()].map(
+      ([name, schema]) => ({ name, schema }),
+    );
+
+    return { routes: [...deduped.values()], unresolved, components, securitySchemes, servers };
   },
 };
 
@@ -346,7 +540,12 @@ function guardedMethod(node: TsNode): string | null {
   return null;
 }
 
-function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): RouteCandidate {
+function buildFlaskRoute(
+  site: FlaskSite,
+  fullPath: string,
+  method: string,
+  marsh: MarshmallowIndex,
+): RouteCandidate {
   const { fn, file } = site;
   const parameters = flaskPathParams(site.rawPath);
   const gaps = new Set<GapCode>();
@@ -453,6 +652,55 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
 
   // Responses.
   const responses = buildFlaskResponses(fn, gaps, method);
+
+  // APIFairy decorators carry explicit marshmallow models that the return-value
+  // scan cannot infer; apply them on top of, and reconcile against, the
+  // return-statement evidence.
+  const apifairy = scanApifairyDecorators(fn, marsh);
+  if (apifairy.requestClass) {
+    requestBody = {
+      required: true,
+      confidence: "high",
+      content: [
+        { mediaType: "application/json", schema: { $ref: `#/components/schemas/${apifairy.requestClass}` } },
+      ],
+    };
+    gaps.delete("body-schema-unknown");
+    gaps.delete("body-unknown");
+  }
+  if (apifairy.success) {
+    const { className, statusCode, paginated } = apifairy.success;
+    const schema: JsonSchemaLocal = paginated
+      ? {
+          type: "object",
+          properties: {
+            data: { type: "array", items: { $ref: `#/components/schemas/${className}` } },
+          },
+        }
+      : { $ref: `#/components/schemas/${className}` };
+    const upsert = {
+      statusCode,
+      description: "",
+      confidence: "high" as Confidence,
+      content: [{ mediaType: "application/json", schema }],
+    };
+    const idx = responses.findIndex((r) => r.statusCode === statusCode);
+    if (idx >= 0) responses[idx] = upsert;
+    else responses.push(upsert);
+    gaps.delete("response-unknown");
+    gaps.delete("response-schema-unknown");
+  }
+  for (const error of apifairy.errors) {
+    if (!responses.some((r) => r.statusCode === error.statusCode)) {
+      responses.push({
+        statusCode: error.statusCode,
+        description: error.description,
+        confidence: "high",
+        content: [],
+      });
+    }
+  }
+
   const isSse = responses.some((r) =>
     r.content?.some((m) => m.mediaType === "text/event-stream"),
   );
@@ -479,6 +727,48 @@ function buildFlaskRoute(site: FlaskSite, fullPath: string, method: string): Rou
     handlerSource: boundedSource(fn.decorated ?? fn.node),
     ...(isSse ? { extensions: { "x-protocol": "sse" } } : {}),
   };
+}
+
+interface ApifairyEvidence {
+  success: { className: string; statusCode: string; paginated: boolean } | null;
+  requestClass: string | null;
+  errors: Array<{ statusCode: string; description: string }>;
+}
+
+// Inspect APIFairy / marshmallow decorators stacked on a handler:
+//   @response(schema[, status])        -> success response body model
+//   @paginated_response(schema, ...)  -> paginated envelope response model
+//   @body(schema)                     -> request body model
+//   @other_responses({404: "..."})      -> named error responses
+// These carry explicit marshmallow models the return-statement scan cannot see.
+function scanApifairyDecorators(fn: PyFunction, marsh: MarshmallowIndex): ApifairyEvidence {
+  const evidence: ApifairyEvidence = { success: null, requestClass: null, errors: [] };
+  for (const decorator of fn.decorators) {
+    const callNode = decorator.namedChildren[0];
+    if (!callNode || callNode.type !== "call") continue;
+    const name = callName(callNode.namedChildren[0] ?? null);
+    if (!name) continue;
+    const args = positionalArguments(callNode);
+    if (name === "response" || name === "paginated_response") {
+      const className = resolveMarshRef(args[0] ?? null, marsh);
+      if (!className) continue;
+      const statusNode = args[1] ?? null;
+      const statusCode = statusNode ? String(literalInteger(statusNode) ?? 200) : "200";
+      evidence.success = { className, statusCode, paginated: name === "paginated_response" };
+    } else if (name === "body") {
+      evidence.requestClass = resolveMarshRef(args[0] ?? null, marsh);
+    } else if (name === "other_responses") {
+      const mapping = args[0] ?? null;
+      if (!mapping || mapping.type !== "dictionary") continue;
+      for (const pair of childrenOfType(mapping, "pair")) {
+        const [key, value] = pair.namedChildren;
+        const status = key ? literalInteger(key) : null;
+        const description = value ? literalString(value) ?? "" : "";
+        if (status) evidence.errors.push({ statusCode: String(status), description });
+      }
+    }
+  }
+  return evidence;
 }
 
 function buildFlaskResponses(
