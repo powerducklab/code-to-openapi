@@ -611,13 +611,15 @@ function collectParameters(
       continue;
     }
 
-    // Scalar handler parameter: route binding if the path declares it.
-    const scalarSchema = phpTypeToSchema(typeNode, model);
+    // Scalar handler parameter: route binding if the path declares it. Route
+    // segments are always strings at the HTTP layer, so an explicitly declared
+    // path parameter is typed {type:"string"} and never carries the
+    // path-param-untyped gap (mirroring the Nest untyped-@Param decision).
     if (pathParams.has(name)) {
-      addParam("path", name, scalarSchema, "high", true);
+      addParam("path", name, { type: "string" }, "high", true);
     } else if (typeNode.type === "primitive_type" && shortType === "string") {
       // Unmatched scalar params are almost always route-bound in Laravel.
-      addParam("path", name, scalarSchema, "medium", true);
+      addParam("path", name, { type: "string" }, "medium", true);
     }
   }
 
@@ -903,6 +905,21 @@ function interpretResponse(
       if (redirectRoot) {
         return { statusCode: "302", description: "", confidence: "high" };
       }
+      // view('page')->with('k', $v): a view chain renders an HTML document.
+      const viewRoot = findFirst(
+        expression,
+        (n) =>
+          n.type === "function_call_expression" &&
+          n.namedChildren.find((c) => c.type === "name")?.text === "view",
+      );
+      if (viewRoot) {
+        return {
+          statusCode: "200",
+          description: "",
+          confidence: "medium",
+          content: [{ mediaType: "text/html", schema: { type: "string" } }],
+        };
+      }
     }
 
     if (method === "noContent" || method === "noContent") {
@@ -967,6 +984,26 @@ function interpretResponse(
           confidence: "medium",
           content: [{ mediaType: "application/json", schema }],
         };
+      }
+    }
+
+    // (new SomeTransformer)->transformRow($model): a controller returns the array
+    // a transformer builds directly. Follow the callee method to its return array.
+    {
+      let receiver: TsNode | undefined = expression.namedChildren[0];
+      while (receiver && receiver.type === "parenthesized_expression") {
+        receiver = receiver.namedChildren[0];
+      }
+      if (receiver?.type === "object_creation_expression") {
+        const schema = followCallToSchema(expression, model, new Set<string>());
+        if (schema) {
+          return {
+            statusCode: "200",
+            description: "",
+            confidence: "medium",
+            content: [{ mediaType: "application/json", schema }],
+          };
+        }
       }
     }
   }
@@ -1036,6 +1073,38 @@ function interpretResponse(
       const args = expression.namedChildren.find((c) => c.type === "arguments");
       const argNodes = args ? childrenOfType(args, "argument") : [];
       return binaryResponse(integerText(argNodes[1]) ?? "200");
+    }
+    // new JsonResponse([...], $status, $headers) — Illuminate/Symfony JSON response
+    // built directly rather than via the response()->json() helper.
+    if (name === "JsonResponse") {
+      const args = expression.namedChildren.find((c) => c.type === "arguments");
+      const argNodes = args ? childrenOfType(args, "argument") : [];
+      const status = integerText(argNodes[1]) ?? "200";
+      const payload = argNodes[0];
+      if (!payload) {
+        return {
+          statusCode: status,
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: {} }],
+        };
+      }
+      const schema = inferValueSchema(payload, model, handler);
+      if (!schema || !Object.keys(schema).length) {
+        gaps.push("response-schema-unknown");
+        return {
+          statusCode: status,
+          description: "",
+          confidence: "low",
+          content: [{ mediaType: "application/json" }],
+        };
+      }
+      return {
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema }],
+      };
     }
     if (name && model.analysis.classes.has(name)) {
       const ref = ensurePhpComponent(name, model);
@@ -1148,9 +1217,17 @@ function inferValueSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode):
   }
 
   if (inner.type === "scoped_call_expression") {
+    // Helper::formatStandardApiResponse(...) / Other::transform(...): follow the
+    // callee to the array it returns when it is statically knowable.
+    const followed = followCallToSchema(inner, model, new Set());
+    if (followed) return followed;
     return inferStaticModel(inner, model);
   }
   if (inner.type === "member_call_expression") {
+    // (new OrderItemsTransformer)->transformRows(...) passed straight to
+    // response()->json(): follow the transformer to the array it returns.
+    const followed = followCallToSchema(inner, model, new Set());
+    if (followed) return followed;
     const method = inner.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
     const chained = inferChainedModel(inner, model);
     if (chained) return chained;
@@ -1561,6 +1638,137 @@ function inferChainedModel(call: TsNode, model: PhpModelIndex): JsonSchema | und
   return method && ITEM_METHODS.has(method) ? ref : { type: "array", items: ref };
 }
 
+/**
+ * Follow a cross-class method call to the array it returns, statically. Used for
+ * transformer rows (`(new AccessoryTransformer)->transformAccessory($m)`) and
+ * static response envelopes (`Helper::formatStandardApiResponse(...)`). Only
+ * literal/assignment-built arrays produce a schema; dynamic model values become
+ * honest `{}` properties. Recursion is bounded by a visited set of
+ * `Class::method` keys and never fabricates leaf types.
+ */
+function followCallToSchema(
+  call: TsNode,
+  model: PhpModelIndex,
+  visited: Set<string>,
+  currentClass?: string | null,
+): JsonSchema | undefined {
+  let className: string | null = null;
+  let methodName: string | null = null;
+
+  if (call.type === "member_call_expression") {
+    let recv: TsNode | undefined = call.namedChildren[0];
+    while (recv && recv.type === "parenthesized_expression") {
+      recv = recv.namedChildren[0];
+    }
+    if (!recv || recv.type !== "object_creation_expression") return undefined;
+    className =
+      recv.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name")?.text ?? null;
+    methodName = call.namedChildren.find((c) => c.type === "name")?.text ?? null;
+  } else if (call.type === "scoped_call_expression") {
+    const qualified = call.namedChildren.find((c) => c.type === "qualified_name");
+    const names = childrenOfType(call, "name");
+    className = qualified
+      ? qualified.text.split("\\").pop() ?? null
+      : names.length >= 2
+        ? names[names.length - 2]?.text ?? null
+        : null;
+    methodName = names[names.length - 1]?.text ?? null;
+  } else {
+    return undefined;
+  }
+
+  if (!className || !methodName) return undefined;
+  if (className === "self" || className === "static") className = currentClass ?? null;
+  className = className?.split("\\").pop() ?? null;
+  if (!className) return undefined;
+
+  return followCalleeToSchema(className, methodName, model, visited);
+}
+
+function followCalleeToSchema(
+  className: string,
+  methodName: string,
+  model: PhpModelIndex,
+  visited: Set<string>,
+): JsonSchema | undefined {
+  const key = `${className}::${methodName}`;
+  if (visited.has(key)) return undefined;
+  const cls = model.analysis.classes.get(className);
+  const methodNode = cls?.methods.get(methodName);
+  if (!cls || !methodNode) return undefined;
+  visited.add(key);
+  return resolveReturnedArray(methodNode, model, visited, className);
+}
+
+function resolveReturnedArray(
+  methodNode: TsNode,
+  model: PhpModelIndex,
+  visited: Set<string>,
+  currentClass?: string | null,
+): JsonSchema | undefined {
+  for (const ret of findAll(methodNode, (n) => n.type === "return_statement")) {
+    const expr = ret.namedChildren.find(
+      (c) =>
+        c.type === "array_creation_expression" ||
+        c.type === "variable_name" ||
+        c.type === "member_call_expression" ||
+        c.type === "scoped_call_expression",
+    );
+    if (!expr) continue;
+    if (expr.type === "array_creation_expression") {
+      return inferArraySchema(expr, model, methodNode);
+    }
+    if (expr.type === "variable_name") {
+      const schema = resolveVariableToObject(expr.text, methodNode, model, visited, currentClass);
+      if (schema) return schema;
+      continue;
+    }
+    // Delegation: `return (new OtherTransformer)->row($x)` / `return Other::env(...)`.
+    const nested = followCallToSchema(expr, model, visited, currentClass);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the object assigned to a returned variable: either a literal
+ * `$x = [ ... ]`, or a series of `$x['key'] = $value` dim assignments (the
+ * shape Laravel transformers and response envelopes are built with).
+ */
+function resolveVariableToObject(
+  varText: string,
+  methodNode: TsNode,
+  model: PhpModelIndex,
+  visited: Set<string>,
+  currentClass?: string | null,
+): JsonSchema | undefined {
+  const properties: Record<string, JsonSchema> = {};
+  let sawDim = false;
+  for (const assignment of findAll(methodNode, (n) => n.type === "assignment_expression")) {
+    const left = assignment.namedChildren[0];
+    const rhs = assignment.namedChildren[1];
+    if (!left || !rhs) continue;
+    if (left.type === "variable_name" && left.text === varText) {
+      if (rhs.type === "array_creation_expression") {
+        const schema = inferArraySchema(rhs, model, methodNode);
+        if (schema) return schema;
+      }
+      continue;
+    }
+    // $x['key'] = rhs  — the variable is the base of a subscript on the LHS.
+    if (left.namedChildren?.some((c) => c.type === "variable_name" && c.text === varText)) {
+      const keyNode = left.namedChildren.find(
+        (c) => c.type === "string" || c.type === "encapsed_string",
+      );
+      const key = keyNode ? phpStringText(keyNode) : null;
+      if (!key) continue;
+      properties[key] = inferArrayValue(rhs, model, methodNode, 0) ?? {};
+      sawDim = true;
+    }
+  }
+  return sawDim ? { type: "object", properties } : undefined;
+}
+
 function integerText(node: TsNode | undefined): string | null {
   if (!node) return null;
   const int = node.type === "integer" ? node : node.namedChildren.find((c) => c.type === "integer");
@@ -1718,14 +1926,12 @@ function parseResourceCall(
       ? collectParameters(methodNode, analysis, model, verb, declaredPathParams)
       : { parameters: [], requestBody: undefined, gaps: [] as GapCode[] };
     const parameters = collected.parameters;
-    // Ensure every binding present in the route URI (parent resources on
-    // collection routes, plus the child on item routes) is declared.
+    // Ensure every binding present in the route URI is declared as a string path
+    // parameter. Route segments are always strings at the HTTP layer, so this is
+    // an honest OpenAPI default and never carries the path-param-untyped gap,
+    // whether or not the controller method itself resolved.
     for (const p of declaredPathParams) {
-      if (
-        methodNode &&
-        ["show", "update", "destroy", "index", "store"].includes(method) &&
-        !parameters.some((prm) => prm.in === "path" && prm.name === p)
-      ) {
+      if (!parameters.some((prm) => prm.in === "path" && prm.name === p)) {
         parameters.push({ name: p, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
       }
     }
