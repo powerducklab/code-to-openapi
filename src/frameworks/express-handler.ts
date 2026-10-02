@@ -296,6 +296,70 @@ function findExportedDeclaration(
 
 export { findExportedDeclaration };
 
+/**
+ * Resolves a property name against CommonJS module exports that are an object
+ * literal (`module.exports = { login(req,res){...} }`) or direct property
+ * assignments (`exports.login = function...`). Returns the function-like node.
+ */
+function findExportedObjectMethod(
+  analysis: TsAnalysis,
+  file: any,
+  name: string,
+): { node: any; file: any } | null {
+  const { ts } = analysis;
+  let found: any;
+
+  const lookInObject = (obj: any) => {
+    if (!obj || !ts.isObjectLiteralExpression(obj)) return;
+    for (const prop of obj.properties) {
+      // Shorthand `{ login }`, method `login(req,res){}`, or `login: function(){}`.
+      const propName =
+        ts.isShorthandPropertyAssignment(prop)
+          ? prop.name.text
+          : ts.isMethodDeclaration(prop) || ts.isPropertyAssignment(prop)
+            ? prop.name?.text
+            : undefined;
+      if (propName !== name) continue;
+      if (ts.isMethodDeclaration(prop)) {
+        found = prop;
+      } else if (ts.isPropertyAssignment(prop)) {
+        found = prop.initializer;
+      } else if (ts.isShorthandPropertyAssignment(prop)) {
+        found = prop.name;
+      }
+      return;
+    }
+  };
+
+  file.forEachChild((child: any) => {
+    if (found) return;
+    if (!ts.isExpressionStatement(child)) return;
+    const expr = child.expression;
+    if (!ts.isBinaryExpression(expr) || expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
+    const lhs = expr.left;
+    // module.exports = { ... }
+    if (
+      ts.isPropertyAccessExpression(lhs) &&
+      lhs.expression.getText(file) === "module" &&
+      lhs.name.text === "exports"
+    ) {
+      lookInObject(expr.right);
+      return;
+    }
+    // exports.login = function... / module.exports.login = function...
+    const lhsText = lhs.getText(file);
+    if (
+      ts.isPropertyAccessExpression(lhs) &&
+      (lhsText === `exports.${name}` || lhsText === `module.exports.${name}`) &&
+      (ts.isFunctionExpression(expr.right) || ts.isArrowFunction(expr.right) || ts.isFunctionDeclaration(expr.right))
+    ) {
+      found = expr.right;
+    }
+  });
+
+  return found ? { node: found, file } : null;
+}
+
 export function resolveHandler(
   analysis: TsAnalysis,
   sourceFile: any,
@@ -328,7 +392,9 @@ export function resolveHandler(
       node.name.text,
       new Set(),
     );
-    return decl;
+    if (decl) return decl;
+    // CommonJS controller object: `module.exports = { login(req,res){} }`.
+    return findExportedObjectMethod(analysis, imported.file, node.name.text);
   }
 
   if (!ts.isIdentifier(node)) return null;
@@ -424,24 +490,26 @@ export function resolveImportedFile(
   });
 
   if (!specifier) {
-    // const x = require('./m')
+    // const x = require('./m') — only accept the require that initializes a
+    // variable whose name matches localName (not the first require in file).
     sourceFile.forEachChild((child: any) => {
       if (specifier) return;
-      const walk = (n: any) => {
+      if (!ts.isVariableStatement(child)) return;
+      for (const decl of child.declarationList.declarations) {
+        if (specifier) return;
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== localName) continue;
+        const init = decl.initializer;
         if (
-          ts.isCallExpression(n) &&
-          ts.isIdentifier(n.expression) &&
-          n.expression.text === "require" &&
-          ts.isStringLiteral(n.arguments[0])
+          init &&
+          ts.isCallExpression(init) &&
+          ts.isIdentifier(init.expression) &&
+          init.expression.text === "require" &&
+          ts.isStringLiteral(init.arguments[0])
         ) {
-          // Binding name validated by caller via enclosing variable; this
-          // coarse pass only resolves relative modules.
-          specifier = n.arguments[0].text;
+          specifier = init.arguments[0].text;
           exportName = "module";
         }
-        ts.forEachChild(n, walk);
-      };
-      walk(child);
+      }
     });
   }
 

@@ -69,6 +69,9 @@ interface FileModel {
   /** local binding -> required/imported module specifier */
   moduleBindings: Map<string, { specifier: string; exportName: string }>;
   routers: Map<string, RouterVar>;
+  /** Anonymous routers for chained `Router().use(a).use(b)` calls, keyed by the
+   *  base Router() call's start position. */
+  anonymousRouters: Map<number, RouterVar>;
   mounts: MountEdge[];
   unscopedMiddleware: MiddlewareRef[];
   scopedMiddleware: Array<MiddlewareRef & { scopePath: string }>;
@@ -161,6 +164,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
 
     for (const model of models.values()) {
       for (const router of model.routers.values()) allRouters.set(router.id, router);
+      for (const router of model.anonymousRouters.values()) allRouters.set(router.id, router);
       routes.push(...model.routes);
       unresolved.push(...model.unresolved);
       listenPorts.push(...model.listenPorts);
@@ -334,6 +338,7 @@ function modelFile(
     expressBindings: new Map(),
     moduleBindings: new Map(),
     routers: new Map(),
+    anonymousRouters: new Map(),
     mounts: [],
     unscopedMiddleware: [],
     scopedMiddleware: [],
@@ -379,6 +384,37 @@ function modelFile(
   });
 
   const visit = (node: any) => {
+    // const express = require('express') (CommonJS): bind the local name to the
+    // express default export so `express()` below registers the app.
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isIdentifier(node.initializer.expression) &&
+      node.initializer.expression.text === "require" &&
+      ts.isStringLiteral(node.initializer.arguments?.[0])
+    ) {
+      const specifier = node.initializer.arguments[0].text;
+      if (specifier === "express" && ts.isIdentifier(node.name)) {
+        model.expressBindings.set(node.name.text, "default");
+      } else if (
+        (specifier === "express/router" || specifier.endsWith("/router")) &&
+        ts.isIdentifier(node.name)
+      ) {
+        model.expressBindings.set(node.name.text, "Router");
+      } else if (specifier.startsWith(".") && ts.isIdentifier(node.name)) {
+        model.moduleBindings.set(node.name.text, { specifier, exportName: "module" });
+      }
+      // const { Router } = require('express')
+      if (specifier === "express" && ts.isObjectBindingPattern(node.name)) {
+        for (const el of node.name.elements) {
+          if (ts.isBindingElement(el) && el.name?.getText?.(source) === "Router") {
+            model.expressBindings.set(el.name.text, "Router");
+          }
+        }
+      }
+    }
+
     // const app = express() / const r = express.Router() / Router()
     if (
       ts.isVariableDeclaration(node) &&
@@ -405,6 +441,20 @@ function modelFile(
           name,
           kind: "router",
         });
+      } else if (isRequireExpressRouterCall(ts, callee)) {
+        // const r = require('express').Router()
+        model.routers.set(name, {
+          id: relId(rel, name),
+          file: rel,
+          name,
+          kind: "router",
+        });
+      }
+      // const api = Router().use(a).use(b) — a chained router held in a
+      // variable; point the name at the anonymous router for the chain.
+      if (!model.routers.has(name)) {
+        const chained = resolveChainRouter(ts, model, node.initializer);
+        if (chained) model.routers.set(name, chained);
       }
       // const r = require('./routes/x')
       if (
@@ -444,12 +494,76 @@ function isRouterFactory(ts: any, callee: any, model: FileModel): boolean {
   return false;
 }
 
+// require('express').Router() — CommonJS inline router factory.
+function isRequireExpressRouterCall(ts: any, callee: any): boolean {
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    callee.name.text === "Router" &&
+    ts.isCallExpression(callee.expression) &&
+    ts.isIdentifier(callee.expression.expression) &&
+    callee.expression.expression.text === "require" &&
+    ts.isStringLiteral(callee.expression.arguments?.[0]) &&
+    callee.expression.arguments[0].text === "express"
+  );
+}
+
+/**
+ * Resolves the router that owns a chained call. `expr` is the receiver of a
+ * `.use()/.get()/...` call. When it chains on `express.Router()` (or
+ * `Router()`), an anonymous router is created once per base factory call and
+ * reused for the whole chain. Returns null for non-router roots.
+ */
+function resolveChainRouter(ts: any, model: FileModel, expr: any): RouterVar | null {
+  // Climb: expr may be a `.use(...)` call chained on a Router() call.
+  let base = expr;
+  let guard = 0;
+  while (
+    base &&
+    ts.isCallExpression(base) &&
+    ts.isPropertyAccessExpression(base.expression) &&
+    guard++ < 20
+  ) {
+    base = base.expression.expression;
+  }
+  // base should now be the Router() factory call (or a named variable).
+  // Only synthesize anonymous routers when the base IS the Router() factory;
+  // named-variable bases (e.g. `api.route("/x").get()`) are left to the
+  // dedicated route() handling and must not be re-interpreted here.
+  if (!base || !ts.isCallExpression(base)) return null;
+  const callee = base.expression;
+  const isFactory =
+    (ts.isIdentifier(callee) && model.expressBindings.get(callee.text) === "Router") ||
+    (ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "Router" &&
+      ((ts.isIdentifier(callee.expression) &&
+        model.expressBindings.get(callee.expression.text) === "default") ||
+        isRequireExpressRouterCall(ts, callee)));
+  if (!isFactory) return null;
+  const key = base.getStart(model.source);
+  let r = model.anonymousRouters.get(key);
+  if (!r) {
+    r = {
+      id: relId(model.rel, `anon${key}`),
+      file: model.rel,
+      name: `<router@${key}>`,
+      kind: "router" as const,
+    };
+    model.anonymousRouters.set(key, r);
+  }
+  return r;
+}
+
 function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
   const { ts } = analysis;
   if (!ts.isPropertyAccessExpression(node.expression)) return;
   const access = node.expression;
   const rootName = access.expression.getText(model.source);
-  const router = model.routers.get(rootName);
+  let router: RouterVar | undefined = model.routers.get(rootName);
+  // Chained `Router().use(a).use(b)`: the root is the Router() factory call,
+  // not a variable. Resolve (or create) an anonymous router for the chain.
+  if (!router) {
+    router = resolveChainRouter(ts, model, access.expression) ?? undefined;
+  }
   const method = access.name.text;
   const origin: SourceLocation = {
     file: model.rel,
@@ -648,6 +762,10 @@ function resolveMountTarget(
           if (exported && targetModel.routers.has(exported)) {
             return targetModel.routers.get(exported)!.id;
           }
+          // export default Router().use('/api', api) — the default export is a
+          // router chain expression; resolve to its anonymous router.
+          const anonId = findAnonymousExportedRouter(analysis, targetModel);
+          if (anonId) return anonId;
         }
       }
     }
@@ -656,6 +774,18 @@ function resolveMountTarget(
   // router node by reusing the parent with the prefix (routes declared on the
   // inline router are rare and surface as unresolved).
   return null;
+}
+
+function findAnonymousExportedRouter(analysis: TsAnalysis, model: FileModel): string | null {
+  const { ts } = analysis;
+  let id: string | null = null;
+  model.source.forEachChild((child: any) => {
+    if (id) return;
+    if (!ts.isExportAssignment(child)) return;
+    const router = resolveChainRouter(ts, model, child.expression);
+    if (router) id = router.id;
+  });
+  return id;
 }
 
 function findExportedRouterName(
