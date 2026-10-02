@@ -49,18 +49,40 @@ indexer  →  language packs (AST + type checker)
 
 | Language   | Framework | Status |
 | ---------- | --------- | ------ |
-| TypeScript / JavaScript | Express, Fastify, NestJS (CommonJS + ESM, monorepo leaves) | 0.8.x |
-| Python     | FastAPI, Flask (Flask-RESTful resources), SQLModel | 0.8.x |
-| Go         | Gin, Chi (go-chi/render) | 0.8.x |
-| Java       | Spring Boot (service return following, SSE events) | 0.8.x |
-| C#         | ASP.NET Core (controllers + minimal API) | 0.8.x |
-| Rust       | Axum | 0.8.x |
-| PHP        | Laravel (resources, transformers, facades, downloads) | 0.8.x |
+| TypeScript / JavaScript | Express, Fastify, NestJS, Hono (Workers/Bun/Deno), Koa, Next.js route handlers, Elysia (Bun) | 0.9.x |
+| Python     | FastAPI, Flask (Flask-RESTful resources), Django REST Framework, Starlette, SQLModel | 0.9.x |
+| Go         | Gin, Chi (go-chi/render), net/http ServeMux, gorilla/mux, Echo, Fiber | 0.9.x |
+| Java       | Spring Boot, JAX-RS (Jersey/Quarkus/Dropwizard), Micronaut | 0.9.x |
+| C#         | ASP.NET Core (controllers + minimal API), FastEndpoints | 0.9.x |
+| Rust       | Axum, actix-web, Rocket | 0.9.x |
+| PHP        | Laravel, Symfony, Slim | 0.9.x |
 
 HTTP is fully supported; SSE endpoints are emitted with the canonical
 `x-protocol: "sse"` extension and a `text/event-stream` media type carrying
 `itemSchema` (including named Spring `SseEmitter` events when the event name
 and payload type are statically provable).
+
+#### 0.9.0 framework expansion
+
+Seventeen new framework packs were added and validated against real
+open-source projects, all sharing the same confidence scoring, component
+reuse and honest-gap machinery:
+
+- **TypeScript/JavaScript**: Hono (including Cloudflare Workers/Bun/Deno and
+  `@hono/zod-openapi` route definitions), Koa with `koa-router`/`@koa/router`
+  (ESM and CommonJS), Next.js file-based routes (App Router `route.ts`
+  handlers and Pages Router `pages/api`), and Elysia (Bun).
+- **Python**: Django REST Framework (function and class-based views,
+  ViewSets with routers and `@action`, Serializer schemas) and Starlette
+  (`Route`/`WebSocketRoute` registration).
+- **Go**: standard library `net/http` ServeMux (Go 1.22 method patterns),
+  gorilla/mux, Echo and Fiber.
+- **JVM**: one shared JAX-RS pack covering Jersey, Quarkus RESTEasy Reactive
+  and Dropwizard (both `jakarta.ws.rs` and legacy `javax.ws.rs`), plus
+  Micronaut.
+- **Rust/.NET**: actix-web and Rocket macro routing; top-level ASP.NET
+  Minimal API (`MapGroup`, `TypedResults`) and FastEndpoints.
+- **PHP**: Symfony (`#[Route]` attributes, `MapRequestPayload`) and Slim.
 
 #### 0.8.0 real-world hardening
 
