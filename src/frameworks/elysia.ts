@@ -179,7 +179,8 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       model.instanceVars.set(node.name.text, `${rel}::${node.name.text}`);
     }
 
-    // app.group("/api", (api) => { ... })
+    // app.group("/api", (api) => { ... }) — or with an options object
+    // between prefix and callback: .group("/api", { detail }, (api) => ...).
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -187,10 +188,12 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       node.arguments[0] &&
       ts.isStringLiteralLike(node.arguments[0])
     ) {
-      const cb = node.arguments[1];
+      const cb = [...node.arguments].find(
+        (a: any) =>
+          a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a)),
+      );
       if (
         cb &&
-        (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) &&
         cb.parameters[0] &&
         ts.isIdentifier(cb.parameters[0].name)
       ) {

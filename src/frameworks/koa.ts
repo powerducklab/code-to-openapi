@@ -181,6 +181,26 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     }
   });
 
+  // const Router = require("koa-router") / require("@koa/router")
+  source.forEachChild((child: any) => {
+    if (!ts.isVariableStatement(child)) return;
+    for (const decl of child.declarationList.declarations) {
+      if (
+        ts.isIdentifier(decl.name) &&
+        decl.initializer &&
+        ts.isCallExpression(decl.initializer) &&
+        ts.isIdentifier(decl.initializer.expression) &&
+        decl.initializer.expression.text === "require" &&
+        decl.initializer.arguments[0] &&
+        ts.isStringLiteralLike(decl.initializer.arguments[0]) &&
+        (decl.initializer.arguments[0].text === "koa-router" ||
+          decl.initializer.arguments[0].text === "@koa/router")
+      ) {
+        model.ctorNames.add(decl.name.text);
+      }
+    }
+  });
+
   const visit = (node: any) => {
     // const router = new Router({ prefix: "/api" })
     if (
@@ -245,10 +265,16 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
   if (!VERBS.has(method)) return;
   const pathArg = node.arguments[0];
   if (!pathArg || !ts.isStringLiteralLike(pathArg)) return;
-  const handlerNode = [...node.arguments]
-    .slice(1)
-    .reverse()
-    .find((a: any) => a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a)));
+  const isHandlerLike = (a: any): boolean =>
+    Boolean(
+      a &&
+        (ts.isArrowFunction(a) ||
+          ts.isFunctionExpression(a) ||
+          ts.isIdentifier(a) ||
+          ts.isPropertyAccessExpression(a)),
+    );
+  // The handler is the LAST handler-like argument (middlewares precede it).
+  const handlerNode = [...node.arguments].slice(1).filter(isHandlerLike).pop();
   if (!handlerNode) return;
   model.routes.push({
     routerId: router.id,

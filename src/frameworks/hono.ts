@@ -71,13 +71,26 @@ interface FileModel {
   source: any;
   /** Local ctor binding imported from "hono" (usually `Hono`). */
   ctorNames: Set<string>;
+  /** createRoute binding imported from "@hono/zod-openapi". */
+  createRouteNames: Set<string>;
   /** Imported binding -> { specifier, exportName }. */
   imports: Map<string, { specifier: string; exportName: string }>;
+  /** namespace imports: binding name -> specifier (import * as routes from "..."). */
+  namespaceImports: Map<string, string>;
   nodes: Map<string, HonoNode>;
   /** Exported Hono var: export name -> local var name. */
   exported: Map<string, string>;
+  /** createRoute definitions: local/exported name -> { method, path }. */
+  routeDefs: Map<string, { method: string; path: string }>;
   mounts: MountEdge[];
   routes: RouteReg[];
+  /** `.openapi(routeDef, handler)` calls awaiting cross-file routeDef resolution. */
+  pendingOpenapi: Array<{
+    nodeId: string;
+    arg: any;
+    handlerNode: any;
+    origin: { file: string; line?: number };
+  }>;
 }
 
 function emptyResult(): ExtractionResult {
@@ -117,6 +130,22 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
     for (const model of models.values()) {
       for (const node of model.nodes.values()) allNodes.set(node.id, node);
       routes.push(...model.routes);
+    }
+
+    // Resolve `.openapi(routeDef, handler)` calls into concrete routes.
+    for (const model of models.values()) {
+      for (const pend of model.pendingOpenapi) {
+        const def = resolveRouteDef(analysis, ts, models, model, pend.arg);
+        if (!def) continue;
+        routes.push({
+          nodeId: pend.nodeId,
+          file: model.rel,
+          method: def.method,
+          rawPath: def.path,
+          handlerNode: pend.handlerNode,
+          origin: pend.origin,
+        });
+      }
     }
 
     // Resolve mount child references (local vars and imported sub-apps) into
@@ -212,14 +241,18 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     rel,
     source,
     ctorNames: new Set(),
+    createRouteNames: new Set(),
     imports: new Map(),
+    namespaceImports: new Map(),
     nodes: new Map(),
     exported: new Map(),
+    routeDefs: new Map(),
     mounts: [],
     routes: [],
+    pendingOpenapi: [],
   };
 
-  // Collect imports: `import { Hono } from "hono"` and relative sub-apps.
+  // Collect imports: `import { Hono } from "hono"`, createRoute, relative sub-apps.
   source.forEachChild((child: any) => {
     if (ts.isImportDeclaration(child) && ts.isStringLiteral(child.moduleSpecifier)) {
       const specifier = child.moduleSpecifier.text;
@@ -232,7 +265,26 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
             }
           }
         }
+      } else if (specifier === "@hono/zod-openapi") {
+        const named = child.importClause?.namedBindings;
+        if (named && ts.isNamedImports(named)) {
+          for (const el of named.elements) {
+            if (el.name.text === "createRoute" || el.propertyName?.text === "createRoute") {
+              model.createRouteNames.add(el.name.text);
+            }
+          }
+        }
       } else if (specifier.startsWith(".")) {
+        // import * as routes from "./x"
+        if (
+          child.importClause?.namedBindings &&
+          ts.isNamespaceImport(child.importClause.namedBindings)
+        ) {
+          model.namespaceImports.set(
+            child.importClause.namedBindings.name.text,
+            specifier,
+          );
+        }
         if (child.importClause?.name) {
           model.imports.set(child.importClause.name.text, {
             specifier,
@@ -257,6 +309,32 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
   });
 
   const visit = (node: any) => {
+    // const X = createRoute({ method, path, ... })
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isIdentifier(node.initializer.expression) &&
+      model.createRouteNames.has(node.initializer.expression.text)
+    ) {
+      const arg = node.initializer.arguments?.[0];
+      if (arg && ts.isObjectLiteralExpression(arg)) {
+        let method: string | undefined;
+        let path: string | undefined;
+        for (const prop of arg.properties) {
+          if (!ts.isPropertyAssignment(prop)) continue;
+          const k = prop.name?.getText(source);
+          if (k === "method" && ts.isStringLiteralLike(prop.initializer)) {
+            method = prop.initializer.text.toLowerCase();
+          } else if (k === "path" && ts.isStringLiteralLike(prop.initializer)) {
+            path = prop.initializer.text;
+          }
+        }
+        if (method && path) model.routeDefs.set(node.name.text, { method, path });
+      }
+    }
+
     // const app = new Hono()
     if (
       ts.isVariableDeclaration(node) &&
@@ -318,10 +396,31 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
   if (!ts.isPropertyAccessExpression(node.expression)) return;
   const access = node.expression;
   const rootName = access.expression.getText(model.source);
-  const nodeVar = model.nodes.get(rootName);
-  if (!nodeVar) return;
   const method = access.name.text;
   const origin = locationAt(ts, model.source, node, model.rel);
+
+  // app.openapi(routeDef, handler)  (@hono/zod-openapi). The receiver may be a
+  // factory-built app (createApp) not registered as a `new Hono()` node, so we
+  // handle it before the nodeVar guard; prefix falls back to "" honestly.
+  if (method === "openapi") {
+    const arg = node.arguments[0];
+    const handlerNode = [...node.arguments]
+      .slice(1)
+      .reverse()
+      .find((a: any) => a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a)));
+    if (arg && handlerNode) {
+      model.pendingOpenapi.push({
+        nodeId: model.nodes.get(rootName)?.id ?? "",
+        arg,
+        handlerNode,
+        origin,
+      });
+    }
+    return;
+  }
+
+  const nodeVar = model.nodes.get(rootName);
+  if (!nodeVar) return;
 
   // app.route('/prefix', subApp)
   if (method === "route") {
@@ -361,6 +460,40 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
     handlerNode,
     origin,
   });
+}
+
+function resolveRouteDef(
+  analysis: TsAnalysis,
+  ts: any,
+  models: Map<string, FileModel>,
+  model: FileModel,
+  arg: any,
+): { method: string; path: string } | undefined {
+  // Local routeDef: openapi(loginRoute, ...)
+  if (ts.isIdentifier(arg)) {
+    return model.routeDefs.get(arg.text);
+  }
+  // Namespace member: openapi(routes.getCurrentUser, ...)
+  if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression)) {
+    const ns = arg.expression.text;
+    const member = arg.name.text;
+    const specifier = model.namespaceImports.get(ns);
+    if (!specifier) return undefined;
+    const { program } = analysis;
+    const resolved = ts.resolveModuleName
+      ? ts.resolveModuleName(
+          specifier,
+          model.source.fileName,
+          program.getCompilerOptions(),
+          ts.sys,
+        )?.resolvedModule?.resolvedFileName
+      : undefined;
+    if (!resolved || !analysis.isProjectFile(resolved)) return undefined;
+    const target = program.getSourceFile(resolved);
+    const targetModel = [...models.values()].find((m) => m.source === target);
+    return targetModel?.routeDefs.get(member);
+  }
+  return undefined;
 }
 
 function resolveMountChild(
