@@ -642,7 +642,9 @@ function collectBuiltResponses(
         if (posArgs.length) entityArg = posArgs[0];
       } else if (FACTORY_STATUS[mname]) {
         status = FACTORY_STATUS[mname]!;
-        if (posArgs.length && (mname === "ok" || mname === "created" || mname === "accepted")) {
+        // ok(entity)/accepted(entity) carry the entity positionally;
+        // created(uri) carries a Location URI, not the entity.
+        if (posArgs.length && (mname === "ok" || mname === "accepted")) {
           entityArg = posArgs[0];
         }
       }
