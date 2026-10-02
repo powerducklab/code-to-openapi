@@ -362,13 +362,33 @@ function resolveHandler(
 
   // Resolve a use-alias to the short name of the declared class, e.g.
   // `use ...\EnrollController as EnrollTwoFactorController` maps the route
-  // reference back to "EnrollController" as indexed.
-  const resolveClassName = (name: string | null): string | null => {
-    if (!name) return null;
-    if (analysis.classes.has(name)) return name;
-    const fqcn = routeImports?.get(name);
+  // reference back to "EnrollController" as indexed. Namespaced references such
+  // as `Api\OrderController` (after `use App\Http\Controllers\Api;`) are resolved
+  // by mapping the first segment through the import table.
+  const resolveClassName = (raw: string | null): string | null => {
+    if (!raw) return null;
+    if (raw.includes("\\")) {
+      const segments = raw.split("\\").filter(Boolean);
+      const mapped = routeImports?.get(segments[0]!);
+      if (mapped) {
+        const fqcn = [mapped, ...segments.slice(1)].join("\\");
+        return fqcn.split("\\").pop() ?? raw;
+      }
+      raw = segments[segments.length - 1] ?? raw;
+    }
+    if (analysis.classes.has(raw)) return raw;
+    const fqcn = routeImports?.get(raw);
     const declared = fqcn?.split("\\").pop();
-    return declared && analysis.classes.has(declared) ? declared : name;
+    return declared && analysis.classes.has(declared) ? declared : raw;
+  };
+
+  // Read the class reference from a ::class constant access, excluding the
+  // literal "class" keyword token that tree-sitter also exposes as a name.
+  const classRefName = (access: TsNode): string | null => {
+    const qualified = access.namedChildren.find((c) => c.type === "qualified_name");
+    if (qualified) return qualified.text;
+    const names = childrenOfType(access, "name").filter((n) => n.text !== "class");
+    return names[names.length - 1]?.text ?? null;
   };
 
   // Closure (traditional closure or arrow function).
@@ -396,9 +416,7 @@ function resolveHandler(
     const methodString = elements
       .map((e) => e.namedChildren.find((c) => c.type === "string"))
       .find(Boolean);
-    const controllerRaw = classAccess
-      ? (childrenOfType(classAccess!, "name")[0]?.text ?? null)
-      : null;
+    const controllerRaw = classAccess ? classRefName(classAccess) : null;
     const controller = resolveClassName(controllerRaw);
     const method = methodString ? phpStringText(methodString) : null;
     const cls = controller ? analysis.classes.get(controller) : null;
@@ -413,7 +431,7 @@ function resolveHandler(
 
   // Invokable controller: Controller::class.
   if (inner.type === "class_constant_access_expression") {
-    const controllerRaw = childrenOfType(inner, "name")[0]?.text ?? null;
+    const controllerRaw = classRefName(inner);
     const controller = resolveClassName(controllerRaw);
     const cls = controller ? analysis.classes.get(controller) : null;
     const node = cls?.methods.get("__invoke") ?? null;
@@ -611,15 +629,11 @@ function collectParameters(
       continue;
     }
 
-    // Scalar handler parameter: route binding if the path declares it. Route
-    // segments are always strings at the HTTP layer, so an explicitly declared
-    // path parameter is typed {type:"string"} and never carries the
-    // path-param-untyped gap (mirroring the Nest untyped-@Param decision).
+    // Scalar handler parameter: bind it to a path segment only when its name
+    // matches the route template. Never speculate that an unmatched scalar param
+    // is route-bound — that emits phantom path parameters absent from the path.
     if (pathParams.has(name)) {
       addParam("path", name, { type: "string" }, "high", true);
-    } else if (typeNode.type === "primitive_type" && shortType === "string") {
-      // Unmatched scalar params are almost always route-bound in Laravel.
-      addParam("path", name, { type: "string" }, "medium", true);
     }
   }
 
