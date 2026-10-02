@@ -68,14 +68,16 @@ function pathParams(path: string): RouteParameter[] {
   return params;
 }
 
-function operationId(method: string, path: string): string {
+function operationId(method: string, path: string, symbol?: string): string {
   const segments = path
     .split("/")
     .filter(Boolean)
     .map((s) => s.replace(/[{}]/g, ""))
     .map((s) => s.replace(/[^A-Za-z0-9]+(.)/g, (_m, c) => c.toUpperCase()));
   const tail = segments.map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join("");
-  return `${method.toLowerCase()}${tail || "Root"}`;
+  const op = `${method.toLowerCase()}${tail || "Root"}`;
+  // Disambiguate routes across separately-assembled apps that share a path.
+  return symbol ? `${op}_${symbol.replace(/[^A-Za-z0-9]/g, "")}` : op;
 }
 
 export const starlettePack: FrameworkPack<PythonAnalysis> = {
@@ -186,7 +188,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
               method: "get",
               path: fullPath,
               fullPath,
-              operationId: operationId("get", `${fullPath}/ws`),
+              operationId: operationId("get", fullPath, endpointName ?? "websocket"),
               origin: { file: "", line: el.startPosition.row + 1, symbol: endpointName ?? "websocket" },
               parameters: pathParams(fullPath),
               responses: [],
@@ -291,6 +293,15 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
       }
     }
 
+    // Deduplicate operationIds (separate apps can share a path/endpoint name).
+    const seenIds = new Map<string, number>();
+    for (const route of routes) {
+      const base = route.operationId ?? "op";
+      const count = seenIds.get(base) ?? 0;
+      seenIds.set(base, count + 1);
+      if (count > 0) route.operationId = `${base}_${count + 1}`;
+    }
+
     return { routes, unresolved, components: [], securitySchemes: [], servers };
   },
 };
@@ -348,7 +359,7 @@ function buildRoute(input: {
     method: input.method,
     path: input.path,
     fullPath: input.path,
-    operationId: operationId(input.method, input.path),
+    operationId: operationId(input.method, input.path, input.symbol),
     origin: { file: "", line: input.line, symbol: input.symbol },
     parameters,
     ...((input.method === "post" || input.method === "put" || input.method === "patch")

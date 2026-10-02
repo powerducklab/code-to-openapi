@@ -110,8 +110,9 @@ function baseTail(base: TsNode): string {
 function djangoToOasPath(raw: string): string {
   let out = raw.replace(/\(\?P<([^>]+)>[^)]*\)/g, "{$1}");
   out = out.replace(/<(?:[A-Za-z]+:)?([A-Za-z_][A-Za-z0-9_]*)>/g, "{$1}");
-  // Strip regex start/end anchors from re_path patterns.
-  out = out.replace(/^\^/, "").replace(/\$$/, "");
+  // Strip regex anchors and optional-slash artifacts from re_path/url patterns.
+  out = out.replace(/\^/g, "").replace(/\$$/, "");
+  out = out.replace(/\/\?/g, "/").replace(/\?/g, "");
   return out;
 }
 
@@ -352,6 +353,9 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
 
     // Mount edges: path("api/", include(router.urls)) -> router gets prefix.
     const routerMount = new Map<string, string>();
+    // String includes: path("api/", include("conduit.apps.articles.urls")) folds
+    // the prefix onto every route declared in that module's urlpatterns.
+    const fileMount = new Map<string, string>();
     // Registrations: router.register(prefix, viewset, basename=...).
     interface Registration {
       routerId: string;
@@ -394,11 +398,18 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
         // include(x.urls) -> second arg is include(...) call whose arg is an attribute `x.urls`.
         if (viewArg.type === "call" && callName(viewArg.namedChildren[0] ?? null) === "include") {
           const inner = positionalArguments(viewArg)[0];
+          const prefix = prefixNode ? literalString(prefixNode) ?? "" : "";
           const innerAttr = inner && inner.type === "attribute" ? inner : null;
           if (innerAttr?.namedChildren[1]?.text === "urls") {
             const routerId = resolveRouterId(file.path, innerAttr.namedChildren[0]);
-            const prefix = prefixNode ? literalString(prefixNode) ?? "" : "";
-            if (routerId) routerMount.set(routerId, prefix);
+            if (routerId) routerMount.set(routerId, djangoToOasPath(prefix));
+          } else if (inner) {
+            // include("dotted.module.urls"): resolve the module to a file.
+            const mod = literalString(inner);
+            if (mod) {
+              const targetFile = moduleToFile.get(mod);
+              if (targetFile) fileMount.set(targetFile, djangoToOasPath(prefix));
+            }
           }
         }
       }
@@ -409,7 +420,8 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
     // --- Router-generated viewset routes ---
     for (const reg of registrations) {
       const mountPrefix = routerMount.get(reg.routerId) ?? "";
-      const basePath = joinPath(mountPrefix, djangoToOasPath(reg.prefix));
+      const modulePrefix = fileMount.get(reg.file) ?? "";
+      const basePath = joinPath(modulePrefix, mountPrefix, djangoToOasPath(reg.prefix));
       const serializerName = viewSerializerClass(reg.viewset, resolveClassNode, reg.file);
       const dynamicSerializer = viewsetOverridesGetSerializer(reg.viewset) && !serializerName;
 
@@ -485,7 +497,8 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
         if (rawPath === null) continue;
         // Skip include(...) mounts (already handled).
         if (viewArg.type === "call" && callName(viewArg.namedChildren[0] ?? null) === "include") continue;
-        const oasPath = joinPath(djangoToOasPath(rawPath));
+        const modulePrefix = fileMount.get(file.path) ?? "";
+        const oasPath = joinPath(modulePrefix, djangoToOasPath(rawPath));
 
         // Class-based: View.as_view()
         if (viewArg.type === "call" && callName(viewArg.namedChildren[0] ?? null) === "as_view") {
@@ -493,10 +506,11 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
           const cls = resolveClassNode(file.path, clsNode);
           if (!cls) continue;
           const serializerName = viewSerializerClass(cls, resolveClassNode, file.path);
+          const genericMethods = genericViewMethods(cls);
           for (const methodName of ["get", "post", "put", "patch", "delete"]) {
             const methodNode = findMethod(cls, methodName);
-            if (!methodNode) continue;
-            const fn = analysis.functions.find((f) => f.node === methodNode);
+            if (!methodNode && !genericMethods.includes(methodName)) continue;
+            const fn = methodNode ? analysis.functions.find((f) => f.node === methodNode) : undefined;
             routes.push(
               buildClassMethodRoute({
                 method: methodName,
@@ -558,6 +572,26 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
 };
 
 // --- helpers ---------------------------------------------------------------
+
+// Map a generic view base (generics.ListAPIView, etc.) to its HTTP methods.
+const GENERIC_VIEW_METHODS: Record<string, string[]> = {
+  ListAPIView: ["get"],
+  ListCreateAPIView: ["get", "post"],
+  RetrieveAPIView: ["get"],
+  CreateAPIView: ["post"],
+  DestroyAPIView: ["delete"],
+  UpdateAPIView: ["put", "patch"],
+  RetrieveUpdateAPIView: ["get", "put", "patch"],
+  RetrieveUpdateDestroyAPIView: ["get", "put", "patch", "delete"],
+};
+
+function genericViewMethods(cls: PyClass): string[] {
+  for (const base of cls.bases) {
+    const tail = baseTail(base);
+    if (GENERIC_VIEW_METHODS[tail]) return GENERIC_VIEW_METHODS[tail];
+  }
+  return [];
+}
 
 function findMethod(cls: PyClass, name: string): TsNode | null {
   return findFirst(cls.node, (n) => {
