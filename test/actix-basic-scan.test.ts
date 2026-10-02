@@ -62,4 +62,27 @@ describe("actix-web macro routes", () => {
     const articles = op(ops, "get", "/articles");
     expect(articles.responses[0].statusCode).toBe("200");
   });
+
+  it("strips inline regex guards and tail markers from placeholders", async () => {
+    const { result, converted } = await scan();
+    // The normalized document must remain valid (raw `{id:\d+}` is invalid OAS).
+    expect(converted.documentValid).toBe(true);
+    const ops = result.project.operations;
+
+    // `/page-{id:\\d+}` -> `/api/page-{id}`, parameter named "id".
+    const page = op(ops, "get", "/api/page-{id}");
+    expect(page.parameters.filter((p: any) => p.in === "path").map((p: any) => p.name)).toEqual(["id"]);
+
+    // `/files/{tail}*` -> `/api/files/{tail}`.
+    const tail = op(ops, "get", "/api/files/{tail}");
+    expect(tail.parameters.filter((p: any) => p.in === "path").map((p: any) => p.name)).toEqual(["tail"]);
+
+    // No raw guard syntax should leak into any emitted path: a colon inside a
+    // placeholder `{id:...}` or a tail marker `{name}*`.
+    for (const o of ops) {
+      const fp = o.fullPath ?? o.path;
+      expect(fp, `regex guard in ${fp}`).not.toMatch(/\{[^}]*:[^}]*\}/);
+      expect(fp, `tail marker in ${fp}`).not.toMatch(/\}\*/);
+    }
+  });
 });

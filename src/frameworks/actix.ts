@@ -610,7 +610,20 @@ function normalizeRoute(raw: string): string {
   let route = (raw ?? "").trim();
   if (!route) return "/";
   if (!route.startsWith("/")) route = `/${route}`;
-  return route;
+  return normalizePlaceholders(route);
+}
+
+/**
+ * Actix route placeholders support inline guards: `{id:\\d+}` (regex),
+ * `{name:type}` and tail captures `{name}*`. OpenAPI path templates only allow
+ * a bare `{name}`, so strip the `:guard` suffix and any trailing `*`, keeping
+ * just the placeholder name. Applied to both scope prefixes and route templates.
+ */
+function normalizePlaceholders(route: string): string {
+  return route.replace(/\{([^{}]*)\}(\*?)/g, (_m, inner: string) => {
+    const name = inner.split(":")[0]!.trim();
+    return name ? `{${name}}` : "{}";
+  });
 }
 
 function joinRoute(base: string, sub: string): string {

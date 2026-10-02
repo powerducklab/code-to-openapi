@@ -87,6 +87,20 @@ async fn health() -> &'static str {
     "ok"
 }
 
+// Inline regex guard segment: the `:regex` must be stripped for OAS.
+#[get("/page-{id:\\d+}")]
+async fn page_by_regex(path: web::Path<i32>) -> HttpResponse {
+    let id = path.into_inner();
+    HttpResponse::Ok().json(User { id, name: "page".to_string(), note: None })
+}
+
+// Tail segment `{name}*`: the trailing `*` must be stripped for OAS.
+#[get("/files/{tail}*")]
+async fn files_tail(path: web::Path<(String,)>) -> HttpResponse {
+    let _ = path;
+    HttpResponse::Ok().finish()
+}
+
 fn config_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/articles").route(web::get().to(list_articles)));
 }
@@ -98,7 +112,7 @@ async fn list_articles() -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let app = App::new()
-        .service(web::scope("/api").service(get_user).service(list_users).service(create_user).service(fail_user).service(delete_user).service(report).service(health))
+        .service(web::scope("/api").service(get_user).service(list_users).service(create_user).service(fail_user).service(delete_user).service(report).service(health).service(page_by_regex).service(files_tail))
         .configure(config_routes);
     actix_web::HttpServer::new(move || app.clone())
         .bind(("127.0.0.1", 8096))?
