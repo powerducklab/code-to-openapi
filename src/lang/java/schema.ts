@@ -9,7 +9,12 @@
  */
 
 import type { JsonSchema } from "@powerduck/x-to-openapi";
-import type { JavaAnalysis, JavaField, JavaTypeDef } from "./index.js";
+import type {
+  JavaAnalysis,
+  JavaField,
+  JavaFieldValidation,
+  JavaTypeDef,
+} from "./index.js";
 import type { TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findFirst } from "../treesitter/ast.js";
 
@@ -273,6 +278,30 @@ function propertyName(field: JavaField, naming: JavaTypeDef["naming"]): string {
   return naming === "snake_case" ? toSnakeCase(field.name) : field.name;
 }
 
+const SCALAR_SCHEMA_TYPES = new Set(["string", "integer", "number", "boolean"]);
+
+/**
+ * Merges Bean Validation constraints onto a scalar property schema. Constraints
+ * are only applied to inline scalar schemas (never to `$ref`s, enums, arrays or
+ * objects) and never overwrite a more specific keyword already present.
+ */
+function applyValidation<T extends JsonSchema>(
+  schema: T,
+  validation: JavaFieldValidation | undefined,
+): T {
+  if (!validation || !SCALAR_SCHEMA_TYPES.has((schema as { type?: string }).type ?? "")) {
+    return schema;
+  }
+  const s = schema as Record<string, unknown>;
+  if (validation.format && s.type === "string" && !s.format) s.format = validation.format;
+  if (validation.minLength !== undefined && s.type === "string") s.minLength = validation.minLength;
+  if (validation.maxLength !== undefined && s.type === "string") s.maxLength = validation.maxLength;
+  if (validation.minimum !== undefined && (s.type === "integer" || s.type === "number")) s.minimum = validation.minimum;
+  if (validation.maximum !== undefined && (s.type === "integer" || s.type === "number")) s.maximum = validation.maximum;
+  if (validation.pattern !== undefined && s.type === "string") s.pattern = validation.pattern;
+  return schema;
+}
+
 function isStandardScalar(name: string): boolean {
   return (
     STRING_TYPES.has(name) ||
@@ -533,7 +562,10 @@ function buildTypeSchema(
   for (const { field, subst: fieldSubst } of chain) {
     if (field.ignored) continue;
     const name = propertyName(field, naming);
-    properties[name] = javaTypeToSchema(field.typeNode, index, depth + 1, fieldSubst, def.file);
+    properties[name] = applyValidation(
+      javaTypeToSchema(field.typeNode, index, depth + 1, fieldSubst, def.file),
+      field.validation,
+    );
     if (field.required) required.push(name);
   }
   const schema: JsonSchema = { type: "object", properties };

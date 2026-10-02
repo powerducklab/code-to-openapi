@@ -498,10 +498,16 @@ function collectParameters(
       continue;
     }
 
-    // Route model binding: typed model parameter.
+    // Route model binding: a typed parameter is bound to a route segment only
+    // when its variable name corresponds to a declared path parameter. Any
+    // other typed parameter (repository / service / contract injected by the
+    // container) is skipped rather than emitted as a phantom path parameter.
     if (cls && !cls.formRules.length) {
-      const binding = camelBinding(name);
-      addParam("path", binding, { type: "string" }, "high", true);
+      const snakeName = toSnakeCase(name);
+      const matched = [...pathParams].find((p) => p === name || toSnakeCase(p) === snakeName);
+      if (matched) {
+        addParam("path", matched, { type: "string" }, "high", true);
+      }
       continue;
     }
 
@@ -540,9 +546,9 @@ function fileFieldsFromRules(rules: { name: string; rules: string }[]): Set<stri
   return fields;
 }
 
-function camelBinding(variable: string): string {
-  // Route binding key is the type-hinted variable name, e.g. $userProfile -> userProfile.
-  return variable;
+/** Convert a camelCase variable to snake_case, matching Laravel route wildcards. */
+function toSnakeCase(name: string): string {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
 function collectRequestCalls(
@@ -1093,11 +1099,27 @@ function parseResourceCall(
 ): RouteCandidate[] {
   const pathArg = args[0]?.namedChildren.find((c) => c.type === "string");
   const handlerArg = args[1];
-  const basePath = joinRoute(groupPrefix, normalizeRoute(phpStringText(pathArg) ?? ""));
   const handler = resolveHandler(handlerArg, analysis);
   const controller = handler?.controller ?? resourceControllerName(handlerArg);
-  const binding = singular(basePath.split("/").pop() ?? "resource");
-  const itemPath = `${basePath}/{${binding}}`;
+
+  // Dot-nested resources ('albums.songs') expand to a nested URI: the
+  // collection route is /albums/{album}/songs and the item route appends
+  // /{song}. One route binding is derived per resource segment.
+  const resourceName = phpStringText(pathArg) ?? "";
+  const segments = resourceName
+    .split(".")
+    .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean);
+  const bindings = segments.map((seg) => resourceBinding(seg));
+
+  let collectionPath = "";
+  segments.forEach((seg, i) => {
+    collectionPath += `/${seg}`;
+    if (i < segments.length - 1) collectionPath += `/{${bindings[i]}}`;
+  });
+  const childBinding = bindings[bindings.length - 1] ?? "resource";
+  const basePath = joinRoute(groupPrefix, collectionPath || "/");
+  const itemPath = `${basePath}/{${childBinding}}`;
 
   const operations: { verb: string; path: string; method: string }[] = [
     { verb: "get", path: basePath, method: "index" },
@@ -1132,9 +1154,16 @@ function parseResourceCall(
       ? collectParameters(methodNode, analysis, model, verb, declaredPathParams)
       : { parameters: [], requestBody: undefined, gaps: [] as GapCode[] };
     const parameters = collected.parameters;
-    if (methodNode && ["show", "update", "destroy"].includes(method) &&
-        !parameters.some((p) => p.in === "path" && p.name === binding)) {
-      parameters.push({ name: binding, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
+    // Ensure every binding present in the route URI (parent resources on
+    // collection routes, plus the child on item routes) is declared.
+    for (const p of declaredPathParams) {
+      if (
+        methodNode &&
+        ["show", "update", "destroy", "index", "store"].includes(method) &&
+        !parameters.some((prm) => prm.in === "path" && prm.name === p)
+      ) {
+        parameters.push({ name: p, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
+      }
     }
     gaps.push(...collected.gaps);
     const responses: DiscoveredResponse[] = methodNode
@@ -1176,6 +1205,11 @@ function singular(word: string): string {
   if (word.endsWith("ses")) return word.slice(0, -2);
   if (word.endsWith("s")) return word.slice(0, -1);
   return word;
+}
+
+/** Route binding name for a resource segment: kebab -> snake, then singular. */
+function resourceBinding(segment: string): string {
+  return singular(segment.replace(/-/g, "_"));
 }
 
 function normalizeRoute(raw: string): string {

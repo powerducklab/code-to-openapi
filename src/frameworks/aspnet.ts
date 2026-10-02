@@ -89,6 +89,12 @@ function isInjectedService(typeNode: TsNode | undefined): boolean {
   return /(?:DbContext|Service|Client|Repository|Handler|Store|Cache|Bus)$/.test(text);
 }
 
+/** FileResult and its derived types always stream a binary response body. */
+function isBinaryReturnType(returnType: TsNode | undefined): boolean {
+  if (!returnType) return false;
+  return /\bFile(Stream|Content|Physical|Virtual)?Result\b/.test(returnType.text);
+}
+
 export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
   id: "aspnet",
   language: "csharp",
@@ -127,6 +133,62 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
 // Controllers
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolves the effective [Route] template and [ApiController] flag for a
+ * controller. ASP.NET inherits class-level attributes from the controller's
+ * base class chain (a very common pattern: an abstract `BaseController :
+ * ControllerBase` carries [ApiController] and [Route("api/[controller]/[action]")]
+ * while derived controllers add only their action methods).
+ */
+function resolveControllerRouting(
+  cls: TsNode,
+  model: CsModelIndex,
+): { routeAttr: TsNode | null; isApiController: boolean } {
+  let routeAttr = listAttributes(cls).find((a) => a.name === "Route")?.node ?? null;
+  let isApi = listAttributes(cls).some((a) => a.name === "ApiController");
+
+  let current: TsNode | null = cls;
+  const guard = new Set<string>();
+  while (current) {
+    const baseList = current.namedChildren.find((c) => c.type === "base_list");
+    if (!baseList) break;
+    let baseName: string | null = null;
+    for (const cand of baseList.namedChildren) {
+      if (
+        cand.type !== "identifier" &&
+        cand.type !== "generic_name" &&
+        cand.type !== "qualified_name"
+      ) {
+        continue;
+      }
+      const simple =
+        cand.type === "identifier"
+          ? cand.text
+          : cand.type === "qualified_name"
+            ? cand.namedChildren[cand.namedChildren.length - 1]?.text ?? null
+            : (cand.namedChildren.find((c) => c.type === "identifier")?.text ?? null);
+      if (simple) {
+        baseName = simple;
+        break;
+      }
+    }
+    if (!baseName || guard.has(baseName)) break;
+    guard.add(baseName);
+    const baseDef = model.byName.get(baseName);
+    // Framework base classes (ControllerBase, ApiController<T>, ...) are not
+    // in the model index, so the chain stops here.
+    if (!baseDef) break;
+    if (!routeAttr) {
+      routeAttr = listAttributes(baseDef.node).find((a) => a.name === "Route")?.node ?? null;
+    }
+    if (!isApi) {
+      isApi = listAttributes(baseDef.node).some((a) => a.name === "ApiController");
+    }
+    current = baseDef.node;
+  }
+  return { routeAttr, isApiController: isApi };
+}
+
 function extractControllers(
   root: TsNode,
   rel: string,
@@ -136,8 +198,9 @@ function extractControllers(
   const classes = findAll(root, (n) => n.type === "class_declaration");
   for (const cls of classes) {
     const attributes = listAttributes(cls);
-    const routeAttr = attributes.find((a) => a.name === "Route")?.node ?? null;
-    const isApiController = attributes.some((a) => a.name === "ApiController");
+    const routing = resolveControllerRouting(cls, model);
+    const routeAttr = routing.routeAttr;
+    const isApiController = routing.isApiController;
     const className = cls.namedChildren.find((c) => c.type === "identifier")?.text ?? "";
     const looksLikeController = className.endsWith("Controller");
     if (!routeAttr && !isApiController && !looksLikeController) continue;
@@ -151,11 +214,13 @@ function extractControllers(
     if (!verbMethods.length && !routeAttr) continue;
 
     const controllerToken = className.replace(/Controller$/, "");
-    const classRoute = routeAttr
-      ? normalizeRoute(
-          (attributeStringArg(routeAttr, new Set(["Template", "Name", "Pattern"])) ?? "")
-            .replace(/\[controller\]/g, controllerToken)
-            .replace(/\[action\]/g, "{action}"),
+    // Class-level template: [controller] is substituted now. [action] stays a
+    // literal token here because it only resolves per-method to the action name
+    // (it is NOT a request path parameter).
+    const classRouteRaw = routeAttr
+      ? (attributeStringArg(routeAttr, new Set(["Template", "Name", "Pattern"])) ?? "").replace(
+          /\[controller\]/g,
+          controllerToken,
         )
       : "";
 
@@ -170,10 +235,14 @@ function extractControllers(
         method.childForFieldName("name")?.text ??
         method.namedChildren.find((c) => c.type === "identifier")?.text ??
         "";
-      const template = subTemplate
-        .replace(/\[action\]/g, methodName)
-        .replace(/\[controller\]/g, controllerToken);
-      const fullPath = joinRoute(classRoute, normalizeRoute(template));
+      const expandTokens = (raw: string) =>
+        raw
+          .replace(/\[action\]/g, methodName)
+          .replace(/\[controller\]/g, controllerToken);
+      const fullPath = joinRoute(
+        normalizeRoute(expandTokens(classRouteRaw)),
+        normalizeRoute(expandTokens(subTemplate)),
+      );
       const pathParams = new Set(
         [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => stripConstraint(m[1]!)),
       );
@@ -206,7 +275,10 @@ function extractControllers(
         method: verb,
         path: fullPath,
         fullPath,
-        operationId: methodName || undefined,
+        // Qualify with the controller token: action method names (GetAll, Create,
+        // Update, Delete) collide across controllers otherwise, which produces
+        // non-unique operationIds. Minimal APIs keep their explicit WithName.
+        operationId: methodName ? `${controllerToken}_${methodName}` : undefined,
         origin,
         parameters,
         ...(requestBody ? { requestBody } : {}),
@@ -238,6 +310,24 @@ function collectControllerResponses(
   const producesSse = listAttributes(method).some(
     (a) => a.name === "Produces" && /text\/event-stream/i.test(a.node.text),
   );
+
+  // FileResult and its subclasses (FileStreamResult, PhysicalFileResult, ...)
+  // always stream a binary payload, regardless of the generic envelope.
+  if (isBinaryReturnType(returnType)) {
+    return [
+      {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [
+          {
+            mediaType: "application/octet-stream",
+            schema: { type: "string", format: "binary" },
+          },
+        ],
+      },
+    ];
+  }
 
   const schema = returnType ? csTypeToSchema(returnType, model) : {};
   if (producesSse && schema) {

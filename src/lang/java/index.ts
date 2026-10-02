@@ -18,6 +18,27 @@ export interface JavaField {
   readonly required: boolean;
   /** Field is excluded from JSON output by @JsonIgnore. */
   readonly ignored: boolean;
+  /** Bean Validation constraints that map precisely to JSON Schema keywords. */
+  readonly validation?: JavaFieldValidation;
+}
+
+/**
+ * Bean Validation constraints we can map to JSON Schema without guessing.
+ * Only annotations whose value maps 1:1 to a schema keyword are captured.
+ */
+export interface JavaFieldValidation {
+  /** `@Email` -> `format: "email"`. */
+  readonly format?: "email";
+  /** `@Size(min = N)` / `@Length(min = N)` -> `minLength`. */
+  readonly minLength?: number;
+  /** `@Size(max = N)` / `@Length(max = N)` -> `maxLength`. */
+  readonly maxLength?: number;
+  /** `@Min(N)` -> `minimum`. */
+  readonly minimum?: number;
+  /** `@Max(N)` -> `maximum`. */
+  readonly maximum?: number;
+  /** `@Pattern(regexp = "...")` -> `pattern`. */
+  readonly pattern?: string;
 }
 
 export interface JavaTypeDef {
@@ -100,6 +121,78 @@ function hasRequiredAnnotation(node: TsNode): boolean {
     const name = mod.namedChildren.find((c) => c.type === "identifier");
     return name ? REQUIRED_ANNOTATIONS.has(name.text) : false;
   });
+}
+
+/** Reads a named `key = value` pair out of an annotation argument list. */
+function annotationPairValue(
+  annotation: TsNode,
+  key: string,
+): TsNode | undefined {
+  const args = childrenOfType(annotation, "annotation_argument_list")[0];
+  if (!args) return undefined;
+  for (const pair of childrenOfType(args, "element_value_pair")) {
+    const k = pair.namedChildren.find((c) => c.type === "identifier");
+    if (k && k.text === key) {
+      return pair.namedChildren[pair.namedChildren.length - 1];
+    }
+  }
+  return undefined;
+}
+
+/** Reads a single positional annotation argument, e.g. `@Min(5)`. */
+function annotationPositionalValue(annotation: TsNode): TsNode | undefined {
+  const args = childrenOfType(annotation, "annotation_argument_list")[0];
+  if (!args) return undefined;
+  return args.namedChildren.find(
+    (c) => c.type !== "element_value_pair",
+  );
+}
+
+function numericText(node: TsNode | undefined): number | undefined {
+  if (!node) return undefined;
+  const n = Number(node.text);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function stringLiteralText(node: TsNode | undefined): string | undefined {
+  if (!node) return undefined;
+  const fragment = node.namedChildren.find((c) => c.type === "string_fragment");
+  return fragment ? fragment.text : node.text.replace(/^"|"$/g, "");
+}
+
+/**
+ * Extracts Bean Validation constraints that map precisely to JSON Schema.
+ * Anything that cannot be mapped 1:1 (custom constraints, groups, messages)
+ * is intentionally ignored rather than guessed.
+ */
+function extractValidation(node: TsNode): JavaFieldValidation | undefined {
+  let result: JavaFieldValidation | undefined;
+  const set = (patch: Partial<JavaFieldValidation>) => {
+    result = { ...(result ?? {}), ...patch };
+  };
+  for (const mod of modifiersOf(node)) {
+    if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
+    const name = mod.namedChildren.find((c) => c.type === "identifier")?.text;
+    if (!name) continue;
+    if (name === "Email") {
+      set({ format: "email" });
+    } else if (name === "Size" || name === "Length") {
+      const min = numericText(annotationPairValue(mod, "min"));
+      const max = numericText(annotationPairValue(mod, "max"));
+      if (min !== undefined) set({ minLength: min });
+      if (max !== undefined) set({ maxLength: max });
+    } else if (name === "Min") {
+      const value = numericText(annotationPositionalValue(mod));
+      if (value !== undefined) set({ minimum: value });
+    } else if (name === "Max") {
+      const value = numericText(annotationPositionalValue(mod));
+      if (value !== undefined) set({ maximum: value });
+    } else if (name === "Pattern") {
+      const regex = stringLiteralText(annotationPairValue(mod, "regexp"));
+      if (regex) set({ pattern: regex });
+    }
+  }
+  return result;
 }
 
 function annotationNamed(node: TsNode, name: string): TsNode | null {
@@ -241,6 +334,7 @@ function collectRecordParams(node: TsNode): JavaField[] {
     const typeNode = typeNodeOf(param);
     const nameNode = childrenOfType(param, "identifier").pop();
     if (!typeNode || !nameNode) continue;
+    const fieldValidation = extractValidation(param);
     fields.push({
       name: nameNode.text,
       ...(jsonPropertyName(param)
@@ -249,6 +343,7 @@ function collectRecordParams(node: TsNode): JavaField[] {
       typeNode,
       required: hasRequiredAnnotation(param),
       ignored: hasJsonIgnore(param),
+      ...(fieldValidation ? { validation: fieldValidation } : {}),
     });
   }
   return fields;
@@ -268,12 +363,14 @@ function collectClassFields(node: TsNode): JavaField[] {
     for (const declarator of findAll(field, (n) => n.type === "variable_declarator")) {
       const nameNode = declarator.namedChildren.find((c) => c.type === "identifier");
       if (!nameNode) continue;
+      const fieldValidation = extractValidation(field);
       fields.push({
         name: nameNode.text,
         ...(jsonName ? { jsonName } : {}),
         typeNode,
         required: hasRequiredAnnotation(field),
         ignored,
+        ...(fieldValidation ? { validation: fieldValidation } : {}),
       });
     }
   }
@@ -313,12 +410,14 @@ function collectGetterFields(body: TsNode): JavaField[] {
     if (!property) continue;
     const typeNode = typeNodeOf(method);
     if (!typeNode || typeNode.type === "void_type") continue;
+    const getterValidation = extractValidation(method);
     fields.push({
       name: property,
       ...(jsonPropertyName(method) ? { jsonName: jsonPropertyName(method) } : {}),
       typeNode,
       required: hasRequiredAnnotation(method),
       ignored: hasJsonIgnore(method),
+      ...(getterValidation ? { validation: getterValidation } : {}),
     });
   }
   return fields;

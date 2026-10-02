@@ -31,6 +31,8 @@ export interface CsTypeDef {
   typeParameters: string[];
   /** base_list node (base class and interfaces), if declared. */
   baseList: TsNode | null;
+  /** The class/record/enum declaration node itself, for attribute inheritance. */
+  node: TsNode;
 }
 
 export interface CsFile {
@@ -106,7 +108,7 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
           (m) => m.namedChildren.find((c) => c.type === "identifier")?.text ?? "",
         ).filter(Boolean)
       : [];
-    return { kind: "enum", name, fields: [], enumValues, typeParameters: [], baseList: null };
+    return { kind: "enum", name, fields: [], enumValues, typeParameters: [], baseList: null, node };
   }
 
   const fields: CsField[] = [];
@@ -188,6 +190,7 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
     enumValues: [],
     typeParameters: collectTypeParameters(node),
     baseList: node.namedChildren.find((c) => c.type === "base_list") ?? null,
+    node,
   };
 }
 

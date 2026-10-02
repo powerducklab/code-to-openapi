@@ -216,8 +216,19 @@ function resolveMapping(
   if (annotationName === "RequestMapping") {
     const methodElement = annotationElement(node, "method");
     if (methodElement) {
-      const match = /RequestMethod\.([A-Z]+)/.exec(methodElement.text);
-      if (match) verb = match[1]!.toLowerCase();
+      // `method = RequestMethod.POST` (fully qualified field access) or the
+      // static-imported bare `method = POST` both declare the verb. Match the
+      // qualified constant first, then fall back to a bare HTTP verb token so
+      // a static import does not silently default to GET.
+      const qualified = /RequestMethod\.([A-Z]+)/.exec(methodElement.text);
+      if (qualified) {
+        verb = qualified[1]!.toLowerCase();
+      } else {
+        const bare = /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|TRACE)\b/.exec(
+          methodElement.text,
+        );
+        if (bare) verb = bare[1]!.toLowerCase();
+      }
     }
   }
   const subPath = annotationStringArg(node, PATH_ELEMENTS) ?? "";
@@ -235,6 +246,11 @@ function annotationProducesEventStream(node: TsNode): boolean {
  * Spring binding annotations: each pins a parameter to a specific source.
  * Validation annotations (@Valid, @Validated) do not, so a POJO carrying only
  * those is still an implicit command object bound from query parameters.
+ *
+ * Framework-injected arguments that are resolved outside the HTTP request
+ * (the security principal via @AuthenticationPrincipal, SpEL bean values via
+ * @Value, request/session attributes) are also "bound": they must never be
+ * treated as implicit @RequestParam values or expanded as query command beans.
  */
 const BINDING_ANNOTATIONS = new Set([
   "PathVariable",
@@ -246,6 +262,8 @@ const BINDING_ANNOTATIONS = new Set([
   "ModelAttribute",
   "RequestAttribute",
   "SessionAttribute",
+  "AuthenticationPrincipal",
+  "Value",
 ]);
 
 const SIMPLE_BIND_TYPES = new Set([
