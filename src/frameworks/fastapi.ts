@@ -149,6 +149,26 @@ function depNameOf(node: TsNode | null): string | null {
   return null;
 }
 
+// Extract the positional arguments of an `Annotated[...]` generic. Tree-sitter
+// parses Annotated in two shapes: as a type annotation (`generic_type` with
+// `type_parameter` children) and as an assignment RHS (`subscript` expression
+// whose slice lives in a `subscriptscript` child). Both are handled.
+function annotatedTypeArgs(generic: TsNode): TsNode[] {
+  const asTypeParams = childrenOfType(generic, "type_parameter");
+  if (asTypeParams.length) {
+    return asTypeParams.flatMap((p) =>
+      p.namedChildren.map((child) =>
+        child.type === "type" ? child.namedChildren[0] ?? child : child,
+      ),
+    );
+  }
+  // subscript expression context (Name = Annotated[...]): after the leading
+  // `Annotated` value, the comma-separated args are direct named children.
+  return generic.namedChildren
+    .slice(1)
+    .filter((c) => c.type !== "," && c.type !== "comment");
+}
+
 function annotatedMetadata(param: PyParam): TsNode[] {
   if (!param.annotation) return [];
   const generic =
@@ -159,13 +179,7 @@ function annotatedMetadata(param: PyParam): TsNode[] {
   // generic_type: identifier Annotated + type_parameter(type, metadata...)
   const name = generic.namedChildren[0]?.text.split(".").pop();
   if (name !== "Annotated") return [];
-  const params = childrenOfType(generic, "type_parameter");
-  const args = params.flatMap((p) =>
-    p.namedChildren.map((child) =>
-      child.type === "type" ? child.namedChildren[0] ?? child : child,
-    ),
-  );
-  return args.slice(1);
+  return annotatedTypeArgs(generic).slice(1);
 }
 
 function annotatedInnerType(param: PyParam): TsNode | null {
@@ -177,13 +191,7 @@ function annotatedInnerType(param: PyParam): TsNode | null {
   if (!generic) return null;
   const name = generic.namedChildren[0]?.text.split(".").pop();
   if (name !== "Annotated") return null;
-  const params = childrenOfType(generic, "type_parameter");
-  const args = params.flatMap((p) =>
-    p.namedChildren.map((child) =>
-      child.type === "type" ? child.namedChildren[0] ?? child : child,
-    ),
-  );
-  return args[0] ?? null;
+  return annotatedTypeArgs(generic)[0] ?? null;
 }
 
 function injectionKind(param: PyParam): { kind: string; call: TsNode } | null {
@@ -524,6 +532,44 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
       }
     }
 
+    // Pass 1c: index module-level `Name = Annotated[...]` type aliases. Modern
+    // FastAPI code commonly declares `CurrentUser = Annotated[User, Depends(...)]`
+    // once and annotates handlers with the bare alias; without resolving it the
+    // dependency would leak as a fabricated query parameter.
+    const annotatedAliases = new Map<string, Map<string, TsNode>>();
+    for (const file of analysis.files.values()) {
+      const local = new Map<string, TsNode>();
+      for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+        const target = assignment.namedChildren[0];
+        const value = assignment.namedChildren[assignment.namedChildren.length - 1];
+        if (!target || target.type !== "identifier" || !value) continue;
+        const generic =
+          value.type === "generic_type" || value.type === "subscript" ? value : null;
+        if (generic?.namedChildren[0]?.text.split(".").pop() !== "Annotated") continue;
+        local.set(target.text, generic);
+      }
+      if (local.size) annotatedAliases.set(file.path, local);
+    }
+
+    // Resolve a bare-identifier annotation to the Annotated generic it aliases,
+    // following a `from module import Alias` import. Returns null when the name is
+    // not an Annotated alias (the common case), leaving prior behaviour untouched.
+    const resolveAnnotatedAlias = (ownerFile: string, name: string): TsNode | null => {
+      const local = annotatedAliases.get(ownerFile);
+      const here = local?.get(name);
+      if (here) return here;
+      const pyFile = analysis.files.get(ownerFile);
+      const imported = pyFile?.imports.get(name);
+      if (!imported) return null;
+      const absolute = resolveRelativeModule(ownerFile, imported.module);
+      const targetFile = resolveModuleFile(absolute) ?? moduleToFile.get(imported.importedName ?? name);
+      if (!targetFile) return null;
+      return annotatedAliases.get(targetFile)?.get(imported.importedName ?? name) ?? null;
+    };
+
+    // The bare-identifier annotation -> Annotated alias resolver is passed down to
+    // buildRoute so dependency expansion can apply it per parameter.
+
     // Pass 2: route decorators.
     for (const fn of analysis.functions) {
       if (!fn.decorated) continue;
@@ -618,7 +664,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         continue;
       }
       const mount = chain ?? { prefix: "", tags: [] };
-      const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings);
+      const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings, resolveAnnotatedAlias);
       routes.push(candidate);
     }
 
@@ -703,11 +749,23 @@ function buildRoute(
   analysis: PythonAnalysis,
   modelIndex: ModelIndex,
   securityBindings: SecurityBinding[],
+  resolveAlias: (ownerFile: string, name: string) => TsNode | null,
 ): RouteCandidate {
   const { call: decoratorCall, fn, file } = site;
   const parameters: RouteParameter[] = [];
   const gaps = new Set<GapCode>();
   const tags = new Set(inheritedTags);
+
+  // If a parameter annotation is a bare identifier that aliases Annotated[...],
+  // present the alias's generic node as the effective annotation.
+  const effectiveParam = (param: PyParam, ownerFile: string): PyParam => {
+    if (param.annotation && param.annotation.type === "identifier") {
+      const aliasNode = resolveAlias(ownerFile, param.annotation.text);
+      if (aliasNode) return { ...param, annotation: aliasNode };
+    }
+    return param;
+  };
+
   const decoratorTags = listElements(keywordArgument(decoratorCall, "tags"))
     .map((node) => literalString(node))
     .filter((value): value is string => !!value);
@@ -749,8 +807,10 @@ function buildRoute(
         (candidate) => candidate.name === "__init__" && candidate.file === cls.file,
       );
       const owner = cls.file;
-      for (const depParam of init?.params ?? []) {
-        if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
+      for (const depParam0 of init?.params ?? []) {
+        if (["self", "cls"].includes(depParam0.name) || depParam0.kind !== "plain") continue;
+        const depParam = effectiveParam(depParam0, owner);
+        if (isRequestParam(depParam)) continue;
         const nested = injectionKind(depParam);
         if (nested?.kind === "Depends") {
           const nestedName = depNameOf(positionalArguments(nested.call)[0] ?? null);
@@ -768,8 +828,10 @@ function buildRoute(
         (candidate) => candidate.name === depName && candidate.file === ownerFile,
       ) ?? analysis.functions.find((candidate) => candidate.name === depName);
     if (depFn) {
-      for (const depParam of depFn.params) {
-        if (["self", "cls"].includes(depParam.name) || depParam.kind !== "plain") continue;
+      for (const depParam0 of depFn.params) {
+        if (["self", "cls"].includes(depParam0.name) || depParam0.kind !== "plain") continue;
+        const depParam = effectiveParam(depParam0, depFn.file);
+        if (isRequestParam(depParam)) continue;
         const nested = injectionKind(depParam);
         if (nested?.kind === "Depends") {
           const nestedName = depNameOf(positionalArguments(nested.call)[0] ?? null);
@@ -783,8 +845,9 @@ function buildRoute(
     }
   };
 
-  for (const param of fn.params) {
-    if (["self", "cls"].includes(param.name) || param.kind !== "plain") continue;
+  for (const rawParam of fn.params) {
+    if (["self", "cls"].includes(rawParam.name) || rawParam.kind !== "plain") continue;
+    const param = effectiveParam(rawParam, file);
     if (isRequestParam(param)) continue;
 
     const injection = injectionKind(param);
@@ -816,7 +879,15 @@ function buildRoute(
     const kind = injection?.kind;
 
     if (placeholderNames.has(param.name) || kind === "Path") {
-      const placeholder = placeholders.find((p) => p.name === param.name);
+      // FastAPI exposes a Path parameter under its `alias=` on the wire, and the
+      // alias must match the {placeholder} in the route template. The python arg
+      // name (often snake_case) is internal only; e.g. `comment_id: int =
+      // Path(alias="commentId")` maps to the `{commentId}` segment.
+      const aliasName = kind === "Path" ? injectionAlias(injection!.call) : null;
+      const wireName = aliasName ?? param.name;
+      const placeholder =
+        placeholders.find((p) => p.name === wireName) ??
+        placeholders.find((p) => p.name === param.name);
       const base = param.annotation
         ? annotationToSchema(param.annotation, modelIndex)
         : null;
@@ -826,7 +897,7 @@ function buildRoute(
         kind === "Path" ? injection!.call : null,
       );
       parameters.push({
-        name: param.name,
+        name: wireName,
         in: "path",
         required: true,
         schema,

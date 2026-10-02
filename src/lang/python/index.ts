@@ -227,6 +227,11 @@ export async function createPythonAnalysis(
       ) {
         pydanticBaseNames.add(binding);
       }
+      // SQLModel models are Pydantic models under the hood; a class inheriting
+      // SQLModel (directly or via a shared base) is treated like a BaseModel.
+      if (descriptor.module === "sqlmodel" && descriptor.importedName === "SQLModel") {
+        pydanticBaseNames.add(binding);
+      }
       if (
         descriptor.module === "enum" &&
         ["Enum", "StrEnum", "IntEnum", "Flag"].includes(
@@ -258,6 +263,7 @@ export async function createPythonAnalysis(
   // `import pydantic` style: attribute bases resolve through this binding.
   for (const file of files.values()) {
     if (file.imports.has("pydantic")) pydanticBaseNames.add("pydantic.BaseModel");
+    if (file.imports.has("sqlmodel")) pydanticBaseNames.add("sqlmodel.SQLModel");
     if (file.imports.has("enum")) enumBaseNames.add("enum.Enum");
   }
 

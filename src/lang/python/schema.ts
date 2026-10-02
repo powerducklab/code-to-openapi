@@ -67,6 +67,8 @@ export function buildModelIndex(analysis: PythonAnalysis): ModelIndex {
     const text = node.text.trim();
     if (analysis.pydanticBaseNames.has(text)) return true;
     if (text === "pydantic.BaseModel" || text.endsWith(".BaseModel")) return true;
+    // SQLModel models are Pydantic-compatible; accept `sqlmodel.SQLModel` bases.
+    if (text === "sqlmodel.SQLModel" || text.endsWith(".SQLModel")) return true;
     const tail = text.split(".").pop() ?? text;
     if (analysis.pydanticBaseNames.has(tail)) return true;
     return false;
