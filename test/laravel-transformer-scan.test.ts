@@ -34,7 +34,8 @@ describe("laravel transformer / static-helper method following", () => {
   it("resolves the standard static helper envelope {status,messages,payload}", async () => {
     const all = await ops();
     const store = all.find((o) => o.method === "post" && o.path === "/accessories");
-    expect(store?.gaps ?? []).not.toContain("response-schema-unknown");
+    // The helper envelope is known, but its untyped payload still needs review.
+    expect(store?.gaps ?? []).toContain("response-schema-unknown");
     const props = store?.responses.find((r) => r.statusCode === "200")?.content?.[0]?.schema?.properties;
     expect(Object.keys(props ?? {}).sort()).toEqual(["messages", "payload", "status"]);
   });

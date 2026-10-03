@@ -13,7 +13,10 @@ import type {
   ScanContext,
   SourceLocation,
 } from "../core/types.js";
+import { dirname, isAbsolute, join, sep } from "node:path";
+
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { convertFluentNode } from "../lang/typescript/fluentSchema.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import {
   findExportedDeclaration,
@@ -35,7 +38,8 @@ const HTTP_METHODS = new Set([
 interface RouteSite {
   instance: string;
   method: string;
-  url: string;
+  /** Raw URL argument node; resolved per scope to support prefix concatenation. */
+  urlNode: any | null;
   /** Native JSON Schema node from route options (`schema`), when present. */
   schemaNode: any | null;
   /** Route generic `app.get<{ Params; Querystring; Body; Headers }>`, when present. */
@@ -54,9 +58,20 @@ interface RegisterEdge {
   pluginName: string | null;
   /** Factory call whose callee name returns a plugin (e.g. `routes(deps)`). */
   pluginCallName: string | null;
+  /** Direct `require("spec")` target, when the plugin is required inline. */
+  pluginSpecifier: string | null;
+  /** Inline require() of an external package (middleware): no project routes. */
+  externalSpecifier?: string;
   /** Inline plugin function/arrow node, when registered directly. */
   inlineNode: any | null;
   prefix: string;
+  /** @fastify/autoload registration, when the target resolves to that package. */
+  autoload?: {
+    dirNode: any;
+    optionsNode: any;
+    dirNameRoutePrefix: boolean;
+    encapsulate: boolean;
+  };
 }
 
 interface FileModel {
@@ -69,6 +84,8 @@ interface FileModel {
   moduleBindings: Map<string, { specifier: string; exportName: string }>;
   /** Bindings imported from external packages (middleware plugins, etc.). */
   externalBindings: Set<string>;
+  /** Local binding name -> module specifier (covers ESM imports and CJS requires). */
+  bindingSpecifiers: Map<string, string>;
   routes: RouteSite[];
   edges: RegisterEdge[];
   listenPorts: number[];
@@ -114,6 +131,342 @@ function tagForPath(fullPath: string, file: string): string[] {
   if (segment && !segment.startsWith("{")) return [segment];
   const base = file.split("/").pop()?.replace(/\.[jt]sx?$/, "") ?? "default";
   return [base === "index" ? "default" : base];
+}
+
+/**
+ * Route URLs in real Fastify apps are frequently built from a runtime mount
+ * prefix, e.g. `options.prefix + "users/login"` or
+ * `` `${options.prefix}users` ``. The prefix operand is recognized
+ * structurally (any `<obj>.prefix` access) so the static suffix can still be
+ * extracted; the caller reports an honest gap when the prefix value is unknown.
+ */
+interface RouteUrlResolution {
+  /** Concatenated static text, with the runtime prefix operand removed. */
+  url: string;
+  /** True when a runtime `<obj>.prefix` operand was present. */
+  runtimePrefix: boolean;
+  /** True when the URL cannot be reduced to static text at all. */
+  fullyDynamic: boolean;
+}
+
+/** Sentinel alias value for a destructured runtime `prefix` binding. */
+const RUNTIME_PREFIX_MARKER = { __runtimePrefix: true } as const;
+
+function resolveRouteUrl(
+  ts: any,
+  node: any,
+  resolveAlias?: (id: any) => any,
+): RouteUrlResolution | null {
+  if (!node) return null;
+  // Follow local const aliases such as `const prefix = options.prefix || ""`.
+  const deref = (n: any, guard = 0): any => {
+    let cur = n;
+    while (ts.isIdentifier(cur) && resolveAlias && guard < 8) {
+      const aliased = resolveAlias(cur);
+      if (!aliased || aliased === cur) break;
+      cur = aliased;
+      guard += 1;
+    }
+    return cur;
+  };
+  node = deref(node);
+  if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return { url: node.text, runtimePrefix: false, fullyDynamic: false };
+  }
+
+  const isPrefixAccess = (n: any): boolean => {
+    if (n === RUNTIME_PREFIX_MARKER) return true;
+    const d = deref(n);
+    if (d === RUNTIME_PREFIX_MARKER) return true;
+    return ts.isPropertyAccessExpression(d) && d.name.text === "prefix";
+  };
+
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const parts: string[] = [];
+    let runtimePrefix = false;
+    const gather = (raw: any): boolean => {
+      const n = deref(raw);
+      if (ts.isStringLiteralLike(n) || ts.isNoSubstitutionTemplateLiteral(n)) {
+        parts.push(n.text);
+        return true;
+      }
+      if (isPrefixAccess(n)) {
+        runtimePrefix = true;
+        return true;
+      }
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken.kind === ts.SyntaxKind.PlusToken
+      ) {
+        return gather(n.left) && gather(n.right);
+      }
+      if (ts.isTemplateExpression(n)) return fromTemplate(n);
+      return false;
+    };
+    const fromTemplate = (tpl: any): boolean => {
+      parts.push(tpl.head.text);
+      for (const span of tpl.templateSpans) {
+        const expr = deref(span.expression);
+        if (!isPrefixAccess(expr)) return false;
+        runtimePrefix = true;
+        parts.push(span.literal.text);
+      }
+      return true;
+    };
+    if (!gather(node)) return { url: "", runtimePrefix: false, fullyDynamic: true };
+    return { url: parts.join(""), runtimePrefix, fullyDynamic: false };
+  }
+
+  if (ts.isTemplateExpression(node)) {
+    const parts = [node.head.text];
+    let runtimePrefix = false;
+    for (const span of node.templateSpans) {
+      const expr = deref(span.expression);
+      if (!isPrefixAccess(expr)) {
+        return { url: "", runtimePrefix: false, fullyDynamic: true };
+      }
+      runtimePrefix = true;
+      parts.push(span.literal.text);
+    }
+    return { url: parts.join(""), runtimePrefix, fullyDynamic: false };
+  }
+
+  return null;
+}
+
+/**
+ * Collects local const aliases for route URL construction inside a plugin
+ * scope, e.g. `const prefix = options.prefix || ""` or
+ * `const { prefix } = options`. Nested function bodies are skipped.
+ */
+function collectPrefixAliases(ts: any, scopeNode: any): Map<string, any> {
+  const aliases = new Map<string, any>();
+  if (!scopeNode) return aliases;
+  const consider = (decl: any) => {
+    if (
+      ts.isVariableDeclaration(decl) &&
+      ts.isIdentifier(decl.name) &&
+      decl.initializer
+    ) {
+      const init = decl.initializer;
+      if (ts.isStringLiteralLike(init)) {
+        aliases.set(decl.name.text, init);
+      } else if (ts.isPropertyAccessExpression(init) && init.name.text === "prefix") {
+        aliases.set(decl.name.text, init);
+      } else if (
+        ts.isBinaryExpression(init) &&
+        (init.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+          init.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) &&
+        ts.isPropertyAccessExpression(init.left) &&
+        init.left.name.text === "prefix"
+      ) {
+        aliases.set(decl.name.text, init.left);
+      }
+    }
+    // Destructuring: `const { prefix } = options`.
+    if (
+      ts.isVariableDeclaration(decl) &&
+      ts.isObjectBindingPattern(decl.name) &&
+      ts.isIdentifier(decl.initializer)
+    ) {
+      for (const element of decl.name.elements) {
+        if (
+          ts.isBindingElement(element) &&
+          !element.propertyName &&
+          ts.isIdentifier(element.name) &&
+          element.name.text === "prefix"
+        ) {
+          aliases.set("prefix", RUNTIME_PREFIX_MARKER);
+        }
+      }
+    }
+  };
+  const walk = (n: any, isRoot: boolean) => {
+    if (
+      !isRoot &&
+      (ts.isArrowFunction(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isMethodDeclaration(n))
+    ) {
+      return;
+    }
+    consider(n);
+    ts.forEachChild(n, (child: any) => walk(child, false));
+  };
+  walk(scopeNode, true);
+  return aliases;
+}
+
+/**
+ * Detects a fluent-json-schema builder chain (S.object()..., S.oneOf([...]),
+ * S.ref("..."), S.raw({...})). The base identifier name is irrelevant; plain
+ * JavaScript projects import it under any name.
+ */
+function isFluentSchemaNode(ts: any, node: any): boolean {
+  if (!node || !ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+    return false;
+  }
+  let cur: any = node;
+  while (ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression)) {
+    cur = cur.expression.expression;
+  }
+  if (
+    ts.isCallExpression(cur) &&
+    ts.isPropertyAccessExpression(cur.expression) &&
+    ["oneOf", "anyOf", "allOf", "ref", "raw", "not"].includes(cur.expression.name.text)
+  ) {
+    return true;
+  }
+  // The innermost call must be a known type constructor.
+  let inner: any = node;
+  while (
+    ts.isCallExpression(inner) &&
+    ts.isPropertyAccessExpression(inner.expression) &&
+    ts.isCallExpression(inner.expression.expression)
+  ) {
+    inner = inner.expression.expression;
+  }
+  if (
+    ts.isCallExpression(inner) &&
+    ts.isPropertyAccessExpression(inner.expression) &&
+    [
+      "object",
+      "string",
+      "number",
+      "integer",
+      "boolean",
+      "array",
+      "null",
+    ].includes(inner.expression.name.text)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Converts a schema-valued AST node (fluent builder, plain JSON literal, or a
+ * mix of both) into a JSON Schema object. Returns undefined when the node does
+ * not describe a schema.
+ */
+function schemaValueToJson(ts: any, node: any, depth = 0): JsonSchema | undefined {
+  if (!node || depth > 12) return undefined;
+  if (isFluentSchemaNode(ts, node)) {
+    const schema = convertFluentNode(node, { ts, depth });
+    if (schema) delete (schema as Record<string, unknown>).$schema;
+    return schema ?? undefined;
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    const out: Record<string, unknown> = {};
+    for (const prop of node.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const name = prop.name?.getText?.().replace(/^['"]|['"]$/g, "");
+      if (!name) continue;
+      const value = schemaValueToJson(ts, prop.initializer, depth + 1);
+      if (value !== undefined) out[name] = value;
+    }
+    return out as JsonSchema;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    const members = node.elements
+      .map((el: any) => schemaValueToJson(ts, el, depth + 1))
+      .filter((s: JsonSchema | undefined): s is JsonSchema => s !== undefined);
+    return members as unknown as JsonSchema;
+  }
+  const value = literalValue(ts, node);
+  // Primitive leaves (type names, enum values, required arrays' strings) are
+  // valid schema fragments; only unresolvable identifiers and calls drop out.
+  if (value !== undefined) return value as unknown as JsonSchema;
+  return undefined;
+}
+
+/**
+ * Mirrors @fastify/autoload's underscore route parameter conversion:
+ * directory segment `_id` becomes `:id`, `__id` becomes `:id`.
+ */
+function autoloadSegmentToPath(segment: string): string {
+  if (segment.includes("__")) return segment.replace(/__/g, ":");
+  if (segment.startsWith("_")) return `:${segment.slice(1)}`;
+  return segment;
+}
+
+const AUTOLOAD_INDEX_PATTERN = /^index(?:\.ts|\.js|\.cjs|\.mjs|\.cts|\.mts)$/;
+const AUTOLOAD_SCRIPT_PATTERN = /\.(?:ts|js|cjs|mjs|cts|mts)$/;
+
+/**
+ * Returns the module specifier of a register() target, resolving local
+ * bindings and direct `require("...")` calls.
+ */
+function targetSpecifierOf(ts: any, model: FileModel, target: any): string | null {
+  if (!target) return null;
+  if (
+    ts.isCallExpression(target) &&
+    ts.isIdentifier(target.expression) &&
+    target.expression.text === "require" &&
+    ts.isStringLiteralLike(target.arguments[0])
+  ) {
+    return target.arguments[0].text;
+  }
+  if (ts.isIdentifier(target)) return model.bindingSpecifiers.get(target.text) ?? null;
+  return null;
+}
+
+/** Resolves an autoload `dir` option to an absolute filesystem path. */
+function resolveAutoloadDir(ts: any, sourceFile: any, dirNode: any): string | null {
+  if (!dirNode) return null;
+  const sourceDir = dirname(sourceFile.fileName);
+  if (ts.isStringLiteralLike(dirNode)) {
+    return isAbsolute(dirNode.text) ? dirNode.text : join(sourceDir, dirNode.text);
+  }
+  // path.join(__dirname, "routes", ...) / path.resolve(__dirname, ...),
+  // including `require("path").join(...)`.
+  const segments: string[] = [];
+  const collect = (n: any): boolean => {
+    if (n && ts.isIdentifier(n) && n.text === "__dirname") return true;
+    if (n && (ts.isStringLiteralLike(n) || ts.isNoSubstitutionTemplateLiteral(n))) {
+      segments.push(n.text);
+      return true;
+    }
+    return false;
+  };
+  if (
+    ts.isCallExpression(dirNode) &&
+    ts.isPropertyAccessExpression(dirNode.expression) &&
+    ["join", "resolve"].includes(dirNode.expression.name.text)
+  ) {
+    for (const arg of dirNode.arguments) {
+      if (!collect(arg)) return null;
+    }
+    return join(sourceDir, ...segments);
+  }
+  // __dirname + "/routes"
+  if (
+    ts.isBinaryExpression(dirNode) &&
+    dirNode.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const literals: string[] = [];
+    let ok = true;
+    const walk = (n: any) => {
+      if (ts.isIdentifier(n) && n.text === "__dirname") return;
+      if (ts.isStringLiteralLike(n)) {
+        literals.push(n.text);
+        return;
+      }
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken.kind === ts.SyntaxKind.PlusToken
+      ) {
+        walk(n.left);
+        walk(n.right);
+        return;
+      }
+      ok = false;
+    };
+    walk(dirNode);
+    return ok ? join(sourceDir, ...literals) : null;
+  }
+  return null;
 }
 
 function literalValue(ts: any, node: any, depth = 0): unknown {
@@ -169,6 +522,8 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
     const candidates: RouteCandidate[] = [];
     const servers: DiscoveredServer[] = [];
     let bearerAuth = false;
+    // De-duplicates runtime-prefix gaps (one per autoloaded scope, not per route).
+    const reportedPrefixGaps = new Set<string>();
 
     // Resolve a plugin identifier (imported or local function) to the function
     // node and the file it lives in.
@@ -268,6 +623,18 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
               if (local) raw = local.node;
             }
           }
+          // CommonJS: `module.exports = fn | fp(fn) | ident`.
+          if (
+            (exportName === "module" || exportName === "default") &&
+            ts.isExpressionStatement(child) &&
+            ts.isBinaryExpression(child.expression) &&
+            child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isPropertyAccessExpression(child.expression.left) &&
+            child.expression.left.expression.getText(sf) === "module" &&
+            child.expression.left.name.text === "exports"
+          ) {
+            raw = child.expression.right;
+          }
           if (!ts.isVariableStatement(child)) return;
           for (const decl of child.declarationList.declarations) {
             if (
@@ -282,6 +649,31 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
         if (raw) {
           const unwrapped = unwrap(raw, sf);
           if (unwrapped) return unwrapped;
+          // `module.exports = fp(plugin)` with a local function identifier.
+          if (ts.isIdentifier(raw)) {
+            let localFn: any = null;
+            const walk = (n: any) => {
+              if (localFn) return;
+              if (ts.isFunctionDeclaration(n) && n.name?.text === raw.text) {
+                localFn = n;
+                return;
+              }
+              if (
+                ts.isVariableDeclaration(n) &&
+                ts.isIdentifier(n.name) &&
+                n.name.text === raw.text &&
+                n.initializer &&
+                (ts.isArrowFunction(n.initializer) ||
+                  ts.isFunctionExpression(n.initializer))
+              ) {
+                localFn = n.initializer;
+                return;
+              }
+              ts.forEachChild(n, walk);
+            };
+            sf.forEachChild((c: any) => walk(c));
+            if (localFn) return { file: sf, node: localFn };
+          }
         }
 
         // Follow named and wildcard re-exports.
@@ -336,6 +728,22 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
       return param
         ? { file: resolvedExport.file, node: target, instanceParam: param }
         : null;
+    };
+
+    // Resolves a relative module specifier (inline `require("./routes")`) to a
+    // project source file. External packages never resolve here.
+    const resolveSpecifierFile = (model: FileModel, specifier: string): any | null => {
+      if (!specifier.startsWith(".")) return null;
+      const resolved = ts.resolveModuleName
+        ? ts.resolveModuleName(
+            specifier,
+            model.source.fileName,
+            analysis.program.getCompilerOptions(),
+            ts.sys,
+          )?.resolvedModule?.resolvedFileName
+        : undefined;
+      if (!resolved || !analysis.isProjectFile(resolved)) return null;
+      return analysis.program.getSourceFile(resolved);
     };
 
     // Locate a function-like binding by name in a model's file or an imported
@@ -451,12 +859,218 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
 
     const visitedScopes = new Set<string>();
 
+    /**
+     * Statically resolves an autoload `options` object's `prefix` field.
+     * Returns "" when no options/prefix exist, a literal prefix when known,
+     * and null when it is computed at runtime (config objects, parameters).
+     */
+    const resolveOptionsPrefix = (
+      model: FileModel,
+      optionsNode: any,
+    ): string | null => {
+      if (!optionsNode) return "";
+      const { ts } = analysis;
+      const prefixOf = (obj: any): string | null => {
+        if (!obj || !ts.isObjectLiteralExpression(obj)) return null;
+        const prop = obj.properties.find(
+          (p: any) =>
+            ts.isPropertyAssignment(p) &&
+            p.name?.getText?.(model.source).replace(/['"]/g, "") === "prefix",
+        );
+        if (!prop) return "";
+        const value = literalValue(ts, prop.initializer);
+        return typeof value === "string" ? value : null;
+      };
+      if (ts.isObjectLiteralExpression(optionsNode)) return prefixOf(optionsNode);
+      if (!ts.isIdentifier(optionsNode)) return null;
+
+      // Same-file const object literal.
+      let found: any = null;
+      const findLocal = (n: any) => {
+        if (found) return;
+        if (
+          ts.isVariableDeclaration(n) &&
+          ts.isIdentifier(n.name) &&
+          n.name.text === optionsNode.text &&
+          n.initializer
+        ) {
+          found = n.initializer;
+        }
+        ts.forEachChild(n, findLocal);
+      };
+      model.source.forEachChild((c: any) => findLocal(c));
+      if (found) {
+        if (ts.isObjectLiteralExpression(found)) return prefixOf(found);
+        return null; // function call / parameter: runtime
+      }
+
+      // Imported or required config module.
+      const imported = resolveImportedFile(analysis, model.source, optionsNode.text);
+      if (imported) {
+        const { file } = imported;
+        let obj: any = null;
+        file.forEachChild((child: any) => {
+          if (obj) return;
+          if (
+            ts.isExpressionStatement(child) &&
+            ts.isBinaryExpression(child.expression) &&
+            ts.isPropertyAccessExpression(child.expression.left) &&
+            child.expression.left.expression.getText(file) === "module" &&
+            child.expression.left.name.text === "exports"
+          ) {
+            if (ts.isObjectLiteralExpression(child.expression.right)) obj = child.expression.right;
+          }
+          if (ts.isVariableStatement(child)) {
+            for (const decl of child.declarationList.declarations) {
+              if (
+                ts.isIdentifier(decl.name) &&
+                decl.name.text === optionsNode.text &&
+                ts.isObjectLiteralExpression(decl.initializer)
+              ) {
+                obj = decl.initializer;
+              }
+            }
+          }
+        });
+        if (obj) return prefixOf(obj);
+      }
+      return null;
+    };
+
+    /**
+     * Expands an @fastify/autoload registration: enumerates indexed plugin
+     * files exactly as autoload would (index.js wins over sibling files,
+     * directory name prefixing honors dirNameRoutePrefix) and processes each
+     * resolved plugin scope. Non-plugin modules (e.g. schema.js) are skipped,
+     * mirroring autoload's own behavior.
+     */
+    const expandAutoload = (
+      model: FileModel,
+      edge: RegisterEdge,
+      parentPrefix: string,
+      depth: number,
+    ) => {
+      const { ts } = analysis;
+      const spec = edge.autoload!;
+      const dirAbs = resolveAutoloadDir(ts, model.source, spec.dirNode);
+      if (!dirAbs) {
+        unresolved.push({
+          reason: "dynamic-path",
+          message: "@fastify/autoload dir option could not be statically resolved",
+          origin: { file: model.rel },
+        });
+        return;
+      }
+
+      const optionsPrefix = resolveOptionsPrefix(model, spec.optionsNode);
+      const rootPrefix = joinPrefix(parentPrefix, edge.prefix);
+
+      // Virtual directory tree from the indexed files under dirAbs.
+      const dirs = new Map<string, { files: string[]; subdirs: Set<string> }>();
+      const ensureDir = (dir: string) => {
+        let entry = dirs.get(dir);
+        if (!entry) {
+          entry = { files: [], subdirs: new Set() };
+          dirs.set(dir, entry);
+        }
+        return entry;
+      };
+      ensureDir(dirAbs);
+      const rootWithSep = dirAbs.endsWith(sep) ? dirAbs : `${dirAbs}${sep}`;
+      for (const file of ctx.index.files) {
+        if (!file.absolutePath.startsWith(rootWithSep)) continue;
+        if (!AUTOLOAD_SCRIPT_PATTERN.test(file.path) || /\.d\.ts$/.test(file.path)) continue;
+        const fileDir = dirname(file.absolutePath);
+        ensureDir(fileDir).files.push(file.path);
+        let cursor = fileDir;
+        while (cursor.length > dirAbs.length) {
+          const parent = dirname(cursor);
+          ensureDir(parent).subdirs.add(cursor);
+          cursor = parent;
+          if (!cursor.startsWith(dirAbs)) break;
+        }
+      }
+
+      const walk = (dir: string, segments: string[]) => {
+        const entry = dirs.get(dir);
+        if (!entry) return;
+        const sortedFiles = [...entry.files].sort();
+        const indexRel = sortedFiles.find((relPath) =>
+          AUTOLOAD_INDEX_PATTERN.test(relPath.split("/").pop()!),
+        );
+        const processPlugin = (relPath: string, folderSegments: string[]) => {
+          const childModel = models.get(relPath.split(sep).join("/"));
+          if (!childModel) return;
+          const plugin = resolvePluginExport(ts, childModel);
+          if (!plugin) return; // Non-plugin module (schema tables, config): autoload skips.
+          const param =
+            plugin.node.parameters?.[0]?.name?.getText?.(childModel.source) ?? "fastify";
+          if (plugin.fpWrapped) {
+            // fastify-plugin opts out of encapsulation: autoload prefixes and
+            // options.prefix are not applied by Fastify; routes carry their
+            // own absolute or manually concatenated paths.
+            processScope(
+              childModel,
+              plugin.node.body ?? plugin.node,
+              param,
+              "",
+              depth + 1,
+              { value: optionsPrefix === "" ? null : optionsPrefix },
+            );
+          } else {
+            if (optionsPrefix === null) {
+              const gapKey = `dynamic-prefix:${relPath}`;
+              if (!reportedPrefixGaps.has(gapKey)) {
+                reportedPrefixGaps.add(gapKey);
+                unresolved.push({
+                  reason: "dynamic-path",
+                  message:
+                    "@fastify/autoload options.prefix is computed at runtime; routes are listed without that prefix",
+                  origin: { file: relPath },
+                });
+              }
+            }
+            const staticPrefix = joinPrefix(
+              rootPrefix,
+              optionsPrefix ?? "",
+              ...folderSegments,
+            );
+            processScope(
+              childModel,
+              plugin.node.body ?? plugin.node,
+              param,
+              staticPrefix,
+              depth + 1,
+              optionsPrefix === null ? { value: null } : null,
+            );
+          }
+        };
+
+        if (indexRel) {
+          processPlugin(indexRel, segments);
+        } else {
+          for (const relPath of sortedFiles) processPlugin(relPath, segments);
+        }
+
+        for (const subdir of [...entry.subdirs].sort()) {
+          const name = subdir.split(sep).pop()!;
+          const nextSegments = spec.dirNameRoutePrefix
+            ? [...segments, autoloadSegmentToPath(name)]
+            : segments;
+          walk(subdir, nextSegments);
+        }
+      };
+
+      walk(dirAbs, []);
+    };
+
     const processScope = (
       model: FileModel,
       scopeNode: any,
       instanceName: string,
       prefix: string,
       depth: number,
+      runtimePrefix: { value: string | null } | null = null,
     ) => {
       if (depth > 12) return;
       const scopeKey = `${model.rel}:${instanceName}:${prefix}:${scopeNode?.pos ?? 0}`;
@@ -518,8 +1132,38 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
         prefix,
       );
 
+      const prefixAliases = collectPrefixAliases(ts, scopeNode ?? model.source);
+      const resolveUrlAlias = (id: any) =>
+        ts.isIdentifier(id) ? (prefixAliases.get(id.text) ?? null) : null;
+
       for (const site of sites.routes) {
-        const normalized = normalizeFastifyPath(site.url);
+        const urlResolution = resolveRouteUrl(ts, site.urlNode, resolveUrlAlias);
+        if (!urlResolution || urlResolution.fullyDynamic) {
+          unresolved.push({
+            reason: "dynamic-path",
+            message: "Fastify route path is not a static string literal",
+            origin: site.origin,
+          });
+          continue;
+        }
+        let staticUrl = urlResolution.url;
+        if (urlResolution.runtimePrefix) {
+          if (runtimePrefix && typeof runtimePrefix.value === "string") {
+            staticUrl = `${runtimePrefix.value}${staticUrl}`;
+          } else {
+            const gapKey = `dynamic-prefix:${model.rel}:${prefix}`;
+            if (!reportedPrefixGaps.has(gapKey)) {
+              reportedPrefixGaps.add(gapKey);
+              unresolved.push({
+                reason: "dynamic-path",
+                message:
+                  "Fastify mount prefix is computed at runtime (options.prefix); routes are listed without that prefix",
+                origin: site.origin,
+              });
+            }
+          }
+        }
+        const normalized = normalizeFastifyPath(staticUrl);
         if (normalized.dynamic) {
           unresolved.push({
             reason: "dynamic-path",
@@ -533,10 +1177,36 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           [...fullPath.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!),
         );
 
-        const schemaLiteral = resolveSchemaLiteral(ts, model, site.schemaNode);
-        const schemaFacts = extractRouteSchema(ts, analysis, schemaLiteral);
+        const schemaResolved = resolveSchemaValueNode(
+          ts,
+          analysis,
+          models,
+          model,
+          site.schemaNode,
+          new Set(),
+        );
+        const schemaFacts = extractRouteSchema(
+          ts,
+          analysis,
+          models,
+          model,
+          schemaResolved?.node ?? null,
+        );
         let resolvedHandler: any = site.handler;
         let handlerFile: any = model.source;
+        // Handlers hoisted inside the plugin scope (e.g. `async function onLogin`
+        // declared below the server.route call) resolve lexically first.
+        if (
+          resolvedHandler &&
+          ts.isIdentifier(resolvedHandler) &&
+          scopeNode &&
+          scopeNode !== model.source
+        ) {
+          const lexical = findLexicalDeclaration(ts, scopeNode, resolvedHandler.text);
+          if (lexical) {
+            resolvedHandler = lexical;
+          }
+        }
         // Resolve imported handlers (`listProjects`) and namespaced handlers
         // (`controllers.login`) to their declared function before analysis.
         if (
@@ -580,16 +1250,72 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           components: [],
           handlerSource: sliceNode(ts, handlerFile, resolvedHandler),
         };
-        candidates.push(candidate);
+        if (site.method === "all") {
+          for (const verb of HTTP_METHODS) {
+            if (verb === "all") continue;
+            candidates.push({ ...structuredClone(candidate), method: verb, operationId: operationId(verb, fullPath) });
+          }
+        } else candidates.push(candidate);
       }
 
       for (const edge of sites.edges) {
+        if (edge.autoload) {
+          expandAutoload(model, edge, prefix, depth + 1);
+          continue;
+        }
+        // Inline require() of an external package (e.g. @fastify/jwt): it
+        // contributes middleware only, no project routes.
+        if (edge.externalSpecifier) continue;
         const childPrefix = joinPrefix(prefix, edge.prefix);
+        if (edge.pluginSpecifier) {
+          const targetFile = resolveSpecifierFile(model, edge.pluginSpecifier);
+          const childRel = targetFile ? relOfSource(targetFile, models) : null;
+          const childModel = childRel ? models.get(childRel) : undefined;
+          if (targetFile && childModel) {
+            const plugin = resolvePluginExport(ts, childModel);
+            if (plugin) {
+              const param =
+                plugin.node.parameters?.[0]?.name?.getText?.(childModel.source) ??
+                "fastify";
+              // fastify-plugin opts out of encapsulation, so the register
+              // prefix does not apply to its routes.
+              const effectivePrefix = plugin.fpWrapped ? "" : childPrefix;
+              processScope(
+                childModel,
+                plugin.node.body ?? plugin.node,
+                param,
+                effectivePrefix,
+                depth + 1,
+                runtimePrefix,
+              );
+            } else {
+              unresolved.push({
+                reason: "handler-unresolved",
+                message: `Fastify plugin module "${edge.pluginSpecifier}" did not export a plugin function`,
+                origin: { file: model.rel },
+              });
+            }
+          } else {
+            unresolved.push({
+              reason: "handler-unresolved",
+              message: `Fastify plugin module "${edge.pluginSpecifier}" could not be resolved`,
+              origin: { file: model.rel },
+            });
+          }
+          continue;
+        }
         if (edge.inlineNode) {
           const param =
             edge.inlineNode.parameters?.[0]?.name?.getText?.(model.source) ??
             instanceName;
-          processScope(model, edge.inlineNode.body ?? edge.inlineNode, param, childPrefix, depth + 1);
+          processScope(
+            model,
+            edge.inlineNode.body ?? edge.inlineNode,
+            param,
+            childPrefix,
+            depth + 1,
+            runtimePrefix,
+          );
         } else if (edge.pluginName) {
           if (model.externalBindings.has(edge.pluginName)) {
             // Third-party middleware plugin (helmet, cors, ...): no routes.
@@ -600,7 +1326,14 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
             const childRel = relOfSource(resolved.file, models);
             const childModel = childRel ? models.get(childRel) : undefined;
             if (childModel) {
-              processScope(childModel, resolved.node.body, resolved.instanceParam, childPrefix, depth + 1);
+              processScope(
+                childModel,
+                resolved.node.body ?? resolved.node,
+                resolved.instanceParam,
+                childPrefix,
+                depth + 1,
+                runtimePrefix,
+              );
             }
           } else {
             unresolved.push({
@@ -616,7 +1349,14 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
             const childRel = relOfSource(returned.file, models);
             const childModel = childRel ? models.get(childRel) : undefined;
             if (childModel) {
-              processScope(childModel, returned.node.body ?? returned.node, returned.instanceParam, childPrefix, depth + 1);
+              processScope(
+                childModel,
+                returned.node.body ?? returned.node,
+                returned.instanceParam,
+                childPrefix,
+                depth + 1,
+                runtimePrefix,
+              );
             }
           } else {
             unresolved.push({
@@ -706,6 +1446,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     roots: new Set(),
     moduleBindings: new Map(),
     externalBindings: new Set(),
+    bindingSpecifiers: new Map(),
     routes: [],
     edges: [],
     listenPorts: [],
@@ -716,12 +1457,14 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       const specifier = child.moduleSpecifier.text;
       if (specifier === "fastify" && child.importClause?.name) {
         model.factoryBindings.add(child.importClause.name.text);
+        model.bindingSpecifiers.set(child.importClause.name.text, specifier);
       } else if (specifier.startsWith(".") && child.importClause) {
         if (child.importClause.name) {
           model.moduleBindings.set(child.importClause.name.text, {
             specifier,
             exportName: "default",
           });
+          model.bindingSpecifiers.set(child.importClause.name.text, specifier);
         }
         const named = child.importClause.namedBindings;
         if (named && ts.isNamedImports(named)) {
@@ -730,23 +1473,76 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
               specifier,
               exportName: element.propertyName?.text ?? element.name.text,
             });
+            model.bindingSpecifiers.set(element.name.text, specifier);
           }
+        }
+        if (named && ts.isNamespaceImport(named)) {
+          model.moduleBindings.set(named.name.text, {
+            specifier,
+            exportName: "*",
+          });
+          model.bindingSpecifiers.set(named.name.text, specifier);
         }
       } else if (!specifier.startsWith(".") && child.importClause) {
         // External package (e.g. @fastify/helmet): middleware plugins carry
         // no project routes, so they are never reported as unresolved.
         if (child.importClause.name) {
           model.externalBindings.add(child.importClause.name.text);
+          model.bindingSpecifiers.set(child.importClause.name.text, specifier);
         }
         const named = child.importClause.namedBindings;
         if (named && ts.isNamedImports(named)) {
           for (const element of named.elements) {
             model.externalBindings.add(element.name.text);
+            model.bindingSpecifiers.set(element.name.text, specifier);
           }
         }
       }
     }
   });
+
+  // CommonJS bindings: `const x = require("spec")` and
+  // `const { a } = require("spec")`. Requires inside plugin functions are
+  // collected too (route files commonly require schemas at module scope).
+  const classifyRequire = (name: string, specifier: string, exportName: string) => {
+    model.bindingSpecifiers.set(name, specifier);
+    if (specifier === "fastify") {
+      model.factoryBindings.add(name);
+    } else if (specifier.startsWith(".")) {
+      model.moduleBindings.set(name, { specifier, exportName });
+    } else {
+      model.externalBindings.add(name);
+    }
+  };
+  const requireVisit = (node: any) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isIdentifier(node.initializer.expression) &&
+      node.initializer.expression.text === "require" &&
+      ts.isStringLiteralLike(node.initializer.arguments[0])
+    ) {
+      const specifier = node.initializer.arguments[0].text;
+      if (ts.isIdentifier(node.name)) {
+        classifyRequire(node.name.text, specifier, "module");
+      } else if (ts.isObjectBindingPattern(node.name)) {
+        for (const element of node.name.elements) {
+          if (ts.isBindingElement(element) && ts.isIdentifier(element.name)) {
+            classifyRequire(
+              element.name.text,
+              specifier,
+              element.propertyName && ts.isIdentifier(element.propertyName)
+                ? element.propertyName.text
+                : element.name.text,
+            );
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, requireVisit);
+  };
+  source.forEachChild((child: any) => requireVisit(child));
 
   // Root instances: const app = fastify(...), plus class services that own the
   // server through a property assignment (`this.server = fastify(...)` inside a
@@ -761,17 +1557,32 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       const callee = node.initializer.expression;
       if (ts.isIdentifier(callee) && model.factoryBindings.has(callee.text)) {
         model.roots.add(node.name.text);
+      } else if (
+        // `const server = require("fastify")(options)`
+        ts.isCallExpression(callee) &&
+        ts.isIdentifier(callee.expression) &&
+        callee.expression.text === "require" &&
+        ts.isStringLiteralLike(callee.arguments[0]) &&
+        callee.arguments[0].text === "fastify"
+      ) {
+        model.roots.add(node.name.text);
       }
     }
     if (
       ts.isBinaryExpression(node) &&
       node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
       ts.isPropertyAccessExpression(node.left) &&
-      ts.isCallExpression(node.right) &&
-      ts.isIdentifier(node.right.expression) &&
-      model.factoryBindings.has(node.right.expression.text)
+      ts.isCallExpression(node.right)
     ) {
-      model.roots.add(node.left.getText(source));
+      const callee = node.right.expression;
+      const isFactory =
+        (ts.isIdentifier(callee) && model.factoryBindings.has(callee.text)) ||
+        (ts.isCallExpression(callee) &&
+          ts.isIdentifier(callee.expression) &&
+          callee.expression.text === "require" &&
+          ts.isStringLiteralLike(callee.arguments[0]) &&
+          callee.arguments[0].text === "fastify");
+      if (isFactory) model.roots.add(node.left.getText(source));
     }
     ts.forEachChild(node, visit);
   };
@@ -818,6 +1629,29 @@ function collectSites(
       ) {
         // Class-owned root instance, e.g. `this.server.register(...)`.
         matchReceiver = true;
+      } else if (ts.isCallExpression(receiver)) {
+        // Chained registration:
+        // `server.register(cors, {}).register(autoLoad, {...}).register(...)`.
+        let chain: any = receiver;
+        let guard = 0;
+        while (ts.isCallExpression(chain) && guard < 24) {
+          if (ts.isPropertyAccessExpression(chain.expression)) {
+            const chainReceiver = chain.expression.expression;
+            if (
+              (ts.isIdentifier(chainReceiver) &&
+                chainReceiver.text === instanceName) ||
+              (ts.isPropertyAccessExpression(chainReceiver) &&
+                chainReceiver.getText(model.source) === instanceName)
+            ) {
+              matchReceiver = true;
+              break;
+            }
+            chain = chainReceiver;
+          } else {
+            break;
+          }
+          guard += 1;
+        }
       }
       if (matchReceiver) {
         const origin = originOf(ts, model.rel, model.source, node);
@@ -842,19 +1676,75 @@ function collectSites(
           const target = node.arguments[0];
           const opts = node.arguments[1];
           let pluginPrefix = "";
+          let autoloadSpec: RegisterEdge["autoload"];
           if (opts && ts.isObjectLiteralExpression(opts)) {
-            const prefixProp = opts.properties.find(
-              (p: any) =>
-                ts.isPropertyAssignment(p) &&
-                p.name.getText(model.source).replace(/['"]/g, "") === "prefix",
-            );
-            const raw = prefixProp && literalValue(ts, prefixProp.initializer);
-            if (typeof raw === "string") pluginPrefix = raw;
+            const option = (key: string): any => {
+              const prop = opts.properties.find(
+                (p: any) =>
+                  ts.isPropertyAssignment(p) &&
+                  p.name?.getText?.(model.source).replace(/['"]/g, "") === key,
+              );
+              return prop?.initializer ?? null;
+            };
+            const prefixRaw = option("prefix");
+            if (typeof literalValue(ts, prefixRaw) === "string") {
+              pluginPrefix = String(literalValue(ts, prefixRaw));
+            }
+            const dirNode = option("dir");
+            if (dirNode) {
+              const targetSpecifier = targetSpecifierOf(ts, model, target);
+              if (
+                targetSpecifier === "@fastify/autoload" ||
+                targetSpecifier === "fastify-autoload"
+              ) {
+                const boolValue = (n: any, fallback: boolean): boolean => {
+                  const v = literalValue(ts, n);
+                  return typeof v === "boolean" ? v : fallback;
+                };
+                autoloadSpec = {
+                  dirNode,
+                  optionsNode: option("options"),
+                  dirNameRoutePrefix: boolValue(option("dirNameRoutePrefix"), true),
+                  encapsulate: boolValue(option("encapsulate"), false),
+                };
+              }
+            }
           }
-          if (target && (ts.isArrowFunction(target) || ts.isFunctionExpression(target))) {
-            edges.push({ parent: instanceName, pluginName: null, pluginCallName: null, inlineNode: target, prefix: pluginPrefix });
+          if (autoloadSpec) {
+            edges.push({
+              parent: instanceName,
+              pluginName: null,
+              pluginCallName: null,
+              pluginSpecifier: null,
+              inlineNode: null,
+              prefix: pluginPrefix,
+              autoload: autoloadSpec,
+            });
+          } else if (target && (ts.isArrowFunction(target) || ts.isFunctionExpression(target))) {
+            edges.push({ parent: instanceName, pluginName: null, pluginCallName: null, pluginSpecifier: null, inlineNode: target, prefix: pluginPrefix });
+          } else if (
+            target &&
+            ts.isCallExpression(target) &&
+            ts.isIdentifier(target.expression) &&
+            target.expression.text === "require" &&
+            ts.isStringLiteralLike(target.arguments[0])
+          ) {
+            // Inline `server.register(require("@fastify/jwt"), ...)`: external
+            // packages carry no project routes; relative specs are followed.
+            const spec = target.arguments[0].text as string;
+            edges.push({
+              parent: instanceName,
+              pluginName: null,
+              pluginCallName: null,
+              pluginSpecifier: spec.startsWith(".") ? spec : null,
+              inlineNode: null,
+              prefix: pluginPrefix,
+              ...(spec.startsWith(".")
+                ? {}
+                : { externalSpecifier: spec }),
+            });
           } else if (target && ts.isIdentifier(target)) {
-            edges.push({ parent: instanceName, pluginName: target.text, pluginCallName: null, inlineNode: null, prefix: pluginPrefix });
+            edges.push({ parent: instanceName, pluginName: target.text, pluginCallName: null, pluginSpecifier: null, inlineNode: null, prefix: pluginPrefix });
           } else if (
             target &&
             ts.isCallExpression(target) &&
@@ -862,50 +1752,47 @@ function collectSites(
           ) {
             // Factory call: `app.register(buildRoutes({ pool }))` — the callee
             // is a local/imported function that returns the plugin function.
-            edges.push({ parent: instanceName, pluginName: null, pluginCallName: target.expression.text, inlineNode: null, prefix: pluginPrefix });
+            edges.push({ parent: instanceName, pluginName: null, pluginCallName: target.expression.text, pluginSpecifier: null, inlineNode: null, prefix: pluginPrefix });
           }
         }
 
         if (HTTP_METHODS.has(method)) {
           const urlArg = node.arguments[0];
-          const url = urlArg && ts.isStringLiteralLike(urlArg) ? urlArg.text : null;
-          if (url !== null) {
-            const fnArgs = [...node.arguments].slice(1);
-            const options = fnArgs.find((a: any) => ts.isObjectLiteralExpression(a)) ?? null;
-            // The handler is the last function-like argument after dropping
-            // the optional options object: an inline function, an identifier
-            // (imported handler), or a factory call such as `callback("google")`.
-            const handlerArgs = fnArgs.filter((a: any) => a !== options);
-            const lastArg = handlerArgs[handlerArgs.length - 1] ?? null;
-            let handler: any = null;
-            let handlerFactoryName: string | null = null;
-            if (
-              lastArg &&
-              (ts.isArrowFunction(lastArg) ||
-                ts.isFunctionExpression(lastArg) ||
-                ts.isIdentifier(lastArg) ||
-                ts.isPropertyAccessExpression(lastArg))
-            ) {
-              handler = lastArg;
-            } else if (
-              lastArg &&
-              ts.isCallExpression(lastArg) &&
-              ts.isIdentifier(lastArg.expression)
-            ) {
-              handlerFactoryName = lastArg.expression.text;
-            }
-            routes.push({
-              instance: instanceName,
-              method,
-              url,
-              schemaNode: options ? getObjectProperty(ts, options, "schema") : null,
-              genericNode: node.typeArguments?.[0] ?? null,
-              optionsText: options ? options.getText(model.source) : "",
-              handler,
-              handlerFactoryName,
-              origin,
-            });
+          const fnArgs = [...node.arguments].slice(1);
+          const options = fnArgs.find((a: any) => ts.isObjectLiteralExpression(a)) ?? null;
+          // The handler is the last function-like argument after dropping
+          // the optional options object: an inline function, an identifier
+          // (imported handler), or a factory call such as `callback("google")`.
+          const handlerArgs = fnArgs.filter((a: any) => a !== options);
+          const lastArg = handlerArgs[handlerArgs.length - 1] ?? null;
+          let handler: any = null;
+          let handlerFactoryName: string | null = null;
+          if (
+            lastArg &&
+            (ts.isArrowFunction(lastArg) ||
+              ts.isFunctionExpression(lastArg) ||
+              ts.isIdentifier(lastArg) ||
+              ts.isPropertyAccessExpression(lastArg))
+          ) {
+            handler = lastArg;
+          } else if (
+            lastArg &&
+            ts.isCallExpression(lastArg) &&
+            ts.isIdentifier(lastArg.expression)
+          ) {
+            handlerFactoryName = lastArg.expression.text;
           }
+          routes.push({
+            instance: instanceName,
+            method,
+            urlNode: urlArg ?? null,
+            schemaNode: options ? getObjectProperty(ts, options, "schema") : null,
+            genericNode: node.typeArguments?.[0] ?? null,
+            optionsText: options ? options.getText(model.source) : "",
+            handler,
+            handlerFactoryName,
+            origin,
+          });
         }
 
         if (method === "route" && ts.isObjectLiteralExpression(node.arguments[0])) {
@@ -930,15 +1817,18 @@ function collectSites(
           const urlNode = propOf(get("url")) ?? propOf(get("path"));
           const schemaNode = propOf(get("schema"));
           const handlerNode = propOf(get("handler"));
-          const methodText = methodNode
-            ? String(literalValue(ts, methodNode) ?? methodNode.getText(model.source)).toLowerCase()
+          const methodValue = methodNode
+            ? literalValue(ts, methodNode) ?? methodNode.getText(model.source)
             : null;
-          const urlText = urlNode ? literalValue(ts, urlNode) : null;
-          if (methodText && HTTP_METHODS.has(methodText) && typeof urlText === "string") {
+          const methodTexts = Array.isArray(methodValue)
+            ? methodValue.map((m) => String(m).toLowerCase())
+            : [String(methodValue ?? "").toLowerCase()];
+          for (const methodText of methodTexts) {
+            if (!methodText || !HTTP_METHODS.has(methodText) || !urlNode) continue;
             routes.push({
               instance: instanceName,
               method: methodText,
-              url: urlText,
+              urlNode,
               schemaNode,
               genericNode: null,
               optionsText: obj.getText(model.source),
@@ -971,51 +1861,380 @@ function getObjectProperty(ts: any, obj: any, key: string): any | null {
 }
 
 /**
- * Follows a schema reference (`schema` identifier or shorthand binding) to the
- * object literal it aliases within the same file. Fastify projects commonly
- * declare route schemas as top-level consts and reference them by name.
+ * Finds a function-like declaration lexically visible inside a plugin scope.
+ * Route files commonly declare handlers as hoisted sibling functions
+ * (`async function onLogin(...)` below the `server.route(...)` call). Nested
+ * function bodies are not traversed so inner closures cannot shadow matches.
  */
-function resolveSchemaLiteral(ts: any, model: FileModel, node: any): any | null {
-  if (!node) return null;
-  if (ts.isObjectLiteralExpression(node)) return node;
-  if (!ts.isIdentifier(node)) return null;
+function findLexicalDeclaration(ts: any, scopeNode: any, name: string): any | null {
   let found: any = null;
-  const visit = (n: any) => {
+  const consider = (decl: any) => {
     if (found) return;
-    if (
-      ts.isVariableDeclaration(n) &&
-      ts.isIdentifier(n.name) &&
-      n.name.text === node.text &&
-      n.initializer &&
-      ts.isObjectLiteralExpression(n.initializer)
-    ) {
-      found = n.initializer;
+    if (ts.isFunctionDeclaration(decl) && decl.name?.text === name) {
+      found = decl;
       return;
     }
-    ts.forEachChild(n, visit);
+    if (
+      ts.isVariableDeclaration(decl) &&
+      ts.isIdentifier(decl.name) &&
+      decl.name.text === name &&
+      decl.initializer &&
+      (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))
+    ) {
+      found = decl.initializer;
+    }
   };
-  model.source.forEachChild((child: any) => visit(child));
+  const walk = (n: any, isRoot: boolean) => {
+    if (found) return;
+    if (
+      !isRoot &&
+      (ts.isArrowFunction(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isMethodDeclaration(n))
+    ) {
+      return;
+    }
+    consider(n);
+    ts.forEachChild(n, (child: any) => walk(child, false));
+  };
+  walk(scopeNode, true);
   return found;
 }
 
 /**
- * Reads Fastify's route `schema` option (native JSON Schema literals):
- * params / querystring / body / headers / response. These are authoritative
- * and emitted at high confidence.
- */function extractRouteSchema(
+ * Resolves a CommonJS/ESM plugin module export to its plugin function,
+ * reporting whether it is wrapped in fastify-plugin (which opts out of
+ * encapsulation and autoload prefixing). Returns null for non-plugin modules
+ * such as schema tables, mirroring @fastify/autoload's own skip behavior.
+ */
+function resolvePluginExport(
+  ts: any,
+  model: FileModel,
+): { node: any; fpWrapped: boolean } | null {
+  const sf = model.source;
+
+  const findLocalFunction = (name: string): any | null => {
+    let target: any | null = null;
+    const walk = (n: any) => {
+      if (target) return;
+      if (ts.isFunctionDeclaration(n) && n.name?.text === name) {
+        target = n;
+        return;
+      }
+      if (
+        ts.isVariableDeclaration(n) &&
+        ts.isIdentifier(n.name) &&
+        n.name.text === name &&
+        n.initializer &&
+        (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+      ) {
+        target = n.initializer;
+        return;
+      }
+      ts.forEachChild(n, walk);
+    };
+    sf.forEachChild((child: any) => walk(child));
+    return target;
+  };
+
+  const isFastifyPluginCall = (call: any): boolean => {
+    const callee = call.expression;
+    if (ts.isIdentifier(callee)) {
+      return model.bindingSpecifiers.get(callee.text) === "fastify-plugin";
+    }
+    return (
+      ts.isCallExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "require" &&
+      ts.isStringLiteralLike(callee.arguments[0]) &&
+      callee.arguments[0].text === "fastify-plugin"
+    );
+  };
+
+  const unwrap = (
+    expr: any,
+  ): { node: any; fpWrapped: boolean } | null => {
+    if (
+      ts.isArrowFunction(expr) ||
+      ts.isFunctionExpression(expr) ||
+      ts.isFunctionDeclaration(expr)
+    ) {
+      return { node: expr, fpWrapped: false };
+    }
+    if (ts.isIdentifier(expr)) {
+      const local = findLocalFunction(expr.text);
+      return local ? { node: local, fpWrapped: false } : null;
+    }
+    if (ts.isCallExpression(expr)) {
+      const fpWrapped = isFastifyPluginCall(expr);
+      if (!fpWrapped) return null;
+      const arg = expr.arguments[0];
+      if (
+        arg &&
+        (ts.isArrowFunction(arg) ||
+          ts.isFunctionExpression(arg) ||
+          ts.isFunctionDeclaration(arg))
+      ) {
+        return { node: arg, fpWrapped: true };
+      }
+      if (arg && ts.isIdentifier(arg)) {
+        const local = findLocalFunction(arg.text);
+        if (local) return { node: local, fpWrapped: true };
+      }
+    }
+    return null;
+  };
+
+  let result: { node: any; fpWrapped: boolean } | null = null;
+  sf.forEachChild((child: any) => {
+    if (result) return;
+    if (ts.isExportAssignment(child) && !child.isExportFactory) {
+      const r = unwrap(child.expression);
+      if (r) result = r;
+    }
+    if (
+      ts.isExpressionStatement(child) &&
+      ts.isBinaryExpression(child.expression) &&
+      child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      const lhs = child.expression.left;
+      if (
+        ts.isPropertyAccessExpression(lhs) &&
+        lhs.expression.getText(sf) === "module" &&
+        lhs.name.text === "exports"
+      ) {
+        const r = unwrap(child.expression.right);
+        if (r) result = r;
+      }
+    }
+  });
+  return result;
+}
+
+/**
+ * Finds a top-level (or nested) const whose initializer is an object literal
+ * or a fluent-json-schema builder chain.
+ */
+function findLocalSchemaValue(ts: any, sf: any, name: string): any | null {
+  let found: any = null;
+  const acceptable = (init: any) =>
+    ts.isObjectLiteralExpression(init) || isFluentSchemaNode(ts, init);
+  const walk = (n: any) => {
+    if (found) return;
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer &&
+      acceptable(n.initializer)
+    ) {
+      found = n.initializer;
+      return;
+    }
+    ts.forEachChild(n, walk);
+  };
+  sf.forEachChild((child: any) => walk(child));
+  return found;
+}
+
+/**
+ * Follows a route `schema` value to its defining node (object literal or
+ * fluent-json-schema chain) across files. Supports:
+ *   - same-file consts (including nested inside plugin functions),
+ *   - property access (`schema.login`),
+ *   - ESM imports/exports,
+ *   - CommonJS `const schema = require("./schema")` with
+ *     `module.exports = { login, ... }` shorthand tables.
+ */
+function resolveSchemaValueNode(
   ts: any,
   analysis: TsAnalysis,
+  models: Map<string, FileModel>,
+  model: FileModel,
+  node: any,
+  seen: Set<string>,
+): { node: any; file: any } | null {
+  const modelForFile = (file: any): FileModel => {
+    for (const candidate of models.values()) {
+      if (candidate.source === file) return candidate;
+    }
+    return model;
+  };
+  if (!node) return null;
+  if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node)) {
+    return { node, file: model.source };
+  }
+
+  if (ts.isIdentifier(node)) {
+    const cycleKey = `${model.source.fileName}:ident:${node.text}`;
+    if (seen.has(cycleKey)) return null;
+    seen.add(cycleKey);
+    const local = findLocalSchemaValue(ts, model.source, node.text);
+    if (local) return resolveSchemaValueNode(ts, analysis, models, model, local, seen);
+
+    const imported = resolveImportedFile(analysis, model.source, node.text);
+    if (!imported) return null;
+    const { file, exportName } = imported;
+    const ownerModel = modelForFile(file);
+    const exported = exportedSchemaValue(ts, file, exportName);
+    if (exported) {
+      return resolveSchemaValueNode(ts, analysis, models, ownerModel, exported, seen);
+    }
+    return null;
+  }
+
+  if (ts.isPropertyAccessExpression(node)) {
+    const chain: string[] = [];
+    let cur: any = node;
+    while (ts.isPropertyAccessExpression(cur)) {
+      chain.unshift(cur.name.text);
+      cur = cur.expression;
+    }
+    if (!ts.isIdentifier(cur)) return null;
+    const cycleKey = `${model.source.fileName}:member:${cur.text}.${chain.join(".")}`;
+    if (seen.has(cycleKey)) return null;
+    seen.add(cycleKey);
+
+    let root: { node: any; file: any } | null = null;
+    const local = findLocalSchemaValue(ts, model.source, cur.text);
+    if (local) root = { node: local, file: model.source };
+    if (!root) {
+      const imported = resolveImportedFile(analysis, model.source, cur.text);
+      if (imported) {
+        const exported = exportedSchemaValue(ts, imported.file, imported.exportName);
+        if (exported) root = { node: exported, file: imported.file };
+      }
+    }
+    if (!root) return null;
+
+    let target = root.node;
+    let ownerFile = root.file;
+    for (const member of chain) {
+      if (ts.isIdentifier(target)) {
+        const localValue = findLocalSchemaValue(ts, ownerFile, target.text);
+        if (localValue) target = localValue;
+      }
+      if (!ts.isObjectLiteralExpression(target)) return null;
+      const prop = target.properties.find((p: any) => {
+        const propName = p.name?.getText?.(ownerFile)?.replace(/^['"]|['"]$/g, "");
+        return (
+          propName === member &&
+          (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))
+        );
+      });
+      if (!prop) return null;
+      if (ts.isPropertyAssignment(prop)) {
+        target = prop.initializer;
+      } else {
+        const localValue = findLocalSchemaValue(ts, ownerFile, prop.name.text);
+        if (!localValue) return null;
+        target = localValue;
+      }
+    }
+    const ownerModel = modelForFile(ownerFile);
+    return resolveSchemaValueNode(ts, analysis, models, ownerModel, target, seen);
+  }
+
+  return null;
+}
+
+/**
+ * Resolves a module's exported schema value: ESM `export const x` /
+ * `module.exports = {...}` / `module.exports = ident`.
+ */
+function exportedSchemaValue(
+  ts: any,
+  file: any,
+  exportName: string,
+): any | null {
+  if (exportName === "default" || exportName === "module" || exportName === "*") {
+    let rhs: any = null;
+    file.forEachChild((child: any) => {
+      if (rhs) return;
+      if (
+        ts.isExpressionStatement(child) &&
+        ts.isBinaryExpression(child.expression) &&
+        child.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(child.expression.left) &&
+        child.expression.left.expression.getText(file) === "module" &&
+        child.expression.left.name.text === "exports"
+      ) {
+        rhs = child.expression.right;
+      }
+    });
+    if (rhs) {
+      if (ts.isObjectLiteralExpression(rhs) || isFluentSchemaNode(ts, rhs)) return rhs;
+      if (ts.isIdentifier(rhs)) return findLocalSchemaValue(ts, file, rhs.text);
+    }
+  }
+  // ESM named export, or const declaration followed by `export { x }`.
+  const local = findLocalSchemaValue(ts, file, exportName);
+  if (local) return local;
+  let exported: any = null;
+  file.forEachChild((child: any) => {
+    if (exported) return;
+    if (
+      ts.isVariableStatement(child) &&
+      child.modifiers?.some?.((m: any) => m.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      for (const decl of child.declarationList.declarations) {
+        if (
+          ts.isIdentifier(decl.name) &&
+          decl.name.text === exportName &&
+          decl.initializer &&
+          (ts.isObjectLiteralExpression(decl.initializer) ||
+            isFluentSchemaNode(ts, decl.initializer))
+        ) {
+          exported = decl.initializer;
+        }
+      }
+    }
+  });
+  return exported;
+}
+
+/**
+ * Reads Fastify's route `schema` option (native JSON Schema literals or
+ * fluent-json-schema builder chains, possibly declared in another file):
+ * params / querystring / body / headers / response. These are authoritative
+ * and emitted at high confidence.
+ */
+function extractRouteSchema(
+  ts: any,
+  analysis: TsAnalysis,
+  models: Map<string, FileModel>,
+  ownerModel: FileModel,
   schemaNode: any,
 ): Facts {
   const facts = emptyFacts();
   if (!schemaNode || !ts.isObjectLiteralExpression(schemaNode)) return facts;
+
+  // Sections may be identifiers or property access pointing at declarations
+  // in another file (CJS schema tables); resolve before converting.
+  const resolveSection = (node: any): any => {
+    if (!node) return null;
+    if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node)) return node;
+    const resolved = resolveSchemaValueNode(
+      ts,
+      analysis,
+      models,
+      ownerModel,
+      node,
+      new Set(),
+    );
+    return resolved?.node ?? null;
+  };
 
   const addParams = (
     node: any,
     location: RouteParameter["in"],
     requiredDefault: boolean,
   ) => {
-    const schema = literalValue(ts, node) as JsonSchema | undefined;
+    const resolved = resolveSection(node);
+    const schema = resolved
+      ? (schemaValueToJson(ts, resolved) as JsonSchema | undefined)
+      : undefined;
     if (!schema || typeof schema !== "object" || schema.type !== "object") return;
     const required = new Set(
       Array.isArray(schema.required) ? (schema.required as string[]) : [],
@@ -1039,14 +2258,17 @@ function resolveSchemaLiteral(ts: any, model: FileModel, node: any): any | null 
     getObjectProperty(ts, schemaNode, "query");
   const headersNode = getObjectProperty(ts, schemaNode, "headers");
   const bodyNode = getObjectProperty(ts, schemaNode, "body");
-  const responseNode = getObjectProperty(ts, schemaNode, "response");
+  const responseNode = resolveSection(getObjectProperty(ts, schemaNode, "response"));
 
   if (paramsNode) addParams(paramsNode, "path", true);
   if (queryNode) addParams(queryNode, "query", false);
   if (headersNode) addParams(headersNode, "header", false);
 
   if (bodyNode) {
-    const bodySchema = literalValue(ts, bodyNode) as JsonSchema | undefined;
+    const resolved = resolveSection(bodyNode);
+    const bodySchema = resolved
+      ? (schemaValueToJson(ts, resolved) as JsonSchema | undefined)
+      : undefined;
     if (bodySchema && typeof bodySchema === "object") {
       facts.requestBody = {
         required: true,
@@ -1059,10 +2281,15 @@ function resolveSchemaLiteral(ts: any, model: FileModel, node: any): any | null 
 
   if (responseNode && ts.isObjectLiteralExpression(responseNode)) {
     for (const prop of responseNode.properties) {
-      if (!ts.isPropertyAssignment(prop)) continue;
-      const status = prop.name.getText().replace(/^['"]|['"]$/g, "");
-      if (!/^\d{3}$|^2XX$|^default$/i.test(status)) continue;
-      const schema = literalValue(ts, prop.initializer) as JsonSchema | undefined;
+      if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) continue;
+      const status = prop.name?.getText?.().replace(/^['"]|['"]$/g, "");
+      if (!status || !/^\d{3}$|^2XX$|^default$/i.test(status)) continue;
+      const valueNode = ts.isPropertyAssignment(prop)
+        ? resolveSection(prop.initializer)
+        : resolveSection(prop.name);
+      const schema = valueNode
+        ? (schemaValueToJson(ts, valueNode) as JsonSchema | undefined)
+        : undefined;
       if (schema && typeof schema === "object") {
         facts.responses.push({
           statusCode: status,
@@ -1236,7 +2463,13 @@ function analyzeFastifyHandler(
     const key = noContent ? `${status}:` : `${status}:${mediaType}`;
     const existing = responses.get(key);
     if (existing?.content?.[0]) {
-      if (schema && (!existing.content[0].schema || confidence === "high")) {
+      const previous = existing.content[0].schema;
+      if (schema && previous && JSON.stringify(previous) !== JSON.stringify(schema)) {
+        // Branches sharing a status/media type are alternatives; never discard
+        // an earlier response or require mutually exclusive shapes (oneOf).
+        const alternatives = Array.isArray(previous.anyOf) ? previous.anyOf : [previous];
+        existing.content[0].schema = { anyOf: [...alternatives, schema] };
+      } else if (schema && !previous) {
         existing.content[0].schema = schema;
       }
       if (confidence === "high") existing.confidence = "high";
@@ -1320,7 +2553,7 @@ function analyzeFastifyHandler(
           bodyAliases.add(aliasName);
           factsBody.referenced = true;
           const bodyType = typeAt(node.initializer);
-          if (bodyType) factsBody.schema = bodyType;
+          if (bodyType && !factsBody.schema) factsBody.schema = bodyType;
         } else if (aliasMember === "query") {
           queryAliases.add(aliasName);
         } else if (aliasMember === "params") {
@@ -1340,16 +2573,16 @@ function analyzeFastifyHandler(
               queryFields.set(el.name.text, typeAt(el.name));
             }
           }
-        } else if (full.startsWith(`${roots.req}.query.`) && member !== "query") {
+        } else if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText(file) === `${roots.req}.query`) {
           queryFields.set(member, schema);
-        } else if (full.startsWith(`${roots.req}.params.`) && member !== "params") {
+        } else if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText(file) === `${roots.req}.params`) {
           addParam("path", member, schema, schema ? "high" : "low");
-        } else if (full.startsWith(`${roots.req}.headers.`) && member !== "headers") {
+        } else if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText(file) === `${roots.req}.headers`) {
           headerFields.set(member.toLowerCase(), schema);
         } else if (full === `${roots.req}.body`) {
           factsBody.referenced = true;
           const bodyType = typeAt(node);
-          if (bodyType) factsBody.schema = bodyType;
+          if (bodyType && !factsBody.schema) factsBody.schema = bodyType;
           if (ts.isVariableDeclaration(node.parent) && ts.isObjectBindingPattern(node.parent.name)) {
             for (const el of node.parent.name.elements) {
               if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
@@ -1357,7 +2590,7 @@ function analyzeFastifyHandler(
               }
             }
           }
-        } else if (full.startsWith(`${roots.req}.body.`) && member !== "body") {
+        } else if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText(file) === `${roots.req}.body`) {
           factsBody.referenced = true;
           factsBody.fields.set(member, schema);
         }
@@ -1384,6 +2617,20 @@ function analyzeFastifyHandler(
         }
       }
 
+      // Literal bracket keys are common for hyphenated HTTP header names.
+      if (ts.isElementAccessExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === roots.req
+          && node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression)) {
+        const key = node.argumentExpression.text;
+        const schema = typeAt(node);
+        switch (node.expression.name.text) {
+          case "headers": headerFields.set(key.toLowerCase(), schema); break;
+          case "query": queryFields.set(key, schema); break;
+          case "params": addParam("path", key, schema, schema ? "high" : "low"); break;
+          case "body": factsBody.referenced = true; factsBody.fields.set(key, schema); break;
+        }
+      }
+
       // request.headers['x'] / request.get('x')
       if (
         ts.isCallExpression(node) &&
@@ -1407,7 +2654,7 @@ function analyzeFastifyHandler(
         // Walk the chain: reply.code(N).type("...").send(x)
         let cur: any = node.expression.expression;
         while (cur && ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression)) {
-          if (cur.expression.name.text === "code") {
+          if (["code", "status"].includes(cur.expression.name.text)) {
             const raw = cur.arguments[0]?.getText(file);
             if (raw && /^\d{3}$/.test(raw)) status = raw;
           } else if (cur.expression.name.text === "type" && ts.isStringLiteralLike(cur.arguments[0])) {
@@ -1439,7 +2686,7 @@ function analyzeFastifyHandler(
         if (ts.isNumericLiteral(node.arguments[0])) status = node.arguments[0].text;
         let cur: any = node.expression.expression;
         while (cur && ts.isCallExpression(cur) && ts.isPropertyAccessExpression(cur.expression)) {
-          if (cur.expression.name.text === "code" && ts.isNumericLiteral(cur.arguments[0])) {
+          if (["code", "status"].includes(cur.expression.name.text) && ts.isNumericLiteral(cur.arguments[0])) {
             status = cur.arguments[0].text;
           }
           cur = ts.isPropertyAccessExpression(cur.expression) ? cur.expression.expression : null;

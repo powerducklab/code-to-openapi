@@ -58,6 +58,8 @@ export function gapCacheKey(request: GapRequest, promptVersion: string): string 
     .update(
       JSON.stringify({
         v: promptVersion,
+        route: request.route,
+        origin: request.origin,
         gaps: request.gaps,
         source: request.handlerSource,
         known: request.known,

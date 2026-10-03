@@ -61,4 +61,18 @@ describe("next.js pack", () => {
     const legacyOk = legacy.responses.find((r: any) => r.statusCode === "200");
     expect(legacyOk.content[0].schema.properties).toBeDefined();
   });
+
+  it("infers request bodies from the zod .parse(await req.json()) idiom", async () => {
+    const { result, converted } = await scan();
+    expect(converted.documentValid).toBe(true);
+    const ops = result.project.operations;
+
+    const create = op(ops, "post", "/api/articles");
+    const body = create.requestBody.content[0].schema;
+    expect(body.type).toBe("object");
+    expect(body.properties.title.type).toBe("string");
+    expect(body.properties.tags.type).toBe("array");
+    expect(body.required).toEqual(["title"]);
+    expect(create.responses.find((r: any) => r.statusCode === "201")).toBeDefined();
+  });
 });

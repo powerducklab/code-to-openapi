@@ -62,6 +62,35 @@ HTTP is fully supported; SSE endpoints are emitted with the canonical
 `itemSchema` (including named Spring `SseEmitter` events when the event name
 and payload type are statically provable).
 
+#### 0.9.2 contract-first hardening
+
+No new packs; this release hardens TypeScript/Bun and Go extraction against
+real open-source backends (RealWorld family and others), always preferring
+declared framework contracts over handler inference:
+
+- **Elysia**: third-argument route options (`body`, `query`, `params`,
+  `headers`, `response`) are now extracted, including chained verbs on
+  `new Elysia()`, nested `.group()` prefixes (with `:param` normalization),
+  bare and status-mapped responses, and `return status(201, body)`. Schema
+  DTOs resolve across barrels and `tsconfig` path aliases, with converters
+  for ArkType (`type()`, domains, bounds, `.get().partial().array()`,
+  `Record<...>`), TypeBox (`t.Object/Optional/Nullable/Union/...`) and Zod.
+- **Hono**: `@hono/zod-openapi` `createRoute` contracts resolve cross-file
+  bodies/params/responses (including computed `[StatusCodes.OK]` keys),
+  `OpenAPIHono` instances and advanced Zod chains (`.merge/.shape/.partial/
+  .omit/.regex/.openapi`).
+- **Fastify**: `@fastify/autoload` directory plugins (including CommonJS),
+  `fluent-json-schema` chain schemas, and draft-07 `definitions`/`$defs`
+  hoisted into OAS 3.x `components.schemas`.
+- **Next.js App Router**: request bodies are inferred from the
+  `schema.parse(await req.json())` Zod idiom, and
+  `new Response(JSON.stringify(payload))` follows the serialized payload.
+- **Go**: Echo handlers that bind through local helper methods
+  (`req.bind(c, &u)`), split-statement `json.NewDecoder` / `json.Unmarshal`
+  bodies in net/http, gorilla/mux and chi, and `new(T)` payload values.
+- Declared response DTOs now authoritatively replace partial handler
+  inference for the same status/media type.
+
 #### 0.9.1 robustness and real-project hardening
 
 No new packs; this release hardens extraction against real-world code found while

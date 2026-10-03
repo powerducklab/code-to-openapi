@@ -55,15 +55,40 @@ export interface ZodResolveContext {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+function propertyNameText(ts: any, name: any): string | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) {
+    return String(name.text).replace(/['"]/g, "");
+  }
+  return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | null {
   const depth = rc.depth ?? 0;
-  if (depth > 8 || !node) return null;
+  if (depth > 16 || !node) return null;
   const { ts } = rc;
 
   if (ts.isIdentifier(node)) {
     const target = rc.resolveSchemaBinding(node.text, rc.sourceFile);
     if (!target) return null;
-    return convertZodNode(target, { ...rc, depth: depth + 1 });
+    return convertZodNode(target, {
+      ...rc,
+      depth: depth + 1,
+      sourceFile: target.getSourceFile?.() ?? rc.sourceFile,
+    });
+  }
+
+  // Member access on an object schema: UserBase.shape.email, Schema.inner.
+  // `.shape` is Zod's TypeScript-level accessor for the object's property
+  // schemas, so `X.shape.foo` resolves to property `foo` of object schema X.
+  if (ts.isPropertyAccessExpression(node) && !ts.isCallExpression(node)) {
+    const parent = convertZodNode(node.expression, { ...rc, depth: depth + 1 }) as
+      | JsonSchema
+      | null;
+    if (node.name.text === "shape") return parent;
+    const prop = (parent as any)?.properties?.[node.name.text];
+    if (prop) return JSON.parse(JSON.stringify(prop));
+    return null;
   }
 
   const chain = callChain(ts, node);
@@ -71,6 +96,21 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
 
   let schema: JsonSchema = {};
   let nullable = false;
+
+  // Seed from a non-call base: an identifier (schema binding) or a member
+  // access such as `CreateUser.shape.user`.
+  if (chain.base && chain.base.kind !== ts.SyntaxKind.Identifier) {
+    if (ts.isPropertyAccessExpression(chain.base)) {
+      const seeded = convertZodNode(chain.base, { ...rc, depth: depth + 1 });
+      if (seeded) schema = JSON.parse(JSON.stringify(seeded));
+    }
+  } else if (chain.base && ts.isIdentifier(chain.base)) {
+    const target = rc.resolveSchemaBinding(chain.base.text, rc.sourceFile);
+    if (target) {
+      const seeded = convertZodNode(target, { ...rc, depth: depth + 1 });
+      if (seeded) schema = JSON.parse(JSON.stringify(seeded));
+    }
+  }
 
   for (let i = 0; i < chain.steps.length; i += 1) {
     const step = chain.steps[i]!;
@@ -83,7 +123,8 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
         if (arg0 && ts.isObjectLiteralExpression(arg0)) {
           for (const member of arg0.properties) {
             if (!ts.isPropertyAssignment(member)) continue;
-            const name = member.name.getText(rc.sourceFile).replace(/['"]/g, "");
+            const name = propertyNameText(ts, member.name);
+            if (name === null) continue;
             const child = convertZodNode(member.initializer, { ...rc, depth: depth + 1 });
             if (!child) continue;
             const isOptional = child["x-optional"] === true;
@@ -163,6 +204,66 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
       case "url":
         schema = { ...schema, format: "uri" };
         break;
+      case "regex": {
+        if (arg0 && ts.isRegularExpressionLiteral(arg0)) {
+          const body = arg0.text.replace(/^\/|\/[a-z]*$/g, "");
+          if (body) schema = { ...schema, pattern: body };
+        }
+        break;
+      }
+      case "merge": {
+        const other = (arg0 ? convertZodNode(arg0, { ...rc, depth: depth + 1 }) : null) as
+          | JsonSchema
+          | null;
+        if (other && schema.type === "object") {
+          const properties = {
+            ...((schema as any).properties ?? {}),
+            ...((other as any).properties ?? {}),
+          };
+          const required = [
+            ...new Set([
+              ...(((schema as any).required as string[] | undefined) ?? []),
+              ...(((other as any).required as string[] | undefined) ?? []),
+            ]),
+          ];
+          schema = {
+            ...schema,
+            ...(Object.keys(properties).length ? { properties } : {}),
+            ...(required.length ? { required } : {}),
+          };
+        }
+        break;
+      }
+      case "partial":
+        if (schema.type === "object") delete schema.required;
+        break;
+      case "pick":
+      case "omit": {
+        if (schema.type === "object" && arg0 && ts.isObjectLiteralExpression(arg0) && schema.properties) {
+          const selected = new Set<string>();
+          for (const member of arg0.properties) {
+            if (!ts.isPropertyAssignment(member)) continue;
+            const key = propertyNameText(ts, member.name);
+            if (key) selected.add(key);
+          }
+          const properties: Record<string, JsonSchema> = {};
+          for (const [key, value] of Object.entries(schema.properties)) {
+            const present = selected.has(key);
+            if ((step.name === "pick" && present) || (step.name === "omit" && !present)) {
+              properties[key] = value;
+            }
+          }
+          const required = ((schema.required as string[] | undefined) ?? []).filter(
+            (key) => key in properties,
+          );
+          schema = {
+            ...schema,
+            properties,
+            ...(required.length ? { required } : {}),
+          };
+        }
+        break;
+      }
       case "uuid":
       case "ulid":
         schema = { ...schema, format: "uuid" };
@@ -208,6 +309,7 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
       case "brand":
       case "catch":
       case "describe":
+      case "openapi":
       case "passthrough":
       case "strict":
       case "strip":

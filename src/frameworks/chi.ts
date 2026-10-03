@@ -498,6 +498,26 @@ function buildRoute(
       }
     }
 
+    // Aliases for split-statement decoders: `decoder := json.NewDecoder(r.Body)`.
+    const decoderVars = new Set<string>();
+    for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+      const expressionLists = decl.namedChildren.filter((c) => c.type === "expression_list");
+      const left = expressionLists[0];
+      const right = expressionLists[1];
+      if (!left || !right) continue;
+      const isDecoder = findAll(right, (c) => c.type === "call_expression").some(
+        (call) => {
+          const s = selectorCall(call);
+          return s?.receiver.type === "identifier" && s.receiver.text === "json" && s.method === "NewDecoder";
+        },
+      );
+      if (isDecoder) {
+        for (const id of left.namedChildren.filter((c) => c.type === "identifier")) {
+          decoderVars.add(id.text);
+        }
+      }
+    }
+
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
       if (!sel) continue;
@@ -567,9 +587,34 @@ function buildRoute(
         continue;
       }
 
-      // json.NewDecoder(r.Body).Decode(&x)
-      if (sel.method === "Decode" && call.text.includes("NewDecoder")) {
+      // json.NewDecoder(r.Body).Decode(&x), or decoder.Decode(&x) with a
+      // split-statement decoder, or json.Unmarshal(data, &x).
+      if (
+        sel.method === "Decode" &&
+        (call.text.includes("NewDecoder") ||
+          (sel.receiver.type === "identifier" && decoderVars.has(sel.receiver.text)))
+      ) {
         const typeNode = referencedType(args[0], body);
+        if (typeNode) {
+          requestBody = {
+            required: true,
+            confidence: "high",
+            content: [
+              { mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" },
+            ],
+          };
+        } else {
+          gaps.add("body-schema-unknown");
+        }
+        continue;
+      }
+
+      if (
+        sel.receiver.type === "identifier" &&
+        sel.receiver.text === "json" &&
+        sel.method === "Unmarshal"
+      ) {
+        const typeNode = referencedType(args[1], body);
         if (typeNode) {
           requestBody = {
             required: true,

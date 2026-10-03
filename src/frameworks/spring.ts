@@ -122,6 +122,16 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
         const body = childrenOfType(cls, "class_body")[0];
         if (!body) continue;
 
+        // Interface mappings may live in generated sources absent from the scan.
+        // Never silently count such a controller as completely analyzed.
+        const interfaces = cls.namedChildren.find(n => n.type === "super_interfaces");
+        if (interfaces && !childrenOfType(body, "method_declaration").some(method =>
+          listAnnotations(method).some(a => MAPPING_ANNOTATIONS.has(a.name)))) {
+          unresolved.push({ reason: "handler-unresolved",
+            message: `Controller ${controllerShort} implements ${interfaces.text}; inherited route mappings require interface/generated-source analysis.`,
+            origin: { file: rel, line: cls.startPosition.row + 1 } });
+        }
+
         // Injected bean fields (constructor / @Autowired / @Resource / Lombok
         // @AllArgsConstructor all materialise as ordinary private fields here).
         // Mapping field name -> declared type lets a raw-ResponseEntity handler

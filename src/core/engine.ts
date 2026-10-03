@@ -9,6 +9,7 @@ import {
 } from "@powerduck/x-to-openapi";
 
 import { applyCompletenessGate } from "./completeness.js";
+import { hoistLocalSchemaDefinitions } from "./hoistDefinitions.js";
 import { indexProject } from "./indexer.js";
 import { probeManifest } from "./probe.js";
 import { buildSidecar } from "./sidecar.js";
@@ -194,6 +195,21 @@ function toOperation(candidate: RouteCandidate): DiscoveredOperation {
   };
 }
 
+/** Fill only unknown leaves. Model output cannot replace proven schema facts. */
+function fillSchemaGaps(known: JsonSchema, proposed: JsonSchema): JsonSchema {
+  if (Object.keys(known).length === 0) return structuredClone(proposed);
+  const result = structuredClone(known);
+  const kp = known.properties as Record<string, JsonSchema> | undefined;
+  const pp = proposed.properties as Record<string, JsonSchema> | undefined;
+  if (kp && pp) result.properties = Object.fromEntries(Object.entries(kp).map(([name, schema]) =>
+    [name, pp[name] ? fillSchemaGaps(schema, pp[name]!) : schema]));
+  if (known.items && proposed.items && typeof known.items === "object" && typeof proposed.items === "object"
+      && !Array.isArray(known.items) && !Array.isArray(proposed.items)) {
+    result.items = fillSchemaGaps(known.items as JsonSchema, proposed.items as JsonSchema);
+  }
+  return result;
+}
+
 async function applyAiGaps(
   candidate: RouteCandidate,
   resolver: GapResolver,
@@ -218,11 +234,12 @@ async function applyAiGaps(
 
   const next: RouteCandidate = {
     ...candidate,
-    parameters: [...candidate.parameters],
-    responses: [...candidate.responses],
+    parameters: structuredClone(candidate.parameters),
+    responses: structuredClone(candidate.responses),
+    requestBody: candidate.requestBody ? structuredClone(candidate.requestBody) : undefined,
   };
 
-  if (resolution.querySchema) {
+  if (candidate.gaps.includes("query-unknown") && resolution.querySchema) {
     for (const [name, schema] of Object.entries(
       resolution.querySchema.properties ?? {},
     ) as Array<[string, JsonSchema]>) {
@@ -240,7 +257,7 @@ async function applyAiGaps(
       }
     }
   }
-  if (resolution.headerSchema) {
+  if (candidate.gaps.includes("header-unknown") && resolution.headerSchema) {
     for (const [name, schema] of Object.entries(
       resolution.headerSchema.properties ?? {},
     ) as Array<[string, JsonSchema]>) {
@@ -258,7 +275,11 @@ async function applyAiGaps(
       }
     }
   }
-  if (resolution.bodySchema && !next.requestBody) {
+  if (resolution.bodySchema && next.requestBody && candidate.gaps.includes("body-schema-unknown")) {
+    const media = next.requestBody.content.find(m => m.mediaType === "application/json");
+    if (media) media.schema = fillSchemaGaps(media.schema ?? {}, resolution.bodySchema);
+  }
+  if (resolution.bodySchema && !next.requestBody && candidate.gaps.some(g => g === "body-unknown" || g === "body-schema-unknown")) {
     next.requestBody = {
       required: true,
       confidence: resolution.confidence,
@@ -295,14 +316,14 @@ async function applyAiGaps(
     }
   }
   for (const [status, schema] of Object.entries(
-    resolution.responseSchemas ?? {},
+    candidate.gaps.some(g => g === "response-unknown" || g === "response-schema-unknown") ? resolution.responseSchemas ?? {} : {},
   ) as Array<[string, JsonSchema]>) {
     const existing = next.responses.find((r) => r.statusCode === status);
     if (existing) {
       existing.content = existing.content ?? [];
       const media = existing.content.find((m) => m.mediaType === "application/json");
-      if (media) media.schema = schema;
-      else existing.content.push({ mediaType: "application/json", schema });
+      if (media) media.schema = fillSchemaGaps(media.schema ?? {}, schema);
+      else if (!media) existing.content.push({ mediaType: "application/json", schema });
     } else {
       next.responses.push({
         statusCode: status,
@@ -331,12 +352,11 @@ async function applyAiGaps(
   });
 
   // The completeness gate only downgrades confidence, so re-rank here once AI
-  // evidence has closed gaps: a fully resolved route is at least medium, and
-  // "high" is kept only when the model explicitly grounded every fragment.
+  // evidence has closed gaps. AI enrichment remains distinguishable from
+  // deterministic source extraction, regardless of model self-confidence.
   if (next.gaps.length === 0) {
-    const floor: Confidence = resolution.confidence === "high" ? "high" : "medium";
-    const rank: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
-    next.confidence = rank[next.confidence] >= rank[floor] ? next.confidence : floor;
+    // Model self-reported confidence is not deterministic source evidence.
+    next.confidence = resolution.confidence === "low" ? "low" : "medium";
   }
 
   ctx.onProgress?.("ai-gap", `${candidate.method} ${candidate.fullPath}`);
@@ -451,6 +471,13 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
           route.language = pack.language;
           route.framework = pack.id;
         }
+        if (!result.routes.length) {
+          result.unresolved.push({
+            reason: "handler-unresolved",
+            message: `Detected ${pack.id} but extracted no routes. Dynamic registration, autoloading or generated sources may require additional analysis.`,
+            origin: { file: "" },
+          });
+        }
         extractions.push({ result, language: pack.language, framework: pack.id });
       } catch (error) {
         // One broken framework pack must never erase results from the others.
@@ -502,13 +529,21 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     }
   }
 
-  let candidates = extractions.flatMap((entry) => entry.result.routes);
+  let candidates = extractions.flatMap((entry) => entry.result.routes).map(candidate =>
+    applyCompletenessGate({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }));
   if (options.gapResolver) {
-    candidates = await Promise.all(
-      candidates.map((candidate) =>
-        applyAiGaps(candidate, options.gapResolver!, ctx),
-      ),
-    );
+    // Bound model traffic and preserve static results when a single request fails.
+    const enriched: RouteCandidate[] = [];
+    for (let i = 0; i < candidates.length; i += 4) {
+      enriched.push(...await Promise.all(candidates.slice(i, i + 4).map(async candidate => {
+        try { return await applyAiGaps(candidate, options.gapResolver!, ctx); }
+        catch (error) {
+          diagnostics.push(`AI gap resolution failed for ${candidate.method} ${candidate.fullPath ?? candidate.path}: ${error instanceof Error ? error.message : String(error)}`);
+          return candidate;
+        }
+      })));
+    }
+    candidates = enriched;
   }
   candidates = candidates.map((candidate) =>
     applyCompletenessGate({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }),
@@ -523,10 +558,13 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       if (!existing) componentsByName.set(component.name, component.schema);
     }
   }
-  const components = [...componentsByName.entries()].map(([name, schema]) => ({
-    name,
-    schema,
-  }));
+  // Fastify-style native JSON schemas carry draft-07 `definitions`/`$defs`;
+  // hoist them into components.schemas so every local $ref resolves in OAS 3.x.
+  const hoistedComponents = hoistLocalSchemaDefinitions(
+    operations as DiscoveredOperation[],
+    [...componentsByName.entries()].map(([name, schema]) => ({ name, schema })),
+  );
+  const components = hoistedComponents;
 
   const securitySchemes = extractions.flatMap((entry) => entry.result.securitySchemes);
   const servers = extractions.flatMap((entry) => entry.result.servers);
@@ -564,6 +602,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     sidecar: buildSidecar({
       files: index.files,
       operations,
+      components: project.components,
       language: activeLanguages.join("+"),
       framework: frameworks.join("+") || undefined,
     }),

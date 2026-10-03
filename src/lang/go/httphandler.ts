@@ -312,20 +312,50 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       }
     }
 
-    // json.NewDecoder(r.Body).Decode(&x) — request body component.
+    // Request body decoding:
+    //   json.NewDecoder(r.Body).Decode(&x)   (chained)
+    //   decoder := json.NewDecoder(r.Body); decoder.Decode(&x)   (split)
+    //   json.Unmarshal(data, &x)
+    const decoderVars = new Set<string>();
+    for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+      const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
+      if (lists.length < 2) continue;
+      for (const call of findAll(lists[1]!, (c) => c.type === "call_expression")) {
+        const s = selectorCall(call);
+        if (s?.receiver.type === "identifier" && s.receiver.text === "json" && s.method === "NewDecoder") {
+          for (const id of lists[0]!.namedChildren.filter((c) => c.type === "identifier")) {
+            decoderVars.add(id.text);
+          }
+        }
+      }
+    }
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
-      if (sel?.method === "Decode" && call.text.includes("NewDecoder")) {
-        const typeNode = referencedTypeOf(positionalArguments(call)[0], body);
-        if (typeNode) {
-          requestBody = {
-            required: true,
-            confidence: "high",
-            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, index), confidence: "high" }],
-          };
-        } else {
-          gaps.add("body-schema-unknown");
-        }
+      if (!sel) continue;
+      let targetArg: TsNode | undefined;
+      if (sel.method === "Decode") {
+        const chained = call.text.includes("NewDecoder");
+        const viaVar = sel.receiver.type === "identifier" && decoderVars.has(sel.receiver.text);
+        if (!chained && !viaVar) continue;
+        targetArg = positionalArguments(call)[0];
+      } else if (
+        sel.receiver.type === "identifier" &&
+        sel.receiver.text === "json" &&
+        sel.method === "Unmarshal"
+      ) {
+        targetArg = positionalArguments(call)[1];
+      } else {
+        continue;
+      }
+      const typeNode = referencedTypeOf(targetArg, body);
+      if (typeNode) {
+        requestBody = {
+          required: true,
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, index), confidence: "high" }],
+        };
+      } else {
+        gaps.add("body-schema-unknown");
       }
     }
 

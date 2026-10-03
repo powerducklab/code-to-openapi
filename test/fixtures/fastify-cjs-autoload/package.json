@@ -1,0 +1,11 @@
+{
+  "name": "fastify-cjs-autoload-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "fastify": "^4.28.0",
+    "@fastify/autoload": "^6.0.0",
+    "fastify-plugin": "^5.0.0",
+    "fluent-json-schema": "^4.2.1"
+  }
+}

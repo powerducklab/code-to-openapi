@@ -23,6 +23,8 @@ import type {
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
+import { createBindingResolver } from "../lang/typescript/bindings.js";
+import { convertZodNode } from "../lang/typescript/zod.js";
 import { analyzeHandler } from "./express-handler.js";
 import {
   addParam,
@@ -311,6 +313,16 @@ function analyzeAppHandler(
   let bodySchema: { schema: any; confidence: "high" | "medium" | "low" } | undefined;
 
   const reqName = handler.parameters?.[0]?.name?.getText?.(source) ?? "request";
+  // Variables holding the parsed request payload: `const json = await req.json()`.
+  const jsonVars = new Set<string>();
+
+  const bindingResolver = createBindingResolver({
+    ts,
+    program: analysis.program,
+    isProjectFile: analysis.isProjectFile,
+  });
+  const resolveSchemaNode = (name: string, from: any): any =>
+    bindingResolver.resolve(name, from)?.node ?? null;
 
   const visit = (node: any) => {
     // const body: T = await request.json()
@@ -321,6 +333,7 @@ function analyzeAppHandler(
       isJsonCall(ts, node.initializer, reqName)
     ) {
       bodyReferenced = true;
+      if (ts.isIdentifier(node.name)) jsonVars.add(node.name.text);
       try {
         const type = analysis.checker.getTypeFromTypeNode(node.type);
         const schema = typeToSchema(type, analysis.schemaContext);
@@ -329,6 +342,54 @@ function analyzeAppHandler(
         }
       } catch {
         // untyped
+      }
+    }
+
+    // Untyped `const json = await req.json()` (no type annotation).
+    if (
+      ts.isVariableDeclaration(node) &&
+      !node.type &&
+      node.initializer &&
+      ts.isIdentifier(node.name) &&
+      isJsonCall(ts, node.initializer, reqName)
+    ) {
+      bodyReferenced = true;
+      jsonVars.add(node.name.text);
+    }
+
+    // schema.parse(jsonVar) / schema.safeParse(await req.json()) — the common
+    // Next.js + Zod validation idiom; the schema is the request body contract.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      (node.expression.name.text === "parse" ||
+        node.expression.name.text === "safeParse")
+    ) {
+      const arg = node.arguments[0];
+      const referencesJson =
+        (arg && ts.isIdentifier(arg) && jsonVars.has(arg.text)) ||
+        (arg && isJsonCall(ts, arg, reqName));
+      if (referencesJson) {
+        const receiver = node.expression.expression;
+        let schemaNode: any = null;
+        if (ts.isCallExpression(receiver)) {
+          // z.object({...}).parse(...)
+          schemaNode = receiver;
+        } else if (ts.isIdentifier(receiver)) {
+          schemaNode = resolveSchemaNode(receiver.text, source);
+        }
+        if (schemaNode) {
+          const schema = convertZodNode(schemaNode, {
+            ts,
+            sourceFile: schemaNode.getSourceFile?.() ?? source,
+            resolveSchemaBinding: (name: string, from?: any) =>
+              resolveSchemaNode(name, from ?? source),
+          });
+          if (schema && Object.keys(schema).length) {
+            bodyReferenced = true;
+            bodySchema = { schema, confidence: "high" };
+          }
+        }
       }
     }
 
@@ -377,8 +438,18 @@ function analyzeAppHandler(
     ) {
       hasResponseSite = true;
       const status = statusFromOpts(ts, node.arguments?.[1]) ?? "200";
-      // new Response(body, opts): a string/body argument is a text payload.
-      const bodyArg = node.arguments?.[0];
+      let bodyArg = node.arguments?.[0];
+      // new Response(JSON.stringify(payload)) -> infer payload's shape.
+      if (
+        bodyArg &&
+        ts.isCallExpression(bodyArg) &&
+        ts.isPropertyAccessExpression(bodyArg.expression) &&
+        bodyArg.expression.name.text === "stringify" &&
+        bodyArg.expression.expression.getText(source) === "JSON" &&
+        bodyArg.arguments[0]
+      ) {
+        bodyArg = bodyArg.arguments[0];
+      }
       if (bodyArg && bodyArg.kind !== ts.SyntaxKind.NullKeyword) {
         const { schema, typed } = schemaFromNode(analysis, bodyArg);
         responses.record(status, "application/json", schema, typed ? "high" : "medium");

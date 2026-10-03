@@ -262,8 +262,9 @@ export function resolveLocalType(
   }
 
   for (const declaration of findNamed(body, "short_var_declaration")) {
-    const left = declaration.namedChildren.find((c) => c.type === "expression_list");
-    const right = declaration.namedChildren.find((c) => c.type === "expression_list");
+    const lists = declaration.namedChildren.filter((c) => c.type === "expression_list");
+    const left = lists[0];
+    const right = lists[1];
     if (!left || !right) continue;
     const index = left.namedChildren.findIndex((c) => c.text === variableName);
     if (index < 0) continue;
@@ -272,6 +273,15 @@ export function resolveLocalType(
     // x := Type{...} or x := &Type{...}.
     const composite = findFirstNamed(value, "composite_literal");
     if (composite) return composite.namedChildren[0] ?? null;
+    // x := new(Type).
+    if (
+      value.type === "call_expression" &&
+      value.namedChildren[0]?.type === "identifier" &&
+      value.namedChildren[0]?.text === "new"
+    ) {
+      const args = value.namedChildren.filter((c) => c.type === "type_identifier");
+      if (args[0]) return args[0];
+    }
   }
 
   return null;

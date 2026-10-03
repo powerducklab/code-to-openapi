@@ -24,6 +24,7 @@ import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
 import {
   buildGoModelIndex,
   ensureGoComponent,
+  functionResultTypeNode,
   goTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
@@ -131,6 +132,82 @@ function referencedType(arg: TsNode | undefined, body: TsNode): TsNode | null {
       if (callee && callee.type === "identifier" && callee.text === "new") {
         const args = positionalArguments(value);
         return args[0] ?? null;
+      }
+    }
+  }
+  return null;
+}
+
+function unwrapTypeNode(node: TsNode | null): TsNode | null {
+  let current = node;
+  while (current && current.type === "pointer_type") {
+    current = current.namedChildren[0] ?? null;
+  }
+  return current;
+}
+
+function typeNodeName(node: TsNode | null): string | null {
+  const inner = unwrapTypeNode(node);
+  return inner && inner.type === "type_identifier" ? inner.text : null;
+}
+
+/**
+ * Resolves the request struct behind a receiver variable in a handler:
+ *   req := &userRegisterRequest{}
+ *   req := newUserRegisterRequest()   // constructor returning *T or new(T)
+ *
+ * Only names present in the package model index are accepted.
+ */
+function resolveIndirectRequestType(
+  body: TsNode,
+  varName: string,
+  analysis: GoAnalysis,
+  index: GoModelIndex,
+): TsNode | null {
+  const direct = unwrapTypeNode(resolveLocalType(body, varName));
+  if (direct && typeNodeName(direct) && index.byName.has(typeNodeName(direct)!)) {
+    return direct;
+  }
+
+  // Constructor call on the right-hand side of `req := newX()`.
+  for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+    const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
+    if (lists.length < 2) continue;
+    const at = lists[0].namedChildren.findIndex((c) => c.text === varName);
+    if (at < 0) continue;
+    const value = lists[1].namedChildren[at];
+    if (!value || value.type !== "call_expression") continue;
+    const callee = value.namedChildren[0];
+    if (!callee || callee.type !== "identifier") continue;
+    const fn = analysis.functions.get(callee.text)?.[0];
+    if (!fn?.body) continue;
+
+    // Declared result type, e.g. `func newX() *X`.
+    const resultType = unwrapTypeNode(functionResultTypeNode(fn));
+    if (resultType && typeNodeName(resultType) && index.byName.has(typeNodeName(resultType)!)) {
+      return resultType;
+    }
+    // Body returns new(T) or &T{}.
+    for (const ret of findAll(fn.body, (n) => n.type === "return_statement")) {
+      const newCall = findFirst(
+        ret,
+        (n) =>
+          n.type === "call_expression" &&
+          n.namedChildren[0]?.type === "identifier" &&
+          n.namedChildren[0]?.text === "new",
+      );
+      if (newCall) {
+        const arg = positionalArguments(newCall)[0];
+        if (arg && arg.type === "type_identifier" && index.byName.has(arg.text)) return arg;
+      }
+      const composite = findFirst(ret, (n) => n.type === "composite_literal");
+      const compositeType = unwrapTypeNode(composite?.namedChildren[0] ?? null);
+      if (
+        compositeType &&
+        compositeType.type === "type_identifier" &&
+        index.byName.has(compositeType.text)
+      ) {
+        return compositeType;
       }
     }
   }
@@ -256,6 +333,36 @@ function analyzeEchoHandler(
           };
         } else {
           gaps.add("body-schema-unknown");
+        }
+        continue;
+      }
+
+      // Indirect bind: `req.bind(c, ...)` / `req.Bind(c, ...)` where the
+      // request struct owns a helper method that calls c.Bind internally
+      // (the canonical echo realworld layout).
+      if (
+        (sel.method === "bind" || sel.method === "Bind") &&
+        sel.receiver.type === "identifier" &&
+        !requestBody
+      ) {
+        const typeNode = resolveIndirectRequestType(
+          body,
+          sel.receiver.text,
+          analysis,
+          modelIndex,
+        );
+        const methodBinds = typeNode
+          ? analysis.methods.some(
+              (m) =>
+                m.name === sel.method && /\.Bind\(/.test(m.node.text),
+            )
+          : false;
+        if (typeNode && methodBinds) {
+          requestBody = {
+            required: true,
+            confidence: "high",
+            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" }],
+          };
         }
         continue;
       }

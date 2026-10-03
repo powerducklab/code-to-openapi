@@ -58,10 +58,10 @@ function pathParams(path: string): RouteParameter[] {
   const params: RouteParameter[] = [];
   for (const match of path.matchAll(/\{([^}]+)\}/g)) {
     params.push({
-      name: match[1]!,
+      name: match[1]!.split(":")[0]!,
       in: "path",
       required: true,
-      schema: { type: "string" },
+      schema: { type: match[1]!.endsWith(":int") ? "integer" : match[1]!.endsWith(":float") ? "number" : "string" },
       confidence: "high",
     });
   }
@@ -223,6 +223,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
                 line: el.startPosition.row + 1,
                 symbol: endpointName ?? "endpoint",
                 statuses,
+                handler: endpointFn,
               }),
             );
           }
@@ -269,10 +270,52 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
         if (!value || value.type !== "call") continue;
         if (callName(value.namedChildren[0] ?? null) !== "Starlette") continue;
         if (target?.type === "identifier" && mountAppNames.has(target.text)) continue;
-        const routesList = keywordArgument(value, "routes");
+        let routesList = keywordArgument(value, "routes");
+        if (routesList?.type === "identifier") {
+          const name = routesList.text;
+          const declaration = findAll(file.root, n => n.type === "assignment")
+            .find(n => n.namedChildren[0]?.text === name);
+          const assigned = declaration?.namedChildren[declaration.namedChildren.length - 1];
+          routesList = assigned?.type === "list" ? assigned : null;
+        }
         if (!routesList || visited.has(routesList)) continue;
         visited.add(routesList);
         walk(routesList, "");
+      }
+    }
+
+    // Legacy Starlette decorators remain common in deployed applications.
+    // Only accept receivers constructed as Starlette in the same source file.
+    for (const fn of analysis.functions) {
+      const file = analysis.files.get(fn.file);
+      if (!file) continue;
+      const apps = new Set(findAll(file.root, n => n.type === "assignment")
+        .filter(n => {
+          const value = n.namedChildren[n.namedChildren.length - 1];
+          return value?.type === "call" && callName(value.namedChildren[0] ?? null) === "Starlette";
+        }).map(n => n.namedChildren[0]?.text));
+      for (const decorator of fn.decorators) {
+        const call = decorator.namedChildren[0];
+        if (call?.type !== "call") continue;
+        const target = call.namedChildren[0];
+        if (target?.type !== "attribute" || callName(target) !== "route" ||
+            !apps.has(target.namedChildren[0]?.text)) continue;
+        const pathNode = positionalArguments(call)[0];
+        const path = pathNode ? literalString(pathNode) : null;
+        if (path === null) {
+          unresolved.push({ reason: "dynamic-path", message: "Starlette decorator path is dynamic",
+            origin: { file: fn.file, line: call.startPosition.row + 1 } });
+          continue;
+        }
+        const methodsNode = keywordArgument(call, "methods");
+        const methods = methodsNode ? listElements(methodsNode).map(n => literalString(n)?.toLowerCase())
+          .filter((m): m is string => !!m && HTTP_METHODS.has(m)) : ["get"];
+        for (const method of methods) {
+          const route = buildRoute({ method, path, line: call.startPosition.row + 1,
+            symbol: fn.name, statuses: scanStatuses(fn), handler: fn });
+          route.origin = { ...route.origin, file: fn.file };
+          routes.push(route);
+        }
       }
     }
 
@@ -341,6 +384,7 @@ function buildRoute(input: {
   line: number;
   symbol: string;
   statuses: string[];
+  handler?: PyFunction;
 }): RouteCandidate {
   const gaps = new Set<GapCode>();
   const parameters = pathParams(input.path);
@@ -349,16 +393,33 @@ function buildRoute(input: {
     gaps.add("body-schema-unknown");
   }
   const confidence: Confidence = gaps.size ? "medium" : "high";
-  const responses: RouteCandidate["responses"] = input.statuses.map((status) => ({
+  let responses: RouteCandidate["responses"] = input.statuses.map((status) => ({
     statusCode: status,
     description: "",
     confidence: "medium",
     ...(status === "204" ? { content: [] } : { content: [{ mediaType: "application/json", schema: {} }] }),
   }));
+  if (input.handler?.body) {
+    const evidence = new Map<string, JsonSchemaLocal[]>();
+    for (const call of findAll(input.handler.body, n => n.type === "call")) {
+      if (callName(call.namedChildren[0] ?? null) !== "JSONResponse") continue;
+      const code = keywordArgument(call, "status_code");
+      const status = String(code ? literalInteger(code) ?? "default" : 200);
+      const payload = keywordArgument(call, "content") ?? positionalArguments(call)[0];
+      const schema = payload ? literalSchema(payload) : {};
+      const alternatives = evidence.get(status) ?? [];
+      if (!alternatives.some(s => JSON.stringify(s) === JSON.stringify(schema))) alternatives.push(schema);
+      evidence.set(status, alternatives);
+    }
+    if (evidence.size) responses = [...responses.filter(response => !evidence.has(response.statusCode)), ...[...evidence].map(([statusCode, schemas]) => ({
+      statusCode, description: "", confidence: "medium" as const,
+      content: [{ mediaType: "application/json", schema: schemas.length === 1 ? schemas[0]! : { anyOf: schemas } }],
+    }))];
+  }
   return {
     method: input.method,
-    path: input.path,
-    fullPath: input.path,
+    path: input.path.replace(/\{([^}:]+):[^}]+\}/g, "{$1}"),
+    fullPath: input.path.replace(/\{([^}:]+):[^}]+\}/g, "{$1}"),
     operationId: operationId(input.method, input.path, input.symbol),
     origin: { file: "", line: input.line, symbol: input.symbol },
     parameters,
@@ -377,4 +438,26 @@ function buildRoute(input: {
     gaps: [...gaps],
     components: [],
   };
+}
+
+/** Literal response evidence only; dynamic expressions remain explicit holes. */
+function literalSchema(node: TsNode): JsonSchemaLocal {
+  if (node.type === "string" || node.type === "concatenated_string") return { type: "string" };
+  if (node.type === "integer") return { type: "integer" };
+  if (node.type === "float") return { type: "number" };
+  if (node.type === "true" || node.type === "false") return { type: "boolean" };
+  if (node.type === "none") return { type: "null" };
+  if (node.type === "dictionary") {
+    const properties: Record<string, JsonSchemaLocal> = {};
+    for (const pair of node.namedChildren) {
+      if (pair.type !== "pair") return {}; // dictionary unpacking is not fully known
+      const key = pair.namedChildren[0];
+      const value = pair.namedChildren[1];
+      const name = key ? literalString(key) : null;
+      if (name === null || !value) return {};
+      properties[name] = literalSchema(value);
+    }
+    return { type: "object", properties, ...(Object.keys(properties).length ? { required: Object.keys(properties) } : {}) };
+  }
+  return {};
 }

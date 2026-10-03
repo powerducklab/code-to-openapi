@@ -26,7 +26,8 @@ describe("express edge cases (TypeScript)", () => {
 
     // app.route(path).get(fn).patch(arrow) — verb calls carry no path arg.
     const getOne = op(ops, "get", "/api/articles/{id}");
-    expect(getOne.confidence).toBe("high");
+    expect(getOne.confidence).toBe("medium");
+    expect(getOne.gaps).toContain("response-schema-unknown");
     expect(getOne.responses.map((r: any) => r.statusCode).sort()).toEqual(["200", "404"]);
     const patchOne = op(ops, "patch", "/api/articles/{id}");
     expect(patchOne.requestBody).toBeDefined();
@@ -62,7 +63,7 @@ describe("express edge cases (TypeScript)", () => {
     // Redirects are bodyless 302 responses.
     const redirect = op(ops, "get", "/api/old-articles");
     expect(redirect.responses[0].statusCode).toBe("302");
-    expect(redirect.responses[0].content).toBeUndefined();
+    expect(redirect.responses[0].content?.[0]?.mediaType).toBe("text/html");
 
     // sendStatus(204) stays bodyless after normalization.
     const files = doc.paths["/api/files/{wildcard}"].get;

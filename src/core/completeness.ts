@@ -10,6 +10,15 @@ import type { RouteCandidate } from "./types.js";
  * The gate never invents content: a missing shape stays a gap and is either
  * sent to the AI resolver or surfaced in the scan report.
  */
+function hasUnknownSchema(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object") return false;
+  const value = schema as Record<string, unknown>;
+  if (!Object.keys(value).length) return true;
+  if (value.properties && Object.values(value.properties as object).some(hasUnknownSchema)) return true;
+  if (value.items && hasUnknownSchema(value.items)) return true;
+  return ["anyOf", "oneOf", "allOf"].some(key => Array.isArray(value[key]) && (value[key] as unknown[]).some(hasUnknownSchema));
+}
+
 export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate {
   const gaps = new Set<GapCode>(candidate.gaps);
   const templateParams = new Set(
@@ -47,11 +56,14 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
   }
 
   const typedResponses = candidate.responses.filter((r) => {
-    // 204 and 3xx responses carry no JSON body by definition.
-    if (/^(204|3\d\d)$/.test(r.statusCode)) return true;
+    // Only statuses that prohibit content may discard inferred payloads.
+    if (/^(1\d\d|204|205|304)$/.test(r.statusCode)) return true;
     if (!r.content) return true;
     return r.content.every((m) => {
-      if (m.schema || m.itemSchema) return true;
+      if (m.schema || m.itemSchema) {
+        if (hasUnknownSchema(m.itemSchema ?? m.schema)) gaps.add(m.mediaType === "text/event-stream" ? "sse-events-unknown" : "response-schema-unknown");
+        return true;
+      }
       // SSE event payloads have their own dedicated gap code.
       if (m.mediaType === "text/event-stream") {
         gaps.add("sse-events-unknown");
@@ -74,18 +86,18 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
   } else if (typedResponses.length !== candidate.responses.length) {
     gaps.add("response-schema-unknown");
   } else if (
-    candidate.responses.every((r) => /^(204|3\d\d)$/.test(r.statusCode))
+    candidate.responses.every((r) => /^(1\d\d|204|205|304)$/.test(r.statusCode))
   ) {
-    // Bodyless 204/3xx responses never need a schema.
+    // Bodyless statuses never need a schema.
     gaps.delete("response-schema-unknown");
   }
 
-  // 204/3xx responses carry no body by definition: normalize away any
+  // Statuses prohibiting a body: normalize away any
   // placeholder media so the converted document stays valid. Other media
   // without schema is kept on purpose (weakly typed packs surface the gap as
   // an empty schema for the AI resolver or the user to fill).
   for (const response of candidate.responses) {
-    if (/^(204|3\d\d)$/.test(response.statusCode)) {
+    if (/^(1\d\d|204|205|304)$/.test(response.statusCode)) {
       response.content = undefined;
     }
   }

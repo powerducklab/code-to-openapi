@@ -196,6 +196,34 @@ export class ResponseCollector {
     }
   }
 
+  /**
+   * Records an authoritative schema (for example a framework-level response
+   * contract): unlike `record`, an existing inferred schema for the same
+   * status/media type is replaced rather than preserved.
+   */
+  replace(
+    status: string,
+    mediaType: string,
+    schema: JsonSchema | undefined,
+    confidence: Confidence,
+    opts: { description?: string; itemSchema?: JsonSchema } = {},
+  ): void {
+    const key = `${status}:${mediaType}`;
+    const existing = this.map.get(key);
+    if (existing) {
+      const existingMedia = existing.content?.find((m) => m.mediaType === mediaType);
+      if (existingMedia) {
+        if (schema && Object.keys(schema).length) existingMedia.schema = schema;
+        if (opts.itemSchema && Object.keys(opts.itemSchema).length) {
+          existingMedia.itemSchema = opts.itemSchema;
+        }
+      }
+      if (confidence === "high") existing.confidence = "high";
+      return;
+    }
+    this.record(status, mediaType, schema, confidence, opts);
+  }
+
   all(): DiscoveredResponse[] {
     return [...this.map.values()];
   }

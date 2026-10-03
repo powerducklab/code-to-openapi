@@ -22,6 +22,8 @@ import type {
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
+import { convertZodNode } from "../lang/typescript/zod.js";
+import { resolveStatusName } from "../lang/typescript/httpStatus.js";
 import { resolveHandler } from "./express-handler.js";
 import {
   addParam,
@@ -57,12 +59,24 @@ interface MountEdge {
   childName: string;
 }
 
+interface RouteDef {
+  method: string;
+  path: string;
+  /** The createRoute({...}) object literal node. */
+  objectNode: any;
+  /** Project-relative path of the file declaring the route. */
+  ownerRel: string;
+}
+
 interface RouteReg {
   nodeId: string;
   file: string;
   method: string;
   rawPath: string;
   handlerNode: any;
+  /** createRoute object literal and declaring file when via .openapi(). */
+  routeObject?: any;
+  routeObjectFile?: string;
   origin: { file: string; line?: number };
 }
 
@@ -80,8 +94,10 @@ interface FileModel {
   nodes: Map<string, HonoNode>;
   /** Exported Hono var: export name -> local var name. */
   exported: Map<string, string>;
-  /** createRoute definitions: local/exported name -> { method, path }. */
-  routeDefs: Map<string, { method: string; path: string }>;
+  /** createRoute definitions: local/exported name -> parsed route contract. */
+  routeDefs: Map<string, RouteDef>;
+  /** Top-level schema initializers by local binding name (Zod and friends). */
+  schemaBindings: Map<string, any>;
   mounts: MountEdge[];
   routes: RouteReg[];
   /** `.openapi(routeDef, handler)` calls awaiting cross-file routeDef resolution. */
@@ -143,6 +159,8 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
           method: def.method,
           rawPath: def.path,
           handlerNode: pend.handlerNode,
+          routeObject: def.objectNode,
+          routeObjectFile: def.ownerRel,
           origin: pend.origin,
         });
       }
@@ -193,9 +211,54 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
           pathParams: new Set(normalized.params),
         });
 
-        const confidence = !facts.gaps.length
+        // Declarative @hono/zod-openapi contract (createRoute) wins over
+        // handler inference for body, responses and typed parameters. Schema
+        // identifiers resolve in the file that declares the route, which may
+        // differ from the file that registers it.
+        const contractOwner = models.get(route.routeObjectFile ?? route.file);
+        const contract =
+          route.routeObject && contractOwner
+            ? extractRouteContract(analysis, models, contractOwner, route.routeObject)
+            : null;
+
+        const parameters = [...facts.parameters];
+        if (contract) {
+          for (const p of contract.parameters) {
+            if (!parameters.some((x) => x.name === p.name && x.in === p.in)) {
+              parameters.push(p);
+            }
+          }
+        }
+
+        let requestBody = facts.requestBody;
+        if (contract?.body) {
+          requestBody = {
+            required: contract.body.required,
+            confidence: "high",
+            content: contract.body.content.map((c) => ({
+              mediaType: c.mediaType,
+              schema: c.schema,
+              confidence: "high" as const,
+            })),
+          };
+        }
+
+        let responses = facts.responses;
+        if (contract && contract.responses.length > 0) {
+          const byStatus = new Map(responses.map((r) => [r.statusCode, r]));
+          for (const r of contract.responses) byStatus.set(r.statusCode, r);
+          responses = [...byStatus.values()];
+        }
+
+        const gaps = facts.gaps.filter((g) => {
+          if (contract?.body && (g === "body-unknown" || g === "body-schema-unknown")) return false;
+          if (contract && contract.responses.length > 0 && g === "response-unknown") return false;
+          return true;
+        });
+
+        const confidence = !gaps.length
           ? "high"
-          : facts.gaps.some((g) => g === "response-unknown" || g === "body-unknown")
+          : gaps.some((g) => g === "response-unknown" || g === "body-unknown")
             ? "low"
             : "medium";
 
@@ -205,13 +268,13 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
           fullPath,
           operationId: makeOperationId(route.method, fullPath),
           origin: route.origin,
-          parameters: facts.parameters,
-          ...(facts.requestBody ? { requestBody: facts.requestBody } : {}),
-          responses: facts.responses,
+          parameters,
+          ...(requestBody ? { requestBody } : {}),
+          responses,
           tags: tagForPath(fullPath, route.file),
           ...(facts.sse ? { extensions: { "x-protocol": "sse" } } : {}),
           confidence,
-          gaps: facts.gaps,
+          gaps,
           components: [],
           handlerSource: facts.handlerSource,
         };
@@ -247,6 +310,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     nodes: new Map(),
     exported: new Map(),
     routeDefs: new Map(),
+    schemaBindings: new Map(),
     mounts: [],
     routes: [],
     pendingOpenapi: [],
@@ -271,6 +335,10 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
           for (const el of named.elements) {
             if (el.name.text === "createRoute" || el.propertyName?.text === "createRoute") {
               model.createRouteNames.add(el.name.text);
+            }
+            // OpenAPIHono subclasses Hono and supports the same routing API.
+            if (el.name.text === "OpenAPIHono" || el.propertyName?.text === "OpenAPIHono") {
+              model.ctorNames.add(el.name.text);
             }
           }
         }
@@ -331,7 +399,26 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
             path = prop.initializer.text;
           }
         }
-        if (method && path) model.routeDefs.set(node.name.text, { method, path });
+        if (method && path)
+          model.routeDefs.set(node.name.text, {
+            method,
+            path,
+            objectNode: arg,
+            ownerRel: rel,
+          });
+      }
+    }
+
+    // Top-level schema bindings (Zod chains and plain object literals). Only
+    // source-level declarations are indexed, so handler-local vars never leak.
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      node.parent?.parent?.parent === source
+    ) {
+      if (!model.schemaBindings.has(node.name.text)) {
+        model.schemaBindings.set(node.name.text, node.initializer);
       }
     }
 
@@ -468,10 +555,11 @@ function resolveRouteDef(
   models: Map<string, FileModel>,
   model: FileModel,
   arg: any,
-): { method: string; path: string } | undefined {
+): RouteDef | undefined {
   // Local routeDef: openapi(loginRoute, ...)
   if (ts.isIdentifier(arg)) {
-    return model.routeDefs.get(arg.text);
+    const def = model.routeDefs.get(arg.text);
+    return def ? { ...def, ownerRel: model.rel } : undefined;
   }
   // Namespace member: openapi(routes.getCurrentUser, ...)
   if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression)) {
@@ -491,9 +579,185 @@ function resolveRouteDef(
     if (!resolved || !analysis.isProjectFile(resolved)) return undefined;
     const target = program.getSourceFile(resolved);
     const targetModel = [...models.values()].find((m) => m.source === target);
-    return targetModel?.routeDefs.get(member);
+    const def = targetModel?.routeDefs.get(member);
+    return def ?? undefined;
   }
   return undefined;
+}
+
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function objectProperty(ts: any, obj: any, name: string): any | null {
+  if (!obj || !ts.isObjectLiteralExpression(obj)) return null;
+  for (const prop of obj.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const key = ts.isIdentifier(prop.name) ? prop.name.text : ts.isStringLiteralLike(prop.name) ? prop.name.text : null;
+    if (key === name) return prop.initializer;
+  }
+  return null;
+}
+
+/**
+ * Resolves a schema binding name to its initializer node, following local
+ * declarations and relative imports across project files.
+ */
+function makeBindingResolver(
+  analysis: TsAnalysis,
+  ts: any,
+  models: Map<string, FileModel>,
+  owner: FileModel,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): (name: string, from?: any) => any | null {
+  const resolveImported = (model: FileModel, name: string): any | null => {
+    const binding = model.imports.get(name);
+    if (!binding) return null;
+    const { program } = analysis;
+    const resolved = ts.resolveModuleName
+      ? ts.resolveModuleName(
+          binding.specifier,
+          model.source.fileName,
+          program.getCompilerOptions(),
+          ts.sys,
+        )?.resolvedModule?.resolvedFileName
+      : undefined;
+    if (!resolved || !analysis.isProjectFile(resolved)) return null;
+    const target = program.getSourceFile(resolved);
+    const targetModel = [...models.values()].find((m) => m.source === target);
+    if (!targetModel) return null;
+    const localName = targetModel.exported.get(binding.exportName) ?? binding.exportName;
+    return targetModel.schemaBindings.get(localName) ?? null;
+  };
+
+  return (name: string, from?: any) => {
+    let model: FileModel = owner;
+    if (from) {
+      const fromModel = [...models.values()].find((m) => m.source === from);
+      if (fromModel) model = fromModel;
+    }
+    return model.schemaBindings.get(name) ?? resolveImported(model, name);
+  };
+}
+
+interface RouteContract {
+  body?: {
+    required: boolean;
+    content: { mediaType: string; schema: import("../core/types.js").JsonSchema }[];
+  };
+  parameters: RouteParameter[];
+  responses: RouteCandidate["responses"];
+}
+
+/**
+ * Extracts the declarative contract from a @hono/zod-openapi createRoute({...})
+ * object literal. Unresolvable schema nodes are skipped honestly rather than
+ * fabricated; handler-derived evidence fills the remaining gaps.
+ */
+function extractRouteContract(
+  analysis: TsAnalysis,
+  models: Map<string, FileModel>,
+  owner: FileModel,
+  routeObject: any,
+): RouteContract {
+  const { ts } = analysis;
+  const resolveBinding = makeBindingResolver(analysis, ts, models, owner);
+  const toSchema = (node: any): import("../core/types.js").JsonSchema | null =>
+    convertZodNode(node, {
+      ts,
+      sourceFile: owner.source,
+      resolveSchemaBinding: resolveBinding,
+    });
+
+  const result: RouteContract = { parameters: [], responses: [] };
+
+  const request = objectProperty(ts, routeObject, "request");
+  if (request && ts.isObjectLiteralExpression(request)) {
+    // Body: request.body.content["application/json"].schema
+    const bodyNode = objectProperty(ts, request, "body");
+    if (bodyNode && ts.isObjectLiteralExpression(bodyNode)) {
+      const content = objectProperty(ts, bodyNode, "content");
+      const requiredProp = objectProperty(ts, bodyNode, "required");
+      const required = requiredProp ? requiredProp.kind === ts.SyntaxKind.TrueKeyword : true;
+      const mediaContent: { mediaType: string; schema: import("../core/types.js").JsonSchema }[] = [];
+      if (content && ts.isObjectLiteralExpression(content)) {
+        for (const prop of content.properties) {
+          if (!ts.isPropertyAssignment(prop) || !ts.isStringLiteralLike(prop.name)) continue;
+          const schemaNode = objectProperty(ts, prop.initializer, "schema");
+          if (!schemaNode) continue;
+          const schema = toSchema(schemaNode);
+          if (schema) mediaContent.push({ mediaType: prop.name.text, schema });
+        }
+      }
+      if (mediaContent.length > 0) result.body = { required, content: mediaContent };
+    }
+
+    // Typed parameter groups: params / query / headers, each { schema: ZodObject }.
+    const groups: Array<{ key: string; in: "path" | "query" | "header"; required: boolean }> = [
+      { key: "params", in: "path", required: true },
+      { key: "query", in: "query", required: false },
+      { key: "headers", in: "header", required: false },
+    ];
+    for (const group of groups) {
+      const groupNode = objectProperty(ts, request, group.key);
+      if (!groupNode || !ts.isObjectLiteralExpression(groupNode)) continue;
+      const schemaNode = objectProperty(ts, groupNode, "schema");
+      if (!schemaNode) continue;
+      const schema = toSchema(schemaNode);
+      const props = schema?.properties ?? {};
+      const requiredSet = new Set(Array.isArray(schema?.required) ? schema!.required : []);
+      for (const [name, propSchema] of Object.entries(props)) {
+        result.parameters.push({
+          name,
+          in: group.in,
+          required: group.required || requiredSet.has(name),
+          schema: propSchema as import("../core/types.js").JsonSchema,
+          confidence: "high",
+        });
+      }
+    }
+  }
+
+  // Responses: { 200: { description, content: { "application/json": { schema } } } }
+  const responsesNode = objectProperty(ts, routeObject, "responses");
+  if (responsesNode && ts.isObjectLiteralExpression(responsesNode)) {
+    for (const prop of responsesNode.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const status = resolveStatusName(ts, prop.name);
+      if (!status || !ts.isObjectLiteralExpression(prop.initializer)) continue;
+      const descriptionNode = objectProperty(ts, prop.initializer, "description");
+      const description =
+        descriptionNode && ts.isStringLiteralLike(descriptionNode) ? descriptionNode.text : "";
+      const content = objectProperty(ts, prop.initializer, "content");
+      const mediaContent: RouteCandidate["responses"][number]["content"] = [];
+      if (content && ts.isObjectLiteralExpression(content)) {
+        for (const mediaProp of content.properties) {
+          if (
+            !ts.isPropertyAssignment(mediaProp) ||
+            !ts.isStringLiteralLike(mediaProp.name)
+          ) {
+            continue;
+          }
+          const schemaNode = objectProperty(ts, mediaProp.initializer, "schema");
+          if (!schemaNode) continue;
+          const schema = toSchema(schemaNode);
+          if (schema) {
+            mediaContent.push({
+              mediaType: mediaProp.name.text,
+              schema,
+              confidence: "high",
+            });
+          }
+        }
+      }
+      result.responses.push({
+        statusCode: status,
+        description,
+        confidence: "high",
+        ...(mediaContent.length > 0 ? { content: mediaContent } : {}),
+      });
+    }
+  }
+
+  return result;
 }
 
 function resolveMountChild(

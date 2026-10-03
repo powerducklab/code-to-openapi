@@ -91,12 +91,13 @@ describe("scanProject AI gap resolver", () => {
       (op) => op.method === "post" && op.path === "/collect",
     )!;
     expect(collect.gaps ?? []).toEqual([]);
-    expect(collect.confidence).toBe("high");
+    expect(collect.confidence).toBe("medium");
     expect(collect.requestBody?.content[0]?.schema).toMatchObject({
       type: "object",
       properties: { name: { type: "string" }, price: { type: "number" } },
     });
-    expect(collect.parameters.some((p) => p.in === "query" && p.name === "dryRun")).toBe(true);
+    // The fixture never reads query parameters: ignore this unsolicited AI field.
+    expect(collect.parameters.some((p) => p.in === "query" && p.name === "dryRun")).toBe(false);
     const accepted = collect.responses.find((r) => r.statusCode === "202");
     expect(accepted?.content?.[0]?.schema).toMatchObject({
       type: "object",
@@ -134,4 +135,11 @@ describe("scanProject AI gap resolver", () => {
     )!;
     expect(collect.gaps).toContain("body-schema-unknown");
   });
+});
+
+it('retains discovered routes and gaps when the model fails',async()=>{
+ const result=await scanProject({root:fixtureRoot,gapResolver:{id:'failure',resolve:async()=>{throw new Error('offline');}}});
+ expect(result.project.operations).toHaveLength(2);
+ expect(result.project.operations.some(o=>o.gaps?.length)).toBe(true);
+ expect(result.report.diagnostics.some(d=>d.includes('offline'))).toBe(true);
 });

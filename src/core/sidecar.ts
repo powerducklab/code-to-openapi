@@ -101,22 +101,38 @@ export function affectedFiles(diff: SidecarDiff): string[] {
 }
 
 /** Compact, ordering-independent contract of one discovered operation. */
-function operationContract(operation: DiscoveredOperation): string {
-  const parameters = [...(operation.parameters ?? [])]
-    .map((parameter) => `${parameter.in}:${parameter.name}:${parameter.required ? 1 : 0}`)
-    .sort();
-  const mediaTypes = (operation.requestBody?.content ?? [])
-    .map((media) => media.mediaType)
-    .sort();
-  const statuses = [...operation.responses]
-    .map((response) => response.statusCode)
-    .sort();
-  return JSON.stringify({ parameters, mediaTypes, statuses });
+function operationContract(operation: DiscoveredOperation, components: Map<string, unknown>): string {
+  const referenced = new Map<string, unknown>();
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    const record = value as Record<string, unknown>;
+    if (typeof record.$ref === "string" && record.$ref.startsWith("#/components/schemas/")) {
+      const name = record.$ref.slice("#/components/schemas/".length).replace(/~1/g, "/").replace(/~0/g, "~");
+      if (!referenced.has(name)) {
+        const schema = components.get(name) ?? null;
+        referenced.set(name, schema);
+        visit(schema);
+      }
+    }
+    Object.values(record).forEach(visit);
+  };
+  const { origin, confidence, ...contract } = operation;
+  visit(contract);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") return Object.fromEntries(
+      Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)]),
+    );
+    return value;
+  };
+  return JSON.stringify(canonical({ contract, components: Object.fromEntries(referenced) }));
 }
 
 export interface SidecarBuildInput {
   files: FileEntry[];
   operations: DiscoveredOperation[];
+  components?: readonly { name: string; schema: unknown }[];
   language?: string;
   framework?: string;
 }
@@ -130,12 +146,13 @@ export function buildSidecar(input: SidecarBuildInput): DiscoverySidecar {
   const files: Record<string, string> = {};
   for (const file of input.files) files[file.path] = file.hash;
 
+  const components = new Map((input.components ?? []).map(c => [c.name, c.schema]));
   const routes: SidecarRoute[] = input.operations.map((operation) => {
     const file = operation.origin?.file ?? "";
     const fingerprint = createHash("sha256")
       .update(files[file] ?? "")
       .update("\u0000")
-      .update(operationContract(operation))
+      .update(operationContract(operation, components))
       .digest("hex");
     return {
       key: `${operation.method} ${operation.path}`,
