@@ -1108,6 +1108,31 @@ export function resolveGoPayloadValue(
   while (node.type === "unary_expression") node = node.namedChildren[0] ?? node;
 
   if (node.type === "call_expression") {
+    // Verified standard-library calls that deterministically return a string,
+    // e.g. strings.Join(parts, "\n") rendered through a JSON write helper.
+    const calleeNode = node.namedChildren[0];
+    if (calleeNode?.type === "selector_expression") {
+      const pkg = calleeNode.namedChildren[0];
+      const fn = calleeNode.namedChildren[1];
+      if (pkg?.type === "identifier" && fn?.type === "field_identifier") {
+        const owner = goSourceFile(node, analysis);
+        const aliasFor = (path: string) => {
+          const spec = owner && findAll(owner.root, (n) => n.type === "import_spec").find(
+            (n) => n.childForFieldName("path")?.text === `"${path}"`,
+          );
+          return spec ? spec.childForFieldName("name")?.text ?? path.split("/").pop()! : null;
+        };
+        const stringFns: Record<string, string[]> = {
+          strings: ["Join", "Repeat", "Replace", "ReplaceAll", "ToLower", "ToUpper", "Trim", "TrimSpace", "TrimPrefix", "TrimSuffix"],
+          fmt: ["Sprint", "Sprintf", "Sprintln"],
+        };
+        for (const [path, names] of Object.entries(stringFns)) {
+          if (aliasFor(path) === pkg.text && names.includes(fn.text)) {
+            return { schema: { type: "string" }, status: null };
+          }
+        }
+      }
+    }
     if (node.namedChildren[0]?.text === "len" && positionalArguments(node).length === 1) {
       const owner = goSourceFile(node, analysis);
       // A same-name declaration can shadow the builtin. Prefer unknown to guessing.

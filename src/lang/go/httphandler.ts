@@ -198,7 +198,7 @@ export interface StdHandlerOptions {
 }
 
 /** Recognize an actual local JSON writer, not a helper name convention. */
-function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, depth = 0): { status: TsNode | undefined; payload: TsNode | undefined } | null {
+function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, depth = 0): { status: TsNode | undefined; payload: TsNode | undefined; implicit?: string } | null {
   if (depth > 4) return null;
   const callee = call.namedChildren[0];
   if (callee?.type !== "identifier" || !analysis.functions.has(callee.text)) return null;
@@ -234,6 +234,53 @@ function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, dept
     const encoder = selectorCall(encode.receiver);
     return encoder?.method === "NewEncoder" && encoder.receiver.text === "json" && positionalArguments(encode.receiver)[0]?.text === writer.name;
   });
+  if (!headers.length) {
+    // Implicit-200 JSON render helper: `js, err := json.Marshal(v)` followed by
+    // w.Header().Set("Content-Type", "application/json") and w.Write(js), with no
+    // explicit WriteHeader (net/http then defaults to 200). An http.Error branch
+    // may precede the success write.
+    const setsJson = calls.some((node) => {
+      const s = selectorCall(node);
+      if (s?.method !== "Set" || !node.text.includes(".Header().Set(")) return false;
+      const a = positionalArguments(node);
+      return literalString(a[0]) === "Content-Type" && (literalString(a[1]) ?? "").includes("application/json");
+    });
+    const writes = calls.filter(
+      (node) => selectorCall(node)?.method === "Write" && selectorCall(node)?.receiver.text === writer.name,
+    );
+    if (!setsJson || writes.length !== 1) return null;
+    const output = positionalArguments(writes[0]!)[0];
+    let payloadParam: TsNode | undefined;
+    if (output?.type === "identifier") {
+      const bindings = findAll(helper.body!, (n) => n.type === "short_var_declaration" || n.type === "assignment_statement")
+        .filter((n) => n.namedChildren[0] && findAll(n.namedChildren[0], (c) => c.type === "identifier" && c.text === output.text).length);
+      const binding = bindings.length === 1 ? bindings[0] : undefined;
+      const lists = binding?.namedChildren.filter((n) => n.type === "expression_list");
+      const value = lists?.[1]?.namedChildren[0];
+      const marshal = value ? selectorCall(value) : null;
+      const helperFile = goSourceFile(helper.node, analysis);
+      const imported = helperFile && marshal && findAll(helperFile.root, (n) => n.type === "import_spec").some(
+        (n) =>
+          n.childForFieldName("path")?.text === '"encoding/json"' &&
+          (n.childForFieldName("name")?.text ?? "json") === marshal.receiver.text,
+      );
+      const marshaled = imported && marshal?.method === "Marshal" ? positionalArguments(value!)[0] : undefined;
+      if (marshaled?.type === "identifier" && parameters.some((p) => p.name === marshaled.text)) payloadParam = marshaled;
+    }
+    const payloadIndex = parameters.findIndex((p) => p.name === payloadParam?.text);
+    const writerIndex = parameters.findIndex((p) => p.name === writer.name);
+    const values = positionalArguments(call);
+    const enclosingParams =
+      body.parent?.childForFieldName("parameters") ??
+      body.parent?.namedChildren.filter((node) => node.type === "parameter_list").at(-1);
+    const callerWriter = enclosingParams?.namedChildren.some(
+      (parameter) =>
+        parameter.namedChildren.some((node) => node.type === "identifier" && node.text === values[writerIndex]?.text) &&
+        /(?:^|\.)ResponseWriter$/.test(parameter.namedChildren.at(-1)?.text ?? ""),
+    );
+    if (payloadIndex < 0 || !callerWriter) return null;
+    return { status: undefined, payload: values[payloadIndex], implicit: "200" };
+  }
   if (headers.length !== 1) return null;
   const status = positionalArguments(headers[0]!)[0];
   let payload = encodes.length === 1 ? positionalArguments(encodes[0]!)[0] : undefined;
@@ -269,6 +316,94 @@ function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, dept
   const enclosingParams = body.parent?.childForFieldName("parameters") ?? body.parent?.namedChildren.filter(node => node.type === "parameter_list").at(-1);
   const callerWriter = enclosingParams?.namedChildren.some(parameter => parameter.namedChildren.some(node => node.type === "identifier" && node.text === values[writerIndex]?.text) && /(?:^|\.)ResponseWriter$/.test(parameter.namedChildren.at(-1)?.text ?? ""));
   return statusIndex >= 0 && payloadIndex >= 0 && callerWriter ? { status:values[statusIndex], payload:values[payloadIndex] } : null;
+}
+
+/** Resolve a bare local function call to its unique same-package definition and parameters. */
+function resolveUniqueLocalCallee(
+  call: TsNode,
+  body: TsNode,
+  analysis: GoAnalysis,
+): { fn: NonNullable<ReturnType<GoAnalysis["functions"]["get"]>>[number]; params: { name: string; type: string }[] } | null {
+  const callee = call.namedChildren[0];
+  if (callee?.type !== "identifier" || !analysis.functions.has(callee.text)) return null;
+  let root = body;
+  while (root.parent) root = root.parent;
+  const owner = [...analysis.files.values()].find((file) => file.root.id === root.id);
+  if (!owner) return null;
+  const fns = (analysis.functions.get(callee.text) ?? []).filter((fn) => dirname(fn.file) === dirname(owner.path) && fn.body);
+  if (fns.length !== 1) return null;
+  const fn = fns[0]!;
+  const params =
+    fn.node.namedChildren
+      .find((node) => node.type === "parameter_list")
+      ?.namedChildren.flatMap((parameter) =>
+        parameter.namedChildren
+          .filter((node) => node.type === "identifier")
+          .map((node) => ({ name: node.text, type: parameter.namedChildren.at(-1)?.text ?? "" })),
+      ) ?? [];
+  return { fn, params };
+}
+
+/**
+ * Recognize a local helper that decodes the JSON request body into one of its
+ * parameters (e.g. `readRequestJSON(req, &x)` wrapping
+ * `json.NewDecoder(req.Body).Decode(target)`), and return the call-site argument
+ * bound to that target parameter.
+ */
+function jsonDecodeHelper(call: TsNode, body: TsNode, analysis: GoAnalysis): TsNode | undefined {
+  const resolved = resolveUniqueLocalCallee(call, body, analysis);
+  if (!resolved) return undefined;
+  const { fn, params } = resolved;
+  const requestParam = params.find((p) => /(?:^|\.)Request$/.test(p.type));
+  const helperCalls = findAll(fn.body!, (node) => node.type === "call_expression");
+  // A decoder built from the request body, either chained or via a local binding.
+  const buildsDecoder = helperCalls.some((node) => {
+    const s = selectorCall(node);
+    if (s?.method !== "NewDecoder" || s.receiver.text !== "json") return false;
+    const arg = positionalArguments(node)[0];
+    return !!arg && requestParam && new RegExp(`\\b${requestParam.name}\\.Body\\b`).test(arg.text);
+  });
+  let targetName: string | null = null;
+  for (const node of helperCalls) {
+    const s = selectorCall(node);
+    if (s?.method === "Decode" && (node.text.includes("NewDecoder") || buildsDecoder)) {
+      const arg = positionalArguments(node)[0];
+      const id = arg?.type === "unary_expression" ? arg.namedChildren.find((c) => c.type === "identifier") : arg;
+      if (id?.type === "identifier" && params.some((p) => p.name === id.text)) {
+        targetName = id.text;
+        break;
+      }
+    }
+    if (s?.receiver.type === "identifier" && s.receiver.text === "json" && s.method === "Unmarshal") {
+      const arg = positionalArguments(node)[1];
+      const id = arg?.type === "unary_expression" ? arg.namedChildren.find((c) => c.type === "identifier") : arg;
+      if (id?.type === "identifier" && params.some((p) => p.name === id.text)) {
+        targetName = id.text;
+        break;
+      }
+    }
+  }
+  if (!targetName) return undefined;
+  const index = params.findIndex((p) => p.name === targetName);
+  return positionalArguments(call)[index];
+}
+
+/** Whether a bare local helper call receives the handler's writer and itself writes a response. */
+function localCalleeWritesResponse(
+  call: TsNode,
+  body: TsNode,
+  analysis: GoAnalysis,
+  writerName: string | undefined,
+): boolean {
+  if (!writerName) return false;
+  const values = positionalArguments(call);
+  if (!values.some((a) => a.type === "identifier" && a.text === writerName)) return false;
+  const resolved = resolveUniqueLocalCallee(call, body, analysis);
+  if (!resolved) return false;
+  return findAll(resolved.fn.body!, (node) => node.type === "call_expression").some((node) => {
+    const s = selectorCall(node);
+    return !!s && (s.method === "Write" || s.method === "WriteHeader" || s.method === "Encode");
+  });
 }
 
 /** Infer wire parameter types only from a verified standard-library conversion. */
@@ -395,6 +530,19 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
     responseStatus.set(status, response);
   };
 
+  // Name of the handler's http.ResponseWriter parameter, used to follow helpers.
+  const handlerParamList = body?.parent?.namedChildren.find((n) => n.type === "parameter_list");
+  let handlerWriter: string | undefined;
+  if (handlerParamList) {
+    for (const parameter of childrenOfType(handlerParamList, "parameter_declaration")) {
+      const typeText = parameter.namedChildren.at(-1)?.text ?? "";
+      if (/(?:^|\.)ResponseWriter$/.test(typeText)) {
+        handlerWriter = parameter.namedChildren.find((n) => n.type === "identifier")?.text;
+      }
+    }
+  }
+  let unresolvedWriterHelper = false;
+
   if (body) {
     // Aliases such as `q := r.URL.Query()`; later q.Get("x") reads a query param.
     const queryAlias = new Set<string>();
@@ -417,7 +565,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       if (!sel) {
         const helper = jsonWriterHelper(call, body, analysis);
         if (helper) {
-          const status = statusCodeOf(helper.status) ?? "default";
+          const status = helper.implicit ?? statusCodeOf(helper.status) ?? "default";
           const noBody = helper.payload?.text === "nil" || /^(?:1\d\d|204|205|304)$/.test(status);
           const resolved = !noBody && helper.payload ? resolveGoPayloadValue(helper.payload, body, analysis, index, analysis.vars).schema : undefined;
           const schema = resolved ?? (!noBody && helper.payload ? literalSchema(helper.payload, index, 0, (value) => resolveGoPayloadValue(value, body, analysis, index, analysis.vars).schema) ?? undefined : undefined);
@@ -425,6 +573,11 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
           const previous = responseStatus.get(status)?.content?.[0]?.schema;
           const merged = previous && schema && JSON.stringify(previous) !== JSON.stringify(schema) ? {anyOf:[previous,schema]} : schema ?? previous;
           addResponse(status, {statusCode:status, description:"", confidence:"medium", ...(!noBody ? {content:[{mediaType:"application/json",schema:merged ?? {}}]} : {})});
+        } else if (localCalleeWritesResponse(call, body, analysis, handlerWriter)) {
+          // A helper that receives the handler's writer and writes a response,
+          // but whose payload/status we cannot prove: surface it instead of
+          // silently dropping the success response.
+          unresolvedWriterHelper = true;
         }
         continue;
       }
@@ -573,9 +726,13 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
     }
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
-      if (!sel) continue;
       let targetArg: TsNode | undefined;
-      if (sel.method === "Decode") {
+      if (!sel) {
+        // A local helper that decodes JSON into one of its parameters, e.g.
+        // readRequestJSON(req, &x).
+        targetArg = jsonDecodeHelper(call, body, analysis);
+        if (!targetArg) continue;
+      } else if (sel.method === "Decode") {
         const chained = call.text.includes("NewDecoder");
         const viaVar = sel.receiver.type === "identifier" && decoderVars.has(sel.receiver.text);
         if (!chained && !viaVar) continue;
@@ -655,7 +812,22 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
     gaps.add("sse-events-unknown");
   }
 
-  if (responseStatus.size === 0) gaps.add("response-unknown");
+  if (responseStatus.size === 0) {
+    gaps.add("response-unknown");
+  } else if (!gaps.has("response-unknown") && !gaps.has("response-schema-unknown")) {
+    const has2xx = [...responseStatus.keys()].some((key) => /^2/.test(key));
+    const hasError = [...responseStatus.keys()].some((key) => /^(?:4|5)/.test(key));
+    if (!has2xx && !isSse) {
+      if (unresolvedWriterHelper) {
+        // A helper writes the success body but its shape cannot be proven.
+        gaps.add("response-schema-unknown");
+      } else if (hasError) {
+        // Error branches write explicit 4xx/5xx; the normal return path writes
+        // nothing, so net/http emits an implicit empty 200.
+        responseStatus.set("200", { statusCode: "200", description: "", confidence: "medium" });
+      }
+    }
+  }
 
   return {
     parameters,
