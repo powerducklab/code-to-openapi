@@ -117,7 +117,10 @@ export const symfonyPack: FrameworkPack<PhpAnalysis> = {
         for(const parent of parents){
           const routes=children.length?children:methodName==='__invoke'&&declared.length?[{path:'',name:'',methods:[],explicitMethods:false}]:[];
           for(const route of routes){
-            const methods=route.explicitMethods?route.methods:parent.explicitMethods?parent.methods:[...ROUTE_VERBS];
+            // A route without explicit `methods` technically matches every
+            // verb, but emitting one operation per verb creates false routes.
+            // Represent it once as GET, consistent with the YAML loader.
+            const methods=route.explicitMethods?route.methods:parent.explicitMethods?parent.methods:['get'];
             const matches=imports.filter(entry=>entry.all||rel.startsWith(entry.directory!));
             for(const imported of matches.length?matches:[{prefix:''}])for(const verb of methods){
               const path=joinPath(imported.prefix,joinPath(parent.path,route.path));

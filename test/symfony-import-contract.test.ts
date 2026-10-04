@@ -3,7 +3,7 @@ import {mkdtemp,writeFile,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {scanProject} from '../src/index.js';
-it('loads YAML import prefixes, repeated attributes, inherited verbs and unrestricted methods',async()=>{
+it('loads YAML import prefixes, repeated attributes, inherited verbs and collapses unrestricted methods to GET',async()=>{
  const root=await mkdtemp(join(tmpdir(),'symfony-import-'));
  try{
  await mkdir(join(root,'config'));await mkdir(join(root,'src'));await mkdir(join(root,'src/Controller'));
@@ -21,7 +21,7 @@ it('loads YAML import prefixes, repeated attributes, inherited verbs and unrestr
  const result=await scanProject({root});const converted=await result.convert();expect(converted.documentValid).toBe(true);const doc=converted.document as any;
  expect(Object.keys(doc.paths['/{_locale}/blog/'])).toContain('get');expect(doc.paths['/{_locale}/blog/'].post).toBeUndefined();
  expect(doc.paths['/{_locale}/blog/feed'].get).toBeDefined();
- expect(doc.paths['/{_locale}/login'].patch).toBeDefined();expect(doc.paths['/{_locale}/login'].trace).toBeDefined();
+ expect(doc.paths['/{_locale}/login'].get).toBeDefined();expect(doc.paths['/{_locale}/login'].patch).toBeUndefined();expect(doc.paths['/{_locale}/login'].trace).toBeUndefined();
  expect(doc.paths['/health'].get).toBeDefined();expect(doc.paths['/health'].post).toBeUndefined();
  expect(doc.paths['/{_locale}/blog/'].get.parameters).toContainEqual(expect.objectContaining({name:'_locale',in:'path',required:true}));
  }finally{await rm(root,{recursive:true,force:true});}
