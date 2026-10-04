@@ -98,6 +98,8 @@ interface MarshmallowIndex {
   /** Full analysis, used to resolve parent classes. */
   analysis: PythonAnalysis;
   models: ModelIndex;
+  /** flask-restx: `${file}:${var}` bound via `var = api.model("Name", {...})` -> component name. */
+  restxVars: Map<string, string>;
 }
 
 // Base class tails that identify a marshmallow Schema (including the
@@ -279,6 +281,7 @@ function buildMarshmallowIndex(analysis: PythonAnalysis): MarshmallowIndex {
     classNames: new Set(),
     analysis,
     models: buildModelIndex(analysis),
+    restxVars: new Map(),
   };
 
   let changed = true;
@@ -315,7 +318,97 @@ function buildMarshmallowIndex(analysis: PythonAnalysis): MarshmallowIndex {
     if (index.classNames.has(cls.name)) buildMarshClassSchema(cls, index, new Set());
   }
 
+  buildRestxModels(analysis, index);
+
   return index;
+}
+
+// Map a flask-restx `fields.X(...)` constructor call to a JSON schema.
+// Returns null when the field type is not recognized so the caller can leave
+// an unconstrained schema rather than inventing a type.
+function restxFieldSchema(node: TsNode, index: MarshmallowIndex, file: string): JsonSchemaLocal | null {
+  if (node.type === "identifier") {
+    const ref = index.restxVars.get(`${file}:${node.text}`);
+    return ref ? { $ref: `#/components/schemas/${ref}` } : null;
+  }
+  if (node.type !== "call") return null;
+  const func = node.namedChildren[0];
+  const field = func?.type === "attribute" ? func.namedChildren[1]?.text : null;
+  const receiver = func?.type === "attribute" ? func.namedChildren[0]?.text : null;
+  // Only treat constructors from the flask-restx `fields` module as restx fields.
+  if (!field || (receiver && receiver !== "fields" && !/\.fields$/.test(receiver))) return null;
+  const positional = positionalArguments(node);
+  switch (field) {
+    case "String":
+    case "FormattedString":
+    case "Raw":
+    case "Fixed":
+      return { type: "string" };
+    case "Url":
+      return { type: "string", format: "uri" };
+    case "Integer":
+    case "Arbitrary":
+      return { type: "integer" };
+    case "Float":
+    case "Decimal":
+    case "Number":
+      return { type: "number" };
+    case "Boolean":
+      return { type: "boolean" };
+    case "DateTime":
+      return { type: "string", format: "date-time" };
+    case "Date":
+      return { type: "string", format: "date" };
+    case "Time":
+      return { type: "string", format: "time" };
+    case "Nested": {
+      const inner = restxFieldSchema(positional[0] ?? null, index, file);
+      const many = keywordArgument(node, "many")?.type === "true";
+      if (!inner) return many ? { type: "array", items: {} } : {};
+      return many ? { type: "array", items: inner } : inner;
+    }
+    case "List": {
+      const inner = restxFieldSchema(positional[0] ?? null, index, file);
+      return { type: "array", items: inner ?? {} };
+    }
+    default:
+      return null;
+  }
+}
+
+// Register flask-restx `var = api.model("Name", {field: fields.X(...)})`
+// declarations as components and remember the variable binding so decorators
+// such as `@ns.marshal_with(var)` can reference the schema.
+function buildRestxModels(analysis: PythonAnalysis, index: MarshmallowIndex): void {
+  for (const file of analysis.files.values()) {
+    for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+      const target = assignment.namedChildren[0];
+      const value = assignment.namedChildren[assignment.namedChildren.length - 1];
+      if (!target || target.type !== "identifier" || !value || value.type !== "call") continue;
+      const mc = methodCall(value);
+      if (!mc || mc.method !== "model") continue;
+      const args = positionalArguments(value);
+      const nameNode = args.find((a) => a.type === "string");
+      const dict = args.find((a) => a.type === "dictionary");
+      const modelName = nameNode ? literalString(nameNode) : target.text;
+      if (!dict || !modelName) continue;
+      const properties: Record<string, JsonSchemaLocal> = {};
+      const required: string[] = [];
+      for (const pair of childrenOfType(dict, "pair")) {
+        const [key, val] = pair.namedChildren;
+        const fieldName = key ? literalString(key) : null;
+        if (!fieldName || !val) continue;
+        const schema = restxFieldSchema(val, index, file.path) ?? {};
+        properties[fieldName] = schema;
+        const isRequired = val.type === "call" && keywordArgument(val, "required")?.type === "true";
+        if (isRequired) required.push(fieldName);
+      }
+      const schema: JsonSchemaLocal = { type: "object", properties };
+      if (required.length) schema.required = required;
+      index.componentsByName.set(modelName, schema);
+      index.restxVars.set(`${file.path}:${target.text}`, modelName);
+    }
+  }
 }
 
 // Resolve a decorator argument (`post_schema`, `PostSchema()`, `ma.Schema()`)
@@ -1001,6 +1094,66 @@ function buildFlaskRoute(
         confidence: "high",
         content: [],
       });
+    }
+  }
+
+  // flask-restx decorators: @ns.marshal_with(model), @ns.marshal_list_with,
+  // @ns.expect(model), @ns.response(code, "message").
+  const restxRef = (node: TsNode | undefined): string | null => {
+    if (node?.type === "identifier") return marsh.restxVars.get(`${file}:${node.text}`) ?? null;
+    return null;
+  };
+  for (const decorator of fn.decorators ?? []) {
+    const callNode = decorator.namedChildren?.[0];
+    if (!callNode || callNode.type !== "call") continue;
+    const mc = methodCall(callNode);
+    if (!mc) continue;
+    const args = positionalArguments(callNode);
+    if (mc.method === "marshal_with" || mc.method === "marshal_list_with") {
+      const ref = restxRef(args[0]);
+      const codeNode = keywordArgument(callNode, "code");
+      const statusCode = codeNode ? String(literalInteger(codeNode) ?? 200) : "200";
+      const schema = ref
+        ? mc.method === "marshal_list_with"
+          ? { type: "array", items: { $ref: `#/components/schemas/${ref}` } }
+          : { $ref: `#/components/schemas/${ref}` }
+        : mc.method === "marshal_list_with"
+          ? { type: "array", items: {} }
+          : {};
+      const upsert = {
+        statusCode,
+        description: "",
+        confidence: "high" as Confidence,
+        content: ref ? [{ mediaType: "application/json", schema }] : [{ mediaType: "application/json", schema }],
+      };
+      const idx = responses.findIndex((r) => r.statusCode === statusCode);
+      if (idx >= 0) responses[idx] = upsert;
+      else responses.push(upsert);
+      gaps.delete("response-unknown");
+      if (ref) gaps.delete("response-schema-unknown");
+    } else if (mc.method === "expect") {
+      const ref = restxRef(args[0]);
+      if (ref) {
+        requestBody = {
+          required: true,
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: { $ref: `#/components/schemas/${ref}` } }],
+        };
+        gaps.delete("body-schema-unknown");
+        gaps.delete("body-unknown");
+      }
+    } else if (mc.method === "response") {
+      const codeNode = args[0];
+      const descNode = args[1];
+      const code = codeNode ? literalInteger(codeNode) : null;
+      if (code && !responses.some((r) => r.statusCode === String(code))) {
+        responses.push({
+          statusCode: String(code),
+          description: descNode ? literalString(descNode) ?? "" : "",
+          confidence: "high",
+          content: [],
+        });
+      }
     }
   }
 
