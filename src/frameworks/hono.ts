@@ -884,6 +884,7 @@ function analyzeHonoHandler(
   let sse = false;
   let bodyReferenced = false;
   let bodySchema: { schema: any; confidence: "high" | "medium" | "low" } | undefined;
+  let jsonVarName: string | undefined;
   let hasResponseSite = false;
 
   if (!resolved) {
@@ -932,6 +933,13 @@ function analyzeHonoHandler(
               } catch {
                 // untyped body
               }
+            }
+            if (!bodySchema) {
+              // `const param = await c.req.json()` — remember the variable so a
+              // later `param as T` assertion can supply the body contract.
+              let ancestor: any = node.parent;
+              while (ancestor && !ts.isVariableDeclaration(ancestor)) ancestor = ancestor.parent;
+              if (ancestor && ts.isIdentifier(ancestor.name)) jsonVarName = ancestor.name.text;
             }
           }
         } else if (names.length === 1) {
@@ -992,6 +1000,32 @@ function analyzeHonoHandler(
     if (!parameters.some((p) => p.in === "path" && p.name === name)) {
       addParam(parameters, seen, "path", name, { type: "string" }, "low");
     }
+  }
+
+  // Resolve a body type supplied by a later assertion, e.g.
+  // `const param = await c.req.json(); ... param as model.Param`.
+  if (!bodySchema && jsonVarName && handler.body) {
+    const visitAssertion = (n: any) => {
+      if (
+        bodySchema === undefined &&
+        (ts.isAsExpression(n) || ts.isTypeAssertionExpression(n)) &&
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === jsonVarName &&
+        n.type
+      ) {
+        try {
+          const type = analysis.checker.getTypeFromTypeNode(n.type);
+          const fromType = typeToSchema(type, analysis.schemaContext);
+          if (fromType && Object.keys(fromType).length) {
+            bodySchema = { schema: fromType, confidence: "high" };
+          }
+        } catch {
+          // unresolvable assertion type
+        }
+      }
+      if (!bodySchema) ts.forEachChild(n, visitAssertion);
+    };
+    visitAssertion(handler.body);
   }
 
   let requestBody: HandlerResult["requestBody"];
