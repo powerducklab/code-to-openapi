@@ -60,7 +60,7 @@ describe("asp.net core golden project", () => {
     });
     const dto = doc.components.schemas.CreateUserRequest;
     expect(dto.properties.name).toEqual({ type: "string" });
-    expect(dto.properties.age).toEqual({ type: ["integer", "null"] });
+    expect(dto.properties.age).toEqual({ type: ["integer", "null"], format: "int32" });
     expect(dto.properties.tags).toEqual({
       type: "array",
       items: { type: "string" },
@@ -74,7 +74,7 @@ describe("asp.net core golden project", () => {
     expect(q.required).toBe(true);
     const page = search.parameters.find((p: any) => p.name === "page");
     expect(page.required).toBeFalsy();
-    expect(page.schema).toEqual({ type: ["integer", "null"] });
+    expect(page.schema).toEqual({ type: ["integer", "null"], format: "int32" });
     const trace = search.parameters.find((p: any) => p.name === "X-Trace");
     expect(trace.in).toBe("header");
     expect(trace.required).toBeFalsy();

@@ -28,7 +28,7 @@ describe("asp.net generic response wrappers", () => {
 
     const wrapper = doc.components.schemas.serialized_Result_ProductDto;
     expect(wrapper.type).toBe("object");
-    expect(wrapper.properties.code).toEqual({ type: "integer" });
+    expect(wrapper.properties.code).toEqual({ type: "integer", format: "int32" });
     expect(wrapper.properties.message).toEqual({ type: "string" });
     expect(wrapper.properties.data).toEqual({ anyOf: [{ $ref: "#/components/schemas/serialized_ProductDto" }, { type: "null" }] });
 
@@ -51,14 +51,14 @@ describe("asp.net generic response wrappers", () => {
 
     const paged = doc.components.schemas.serialized_PagedResult_ProductDto;
     // Inherited Result<List<T>> fields bind T to ProductDto.
-    expect(paged.properties.code).toEqual({ type: "integer" });
+    expect(paged.properties.code).toEqual({ type: "integer", format: "int32" });
     expect(paged.properties.message).toEqual({ type: "string" });
     expect(paged.properties.data).toEqual({
       type: ["array", "null"],
       items: { $ref: "#/components/schemas/serialized_ProductDto" },
     });
-    expect(paged.properties.page).toEqual({ type: "integer" });
-    expect(paged.properties.perPage).toEqual({ type: "integer" });
+    expect(paged.properties.page).toEqual({ type: "integer", format: "int32" });
+    expect(paged.properties.perPage).toEqual({ type: "integer", format: "int32" });
     expect(paged.properties.total).toEqual({ type: "integer", format: "int64" });
   });
 });

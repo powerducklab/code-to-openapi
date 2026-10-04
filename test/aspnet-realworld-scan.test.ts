@@ -43,7 +43,7 @@ describe("asp.net real-world controllers", () => {
     const byName = Object.fromEntries(params.map((p: any) => [p.name, p]));
 
     expect(Object.keys(byName).sort()).toEqual(["page", "pageSize", "search", "status"]);
-    expect(byName.page.schema).toEqual({ type: "integer" });
+    expect(byName.page.schema).toEqual({ type: "integer", format: "int32" });
     expect(byName.page.required).toBeUndefined();
     expect(byName.status.schema).toEqual({ anyOf: [{ $ref: "#/components/schemas/ProductStatus" }, { type: "null" }] });
     expect(byName.search.schema).toEqual({ type: ["string", "null"] });

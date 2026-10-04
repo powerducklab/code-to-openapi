@@ -475,7 +475,7 @@ export function csTypeToSchema(
     if (t === "string" || t === "char") return { type: "string" };
     if (t === "bool") return { type: "boolean" };
     if (INTEGER_TYPES.has(t)) {
-      return { type: "integer", ...(t === "long" || t === "ulong" ? { format: "int64" } : {}) };
+      return { type: "integer", format: t === "long" || t === "ulong" ? "int64" : "int32" };
     }
     if (NUMBER_TYPES.has(t)) return { type: "number" };
     if (t === "object") return { type: "object" };
@@ -519,7 +519,9 @@ export function csTypeToSchema(
     const name = scopedName(resolved,index)??resolved.text;
     if (name === "Guid") return { type: "string", format: "uuid" };
     if (STRING_TYPES.has(name)) return { type: "string" };
-    if (INTEGER_TYPES.has(name)) return { type: "integer" };
+    if (INTEGER_TYPES.has(name)) {
+      return { type: "integer", format: name === "long" || name === "ulong" ? "int64" : "int32" };
+    }
     if (NUMBER_TYPES.has(name)) return { type: "number" };
     if (name === "bool" || name === "Boolean") return { type: "boolean" };
     if (DATE_TIME_TYPES.has(name)) return { type: "string", format: "date-time" };

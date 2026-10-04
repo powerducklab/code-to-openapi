@@ -165,7 +165,11 @@ for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const metho
   compare(p.schema,ap.schema,where+' '+p.in+':'+p.name);
  }
  const expectedBody=resolve(op.requestBody,baseline);const actualBody=resolve(got.requestBody,actual);
- if(expectedBody){assertions++;if(!!expectedBody.required!==!!actualBody?.required)errors.push({where,error:'request body required mismatch',expected:!!expectedBody.required,actual:!!actualBody?.required});}
+ if(expectedBody){assertions++;if(!!expectedBody.required!==!!actualBody?.required){
+  const knownBody=knownFalseMismatch(where,'/requestBodyRequired',!!expectedBody.required,!!actualBody?.required);
+  if(knownBody)baselineIssues.push({where,error:'request body required mismatch',expected:!!expectedBody.required,actual:!!actualBody?.required,baselineError:knownBody});
+  else errors.push({where,error:'request body required mismatch',expected:!!expectedBody.required,actual:!!actualBody?.required});
+ }}
  for(const [media,entry] of Object.entries<any>(expectedBody?.content??{})){
   assertions++;if(!actualBody?.content?.[media])errors.push({where,error:'missing request media',media});
   compare(entry.schema,resolve(got.requestBody,actual)?.content?.[media]?.schema,where+' request '+media);

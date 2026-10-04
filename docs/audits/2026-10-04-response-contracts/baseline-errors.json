@@ -181,5 +181,48 @@
         "resolution": "With no numeric conversion or use, the accepted path value is a string. The baseline assumes integer; the scanner's string matches the actual contract."
       }
     ]
+  },
+  "aspnet": {
+    "missingRoutes": [],
+    "falseMismatches": [
+      {
+        "whereContains": "query:",
+        "fieldContains": "/type",
+        "baseline": "string",
+        "scanner": [
+          "string",
+          "null"
+        ],
+        "evidence": "ArticlesController.cs declares [FromQuery] string? tag, string? author, string? favorited (explicit nullable reference types). An omitted query value binds to null.",
+        "resolution": "The baseline types these query parameters as non-null string; the C# source explicitly declares them string?, so the accepted value set includes null. The scanner's [string,null] is correct."
+      },
+      {
+        "whereContains": "query:",
+        "fieldContains": "/type",
+        "baseline": "integer",
+        "scanner": [
+          "integer",
+          "null"
+        ],
+        "evidence": "ArticlesController.cs declares [FromQuery] int? limit and int? offset (Nullable<int>) for both GET /api/articles and GET /api/articles/feed. An omitted value binds to null; the scanner also emits format int32 on the integer branch.",
+        "resolution": "The baseline types these nullable value-type query parameters as non-null integer; the C# source explicitly declares them int?, so null is accepted. The scanner's [integer,null] with int32 format is correct."
+      },
+      {
+        "whereContains": " request ",
+        "fieldContains": "/required",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "Request envelopes are positional records with non-nullable wrapper properties, e.g. 'public record UserEnvelope(User User)', 'record Command(UserData User)', and equivalent Article/Comment commands. Program.cs calls SupportNonNullableReferenceTypes() and does not set SuppressImplicitRequiredAttributeForNonNullableReferenceTypes, so non-nullable reference-type members are implicitly required on input.",
+        "resolution": "The baseline marks the non-nullable envelope wrapper property optional; ASP.NET Core model binding treats it as required. The scanner's required=true is correct."
+      },
+      {
+        "whereContains": "",
+        "fieldContains": "/requestBodyRequired",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "Mutating actions bind the body via [FromBody] (e.g. UpdateUser([FromBody] Edit.Command command), Create/Login/Article/Comment endpoints). [FromBody] is required by default (EmptyBodyBehavior is not set to AllowEmpty), so an absent body yields 415/400.",
+        "resolution": "The baseline marks these request bodies optional; [FromBody] defaults to required in ASP.NET Core. The scanner's requestBody.required=true is correct."
+      }
+    ]
   }
 }

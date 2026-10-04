@@ -62,7 +62,7 @@ it('recognizes awaited MVC no-content actions without reading nested local retur
    }`);
   const result=await scanProject({root});const doc=(await result.convert()).document as any;
   expect(doc.paths['/items/{id}'].delete.responses['204']).toBeDefined();
-  expect(doc.paths['/items/{id}'].delete.parameters).toContainEqual(expect.objectContaining({in:'path',name:'id',schema:{type:'integer'}}));
+  expect(doc.paths['/items/{id}'].delete.parameters).toContainEqual(expect.objectContaining({in:'path',name:'id',schema:{type:'integer',format:'int32'}}));
   expect(doc.paths['/items/{id}'].delete.parameters.some((p:any)=>p.name==='injected')).toBe(false);
   expect(doc.paths['/items/reset'].post.responses['204']).toBeDefined();
   expect(doc.paths['/items'].get.responses['204']).toBeUndefined();
