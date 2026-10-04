@@ -28,10 +28,113 @@
         "whereContains": "/example_model request",
         "fieldContains": "/type",
         "baseline": "object",
-        "scanner": ["object", "null"],
+        "scanner": [
+          "object",
+          "null"
+        ],
         "evidence": "docs/audits/2026-10-04-java-native/jaxrs-empty-body.json: native POST and DELETE probes with an empty body (\"\") and literal `null` both return HTTP 200, proving the request body is nullable/optional.",
         "resolution": "The baseline narrows the request body to a non-null object; runtime evidence proves null and an empty body are accepted. The scanner's [object, null] is correct and must not be narrowed."
       }
     ]
+  },
+  "laravel": {
+    "missingRoutes": [
+      {
+        "method": "get",
+        "path": "/",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/auth/google/callback",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/auth/google/redirect",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/auth/oidc/callback",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/auth/oidc/redirect",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/demo/new-session",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/download/songs",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/dropbox/authorize/{key}",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/embeds/{embed}/stream/{song}/{options}",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/itunes/song/{album}",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/lastfm/callback",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/manifest-remote.json",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/manifest.json",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/play/{song}/{transcode}",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/radio/stream/{radioStation}",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      },
+      {
+        "method": "get",
+        "path": "/remote",
+        "evidence": "Registered in routes/web.base.php or routes/api.base.php (koel): manifest/itunes/play/demo/remote/download groups in web.base.php; auth OAuth callbacks, dropbox, lastfm, embeds and radio stream in api.base.php. The download group is behind a config feature flag but is statically registered. Baseline covers only the core JSON API and omits these real routes."
+      }
+    ],
+    "falseMismatches": []
+  },
+  "fastify": {
+    "missingRoutes": [
+      {
+        "method": "get",
+        "path": "/tags",
+        "evidence": "Registered via fastify route plugins: lib/routes/tags/index.js (GET tags) and lib/routes/comments/index.js (GET/POST/DELETE articles/:slug/comments). The RealWorld baseline omits the tags list and comment-create routes that the application actually mounts."
+      },
+      {
+        "method": "post",
+        "path": "/articles/{slug}/comments",
+        "evidence": "Registered via fastify route plugins: lib/routes/tags/index.js (GET tags) and lib/routes/comments/index.js (GET/POST/DELETE articles/:slug/comments). The RealWorld baseline omits the tags list and comment-create routes that the application actually mounts."
+      }
+    ],
+    "falseMismatches": []
   }
 }
