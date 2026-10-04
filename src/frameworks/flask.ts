@@ -506,9 +506,33 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
       const pyFile = analysis.files.get(file);
       if (!receiver || !attr || !pyFile) return null;
       const imported = pyFile.imports.get(receiver.text);
-      if (!imported) return null;
-      const targetFile = moduleToFile.get(imported.module);
-      return targetFile ? byVar(targetFile, attr.text) ?? null : null;
+      if (imported) {
+        const targetFile = moduleToFile.get(imported.module);
+        const resolved = targetFile ? byVar(targetFile, attr.text) : null;
+        if (resolved) return resolved;
+      }
+      // Fallback for imports local to a factory function (which the import
+      // index does not record), e.g. `from . import auth` inside create_app()
+      // followed by `app.register_blueprint(auth.bp)`.
+      const moduleFile = resolveSiblingModule(file, receiver.text);
+      return moduleFile ? byVar(moduleFile, attr.text) ?? null : null;
+    };
+
+    // Resolve a bare module name referenced from `file` to an indexed source
+    // file, checking explicit imports first and then same-package siblings
+    // (both `mod.py` and the `mod/__init__.py` package form).
+    const resolveSiblingModule = (fromFile: string, mod: string): string | undefined => {
+      const norm = fromFile.replace(/\\/g, "/");
+      const dir = norm.includes("/") ? norm.slice(0, norm.lastIndexOf("/")) : "";
+      const direct = [`${dir}/${mod}.py`, `${dir}/${mod}/__init__.py`];
+      for (const candidate of direct) {
+        if (analysis.files.has(candidate)) return candidate;
+      }
+      const suffix = `.${mod}`;
+      const hits = [...moduleToFile.entries()]
+        .filter(([key]) => key === mod || key.endsWith(suffix))
+        .map(([, path]) => path);
+      return hits.find((path) => path.replace(/\\/g, "/").startsWith(dir)) ?? hits[0];
     };
 
     // Pass 1: register every Flask app and Blueprint across all files first.

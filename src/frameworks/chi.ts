@@ -1,6 +1,6 @@
 import {mergeResponseVariants} from "../core/response-variants.js";
 import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
-import { goExpressionType, goSourceFile, resolveGoCall } from "../lang/go/symbols.js";
+import { goExpressionType, goSourceFile, resolveGoCall, goTypeDeclaration, resolveGoPackageFunction } from "../lang/go/symbols.js";
 import { convertedParameterSchema } from "../lang/go/httphandler.js";
 /**
  * Chi router framework pack (Go).
@@ -94,6 +94,59 @@ function compositeReceiverTypeName(node: TsNode): string | null {
   if (!typeNode) return null;
   if (typeNode.type === "type_identifier") return typeNode.text;
   if (typeNode.type === "selector_expression") return typeNode.namedChildren[1]?.text ?? null;
+  return null;
+}
+
+// Resolve a route-group callback passed as a function or method value:
+// `pkg.Setup`, `h.Register`, `book.New(db, v).Register`, or `res{}.Routes()`.
+function resolveChiCallbackFn(
+  callback: TsNode,
+  analysis: GoAnalysis,
+  file: { path: string },
+): GoFunction | undefined {
+  if (callback.type === "identifier") {
+    return resolveGoPackageFunction(analysis, analysis.files.get(file.path), undefined, callback.text);
+  }
+  if (callback.type !== "selector_expression") return undefined;
+  const receiver = callback.namedChildren[0];
+  const field = callback.namedChildren[1];
+  const method = field?.type === "field_identifier" ? field.text : null;
+  if (!method || !receiver) return undefined;
+
+  // Typed value receiver (local var, constructor call, or composite literal):
+  // infer its type, then match the method by receiver type name.
+  const typeNode = goExpressionType(receiver, analysis);
+  if (typeNode) {
+    const def = goTypeDeclaration(typeNode, analysis);
+    const base = def?.name ?? compositeReceiverTypeName(receiver);
+    if (base) {
+      const matches = analysis.methods.filter((m) => m.name === method && receiverTypeName(m) === base);
+      return matches.find((m) => m.file === file.path) ?? matches[0];
+    }
+  }
+  // Imported package function value, e.g. `routes.Books`.
+  if (receiver.type === "identifier") {
+    return resolveGoPackageFunction(analysis, analysis.files.get(file.path), receiver.text, method);
+  }
+  return undefined;
+}
+
+// Name of a setup function's chi.Router parameter (the receiver it registers
+// routes on), or null when no such parameter exists.
+function chiRouterParamName(fn: GoFunction): string | null {
+  // For methods the first parameter_list is the receiver; use the actual
+  // parameter list (`parameters` field) instead.
+  const params =
+    fn.node.childForFieldName?.("parameters") ??
+    fn.node.namedChildren.filter((c) => c.type === "parameter_list").at(-1);
+  for (const decl of params?.namedChildren ?? []) {
+    if (decl.type !== "parameter_declaration") continue;
+    const typeNode = decl.childForFieldName?.("type") ?? decl.namedChildren.at(-1);
+    if (typeNode && /chi\.Router|(^|\.)Router\b/.test(typeNode.text)) {
+      const id = decl.namedChildren.find((c) => c.type === "identifier");
+      if (id) return id.text;
+    }
+  }
   return null;
 }
 
@@ -337,24 +390,39 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
 
           if (sel.method === "Route" || sel.method === "Group") {
             const funcLiteral = args.find((a) => a.type === "func_literal");
+            // A function/method value callback (e.g. `book.New(db,v).Register`)
+            // is used instead of an inline closure.
+            const callback = args.find(
+              (a) => a.type === "selector_expression" || a.type === "identifier",
+            );
             // Group blocks may be prefix-less: the first argument is then the
             // function literal itself.
-            const prefixArg = args[0] && args[0].type !== "func_literal" ? args[0] : null;
+            const prefixArg =
+              args[0] && args[0].type !== "func_literal" && args[0] !== callback ? args[0] : null;
             const nestedPrefix = prefixArg ? literalString(prefixArg) : "";
-            if (nestedPrefix === null || !funcLiteral) return;
-            const innerParam = funcLiteral.namedChildren
-              .find((c) => c.type === "parameter_list")
-              ?.namedChildren.find((c) => c.type === "parameter_declaration")
-              ?.namedChildren[0];
-            const innerBlock = findFirst(funcLiteral, (c) => c.type === "block");
-            if (innerParam?.type === "identifier" && innerBlock) {
-              collectCalls(
-                innerBlock,
-                innerParam.text,
-                joinPath(prefix, nestedPrefix),
-                visited,
-                middleware,
-              );
+            if (nestedPrefix === null) return;
+            const nextPrefix = joinPath(prefix, nestedPrefix);
+            if (funcLiteral) {
+              const innerParam = funcLiteral.namedChildren
+                .find((c) => c.type === "parameter_list")
+                ?.namedChildren.find((c) => c.type === "parameter_declaration")
+                ?.namedChildren[0];
+              const innerBlock = findFirst(funcLiteral, (c) => c.type === "block");
+              if (innerParam?.type === "identifier" && innerBlock) {
+                collectCalls(innerBlock, innerParam.text, nextPrefix, visited, middleware);
+              }
+              return;
+            }
+            if (callback) {
+              const setupFn = resolveChiCallbackFn(callback, analysis, file);
+              if (setupFn?.body) {
+                const routerParam = chiRouterParamName(setupFn);
+                if (routerParam) {
+                  collectCalls(setupFn.body, routerParam, nextPrefix, visited, middleware);
+                } else {
+                  collectFactory(setupFn, nextPrefix, visited);
+                }
+              }
             }
             return;
           }
@@ -460,6 +528,29 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         }
       }
 
+      // Entry-point factories: package functions that create a chi router and
+      // return it (e.g. `router.New(...) *chi.Mux`), even when `main` lives in
+      // another package and only calls the factory.
+      for (const fn of file.root.namedChildren.filter((c) => c.type === "function_declaration")) {
+        const nameNode = fn.namedChildren[0];
+        const body = fn.namedChildren.find((c) => c.type === "block");
+        if (!body || (nameNode?.type === "identifier" && nameNode.text === "main")) continue;
+        const created = routersInBody(body);
+        if (created.size === 0) continue;
+        const returnsRouter = findAll(body, (n) => n.type === "return_statement").some((rs) => {
+          const ids = rs.namedChildren.flatMap((c) =>
+            c.type === "expression_list"
+              ? c.namedChildren.filter((x) => x.type === "identifier").map((x) => x.text)
+              : c.type === "identifier"
+                ? [c.text]
+                : [],
+          );
+          return ids.some((id) => created.has(id));
+        });
+        if (!returnsRouter) continue;
+        for (const routerName of created) collectCalls(body, routerName, "", new Set());
+      }
+
       // Breadth-first expansion of setup helpers.
       const visitedSetups = new Set<string>();
       while (followQueue.length) {
@@ -473,7 +564,17 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
       }
     }
 
-    const routes = sites.map((site) => buildRoute(site, analysis, modelIndex, inputModel, validatedModel));
+    // A factory reached both as an entry point and via Mount/Route must only
+    // emit each operation once.
+    const dedupedSites: typeof sites = [];
+    const seenSiteKeys = new Set<string>();
+    for (const site of sites) {
+      const key = `${site.method} ${site.path}`;
+      if (seenSiteKeys.has(key)) continue;
+      seenSiteKeys.add(key);
+      dedupedSites.push(site);
+    }
+    const routes = dedupedSites.map((site) => buildRoute(site, analysis, modelIndex, inputModel, validatedModel));
     const reserved = new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]);
     const raw = namespaceComponents(inputModel.components, reserved, "input");
     const validated = namespaceComponents(validatedModel.components, reserved, "validated_input");
