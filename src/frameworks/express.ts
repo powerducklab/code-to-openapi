@@ -6,6 +6,7 @@ import type {
   ExtractionResult,
   FileIndex,
   FrameworkPack,
+  JsonSchema,
   RouteCandidate,
   RouteParameter,
   ScanContext,
@@ -14,6 +15,8 @@ import type {
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { analyzeHandler, resolveHandler, resolveImportedFile, extractCustomResponseMethods } from "./express-handler.js";
 import { convertValidatorChain, type ValidatedField } from "../lang/typescript/validate.js";
+import { resolveStaticValue } from "../lang/typescript/staticValue.js";
+import { convertJoiNode, isJoiSchema } from "../lang/typescript/joi.js";
 
 const HTTP_METHODS = new Set([
   "get",
@@ -216,6 +219,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
 
         // Validator chains and auth middleware from the route call and mounts.
         const validators: ValidatedField[] = [];
+        const schemaOverrides: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema } = {};
         let authed = false;
         const scoped = model.scopedMiddleware.filter(
           (mw) =>
@@ -234,6 +238,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
           if (isAuthMiddleware(ts, mw.node, mw.file)) authed = true;
           const chains = collectValidatorChains(ts, mw.node, mw.file);
           validators.push(...chains);
+          mergeSchemaOverrides(schemaOverrides, collectSchemaOverrides(analysis, mw.node));
         }
         if (authed) bearerAuth = true;
 
@@ -246,6 +251,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
           validators,
           unresolved,
           customResponseMethods,
+          schemaOverrides,
         );
         const facts = analysisResult.facts;
         // Inspect proven ordinary middleware bodies for explicit responses. Do not
@@ -500,8 +506,150 @@ function modelFile(
     ts.forEachChild(node, visit);
   };
   source.forEachChild((child: any) => visit(child));
+  expandDataDrivenMounts(ts, model);
 
   return model;
+}
+
+/** Collect every call expression `<receiver>.<method>(...)` under a root. */
+function collectMethodCalls(ts: any, root: any, method: string): any[] {
+  const out: any[] = [];
+  const walk = (node: any) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === method
+    ) {
+      out.push(node);
+    }
+    ts.forEachChild(node, walk);
+  };
+  if (root) walk(root);
+  return out;
+}
+
+/**
+ * Expand data-driven router tables, a common Express/Koa layout:
+ *
+ *   const routes = [{ path: '/auth', route: authRoute }, ...];
+ *   routes.forEach((item) => router.use(item.path, item.route));
+ *   // or: for (const item of routes) router.use(item.path, item.route);
+ *
+ * The prefix and child router come from per-element properties. Resolve the
+ * iterable to an array literal and emit one concrete mount edge per element.
+ * This stays purely static: a non-literal iterable or a dynamic element is
+ * ignored (and surfaces through the normal unresolved-router path).
+ */
+function expandDataDrivenMounts(ts: any, model: FileModel): void {
+  const { source } = model;
+
+  const resolveArray = (expr: any): any[] | null => {
+    if (!expr) return null;
+    if (ts.isArrayLiteralExpression(expr)) return [...expr.elements];
+    if (ts.isIdentifier(expr)) {
+      let found: any[] | null = null;
+      const findVar = (node: any) => {
+        if (found) return;
+        if (
+          ts.isVariableDeclaration(node) &&
+          node.name &&
+          ts.isIdentifier(node.name) &&
+          node.name.text === expr.text &&
+          node.initializer &&
+          ts.isArrayLiteralExpression(node.initializer)
+        ) {
+          found = [...node.initializer.elements];
+        }
+        ts.forEachChild(node, findVar);
+      };
+      findVar(source);
+      return found;
+    }
+    return null;
+  };
+
+  const elementProperty = (element: any, key: string): any => {
+    if (!element || !ts.isObjectLiteralExpression(element)) return undefined;
+    for (const prop of element.properties) {
+      const propName = prop.name?.getText?.(source)?.replace(/^['"]|['"]$/g, "");
+      if (ts.isPropertyAssignment(prop) && propName === key) return prop.initializer;
+    }
+    return undefined;
+  };
+
+  const emitForUse = (useCall: any, paramName: string, elements: any[]): void => {
+    if (!ts.isPropertyAccessExpression(useCall.expression)) return;
+    const parentName = useCall.expression.expression.getText(source);
+    const parentRouter = model.routers.get(parentName);
+    if (!parentRouter) return;
+    const pathArg = useCall.arguments[0];
+    const routerArg = useCall.arguments[1];
+    if (
+      !pathArg ||
+      !routerArg ||
+      !ts.isPropertyAccessExpression(pathArg) ||
+      !ts.isPropertyAccessExpression(routerArg)
+    ) {
+      return;
+    }
+    const paramProp = (node: any): string | null =>
+      ts.isIdentifier(node.expression) && node.expression.text === paramName
+        ? node.name.text
+        : null;
+    const pathKey = paramProp(pathArg);
+    const routerKey = paramProp(routerArg);
+    if (!pathKey || !routerKey) return;
+
+    for (const element of elements) {
+      const pathNode = elementProperty(element, pathKey);
+      const routerNode = elementProperty(element, routerKey);
+      if (!pathNode || !ts.isStringLiteralLike(pathNode)) continue;
+      if (!routerNode || !ts.isIdentifier(routerNode)) continue;
+      const childName = routerNode.text;
+      if (!model.routers.has(childName) && !model.moduleBindings.has(childName)) continue;
+      const prefix = pathNode.text;
+      const duplicate = model.mounts.some(
+        (edge) =>
+          edge.parent === parentRouter.id && edge.prefix === prefix && edge.child === childName,
+      );
+      if (duplicate) continue;
+      model.mounts.push({ parent: parentRouter.id, child: childName, prefix, middleware: [] });
+    }
+  };
+
+  const visit = (node: any) => {
+    // ARR.forEach((item) => { ... router.use(item.path, item.route) ... })
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "forEach" &&
+      node.arguments[0] &&
+      (ts.isArrowFunction(node.arguments[0]) || ts.isFunctionExpression(node.arguments[0]))
+    ) {
+      const callback = node.arguments[0];
+      const param = callback.parameters?.[0]?.name;
+      const elements = resolveArray(node.expression.expression);
+      if (param && ts.isIdentifier(param) && elements) {
+        for (const useCall of collectMethodCalls(ts, callback.body, "use")) {
+          emitForUse(useCall, param.text, elements);
+        }
+      }
+    }
+
+    // for (const item of ARR) { ... router.use(item.path, item.route) ... }
+    if (ts.isForOfStatement(node)) {
+      const binding = node.initializer?.declarationList?.declarations?.[0]?.name;
+      const elements = resolveArray(node.expression);
+      if (binding && ts.isIdentifier(binding) && elements) {
+        for (const useCall of collectMethodCalls(ts, node.statement, "use")) {
+          emitForUse(useCall, binding.text, elements);
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
 }
 
 function isRouterFactory(ts: any, callee: any, model: FileModel): boolean {
@@ -683,6 +831,9 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
 
   if (HTTP_METHODS.has(method)) {
     const pathEntries = pathArguments(ts, node.arguments[0]);
+    // `app.options('*', cors())` is a CORS preflight catch-all, not a business
+    // operation; do not emit it as an API route.
+    if (method === "options" && node.arguments[0]?.text === "*") return;
     for (const entry of pathEntries) {
       if (!entry) {
         model.unresolved.push({
@@ -910,6 +1061,52 @@ function isAuthMiddleware(ts: any, node: any, file: any): boolean {
   return Boolean(name && AUTH_PATTERN.test(name.replace(/[^A-Za-z]/g, "").toLowerCase()));
 }
 
+/**
+ * Extracts Joi/celebrate schema middleware of the shape
+ * `validate({ body: Joi.object()..., query: Joi.object()..., params: ... })`.
+ * The schema object frequently lives in another CommonJS module
+ * (`validate(authValidation.register)`), so each middleware argument is
+ * resolved statically across requires. Returns the converted JSON Schemas.
+ */
+function collectSchemaOverrides(
+  analysis: TsAnalysis,
+  node: any,
+): { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema } {
+  const { ts } = analysis;
+  const overrides: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema } = {};
+  if (!ts.isCallExpression(node)) return overrides;
+
+  const readContainer = (container: any) => {
+    if (!container || !ts.isObjectLiteralExpression(container)) return;
+    for (const prop of container.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const key = prop.name?.getText?.()?.replace(/['"]/g, "");
+      if (key !== "body" && key !== "query" && key !== "params") continue;
+      const schemaNode = prop.initializer;
+      if (isJoiSchema(ts, schemaNode)) {
+        const schema = convertJoiNode(ts, schemaNode);
+        if (schema && Object.keys(schema).length) overrides[key as "body" | "query" | "params"] = schema;
+      }
+    }
+  };
+
+  for (const arg of node.arguments) {
+    const resolved = resolveStaticValue(analysis, arg);
+    if (resolved && resolved !== arg) readContainer(resolved);
+    readContainer(arg);
+  }
+  return overrides;
+}
+
+function mergeSchemaOverrides(
+  base: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema },
+  extra: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema },
+): void {
+  for (const key of ["body", "query", "params"] as const) {
+    if (extra[key] && !base[key]) base[key] = extra[key];
+  }
+}
+
 function collectValidatorChains(ts: any, node: any, file: any): ValidatedField[] {
   const fields: ValidatedField[] = [];
   const visit = (n: any) => {
@@ -932,6 +1129,7 @@ function resolveAndAnalyze(
   validators: ValidatedField[],
   unresolved: DiscoveredUnresolved[],
   customResponseMethods: Map<string, import("./express-handler.js").CustomResponseMethod>,
+  schemaOverrides: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema } = {},
 ): { facts: import("./express-handler.js").HandlerFacts; handlerSource?: string } {
   const noFacts: import("./express-handler.js").HandlerFacts = {
     parameters: [],
@@ -958,6 +1156,7 @@ function resolveAndAnalyze(
     pathParams,
     validators,
     customResponseMethods,
+    validatedRequest: schemaOverrides,
   });
   return {
     facts,

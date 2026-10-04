@@ -667,6 +667,95 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
       });
     }
 
+    // Flask-RESTX: `ns = api.namespace("todos")` (or `Namespace("todos")`)
+    // followed by class-based resources decorated with `@ns.route("/<id>")`.
+    // The namespace name is the path prefix; `api.add_namespace(ns, path=...)`
+    // may override it. Each HTTP verb method on the Resource subclass becomes
+    // an operation, mirroring add_resource handling above.
+    const namespacePrefix = new Map<string, string>();
+    const namespaceOverride = new Map<string, string>();
+    for (const file of analysis.files.values()) {
+      for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+        const target = assignment.namedChildren[0];
+        const value = assignment.namedChildren.at(-1);
+        if (!target || target.type !== "identifier" || !value || value.type !== "call") continue;
+        const mc = methodCall(value);
+        const positional = positionalArguments(value);
+        let namePath: string | null = null;
+        if (mc?.method === "namespace") {
+          namePath = literalString(keywordArgument(value, "path") ?? positional[0]);
+        } else if (value.namedChildren[0]?.type === "identifier" && value.namedChildren[0].text === "Namespace") {
+          namePath = literalString(keywordArgument(value, "path") ?? positional[0]);
+        }
+        if (namePath !== null) namespacePrefix.set(`${file.path}:${target.text}`, namePath);
+      }
+      for (const call of findAll(file.root, (n) => n.type === "call")) {
+        const mc = methodCall(call);
+        if (!mc || mc.method !== "add_namespace") continue;
+        const nsRef = positionalArguments(call)[0];
+        const override = literalString(positionalArguments(call)[1] ?? keywordArgument(call, "path"));
+        if (nsRef?.type === "identifier" && override !== null) {
+          namespaceOverride.set(`${file.path}:${nsRef.text}`, override);
+        }
+      }
+    }
+
+    for (const file of analysis.files.values()) {
+      for (const decorated of findAll(file.root, (n) => n.type === "decorated_definition")) {
+        const cls = decorated.namedChildren[decorated.namedChildren.length - 1];
+        if (!cls || cls.type !== "class_definition") continue;
+        // HTTP verbs implemented directly on the Resource subclass.
+        const present = new Map<string, TsNode>();
+        for (const def of findAll(cls, (n) => n.type === "function_definition")) {
+          const name = def.namedChildren[0]?.text;
+          if (name && HTTP_METHODS.has(name) && !present.has(name)) present.set(name, def);
+        }
+        if (present.size === 0) continue;
+        const decorators = decorated.namedChildren.filter((n: TsNode) => n.type === "decorator");
+        for (const decorator of decorators) {
+          const callNode = decorator.namedChildren?.[0];
+          if (!callNode || callNode.type !== "call") continue;
+          const mc = methodCall(callNode);
+          if (!mc || mc.method !== "route" || mc.receiver.type !== "identifier") continue;
+          const nsKey = `${file.path}:${mc.receiver.text}`;
+          const nsPrefix =
+            namespaceOverride.get(nsKey) ?? namespacePrefix.get(nsKey) ?? "";
+          for (const pathNode of positionalArguments(callNode)) {
+            const routePath = literalString(pathNode);
+            if (routePath === null) continue;
+            const rawPath = joinPrefix(nsPrefix, routePath);
+            for (const [method, methodNode] of present) {
+              const fn = fnByNode.get(methodNode);
+              if (!fn) continue;
+              sites.push({
+                instanceId: "flask-restful-root",
+                methods: [method],
+                rawPath,
+                call: callNode,
+                fn,
+                file: file.path,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Ensure the synthetic root exists when only flask-restx namespace routes
+    // were found (no add_resource call triggered the earlier guarantee).
+    if (
+      sites.some((s) => s.instanceId === "flask-restful-root") &&
+      !instances.has("flask-restful-root")
+    ) {
+      instances.set("flask-restful-root", {
+        id: "flask-restful-root",
+        file: "",
+        name: "flask-restful-root",
+        kind: "app",
+        prefix: "",
+      });
+    }
+
     const orphanBlueprints = new Set<string>();
     const routes: RouteCandidate[] = [];
     for (const site of sites) {

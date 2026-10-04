@@ -286,6 +286,72 @@ function schemaFromNode(analysis: TsAnalysis, node: any, fallbackLiteral = true)
  * re-exports. Only project files are traversed. Returns null when the symbol
  * cannot be grounded in a real declaration.
  */
+/**
+ * Follows a handler expression down to a function-like node. Express handlers
+ * are very commonly wrapped or aliased:
+ *   const register = catchAsync(async (req, res) => { ... });
+ *   module.exports = { register };
+ * so an exported value may be (a) a call expression whose first function-like
+ * argument is the real handler (catchAsync / asyncHandler / express-async-
+ * handler style wrappers), or (b) an identifier aliasing a top-level const that
+ * holds one. Returns undefined when no function-like node is provable.
+ */
+function unwrapToFunction(
+  analysis: TsAnalysis,
+  file: any,
+  node: any,
+  seen: Set<string> = new Set(),
+  depth = 0,
+): any | undefined {
+  const { ts } = analysis;
+  if (!node || depth > 8) return undefined;
+  if (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node)
+  ) {
+    return node;
+  }
+  if (ts.isCallExpression(node)) {
+    for (const arg of node.arguments) {
+      if (
+        ts.isArrowFunction(arg) ||
+        ts.isFunctionExpression(arg) ||
+        ts.isFunctionDeclaration(arg) ||
+        ts.isMethodDeclaration(arg)
+      ) {
+        return arg;
+      }
+    }
+    // Wrappers may nest or receive an identifier handler.
+    for (const arg of node.arguments) {
+      const nested = unwrapToFunction(analysis, file, arg, seen, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  if (ts.isIdentifier(node)) {
+    const key = `${file.fileName}:${node.text}`;
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    let initializer: any;
+    file.forEachChild((child: any) => {
+      if (initializer || !ts.isVariableStatement(child)) return;
+      for (const decl of child.declarationList.declarations) {
+        if (
+          ts.isIdentifier(decl.name) &&
+          decl.name.text === node.text &&
+          decl.initializer
+        ) {
+          initializer = decl.initializer;
+        }
+      }
+    });
+    if (initializer) return unwrapToFunction(analysis, file, initializer, seen, depth + 1);
+  }
+  return undefined;
+}
+
 function findExportedDeclaration(
   analysis: TsAnalysis,
   file: any,
@@ -311,11 +377,15 @@ function findExportedDeclaration(
           if (
             ts.isIdentifier(decl.name) &&
             decl.name.text === identifier &&
-            decl.initializer &&
-            (ts.isArrowFunction(decl.initializer) ||
-              ts.isFunctionExpression(decl.initializer))
+            decl.initializer
           ) {
-            target = decl.initializer;
+            if (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer)) {
+              target = decl.initializer;
+            } else {
+              // const handler = catchAsync(async (req, res) => ...)
+              const unwrapped = unwrapToFunction(analysis, sf, decl.initializer);
+              if (unwrapped) target = unwrapped;
+            }
           }
         }
       }
@@ -445,7 +515,8 @@ function findExportedObjectMethod(
     }
   });
 
-  return found ? { node: found, file } : null;
+  const unwrapped = found ? unwrapToFunction(analysis, file, found) : undefined;
+  return unwrapped ? { node: unwrapped, file } : null;
 }
 
 export function resolveHandler(
@@ -667,6 +738,12 @@ export function analyzeHandler(
     bodyReferencedHint?: boolean;
     customResponseMethods?: Map<string, CustomResponseMethod>;
     reachableNodes?: Set<any>;
+    /** Schema middleware (Joi/celebrate `validate({ body, query, params })`). */
+    validatedRequest?: {
+      body?: JsonSchema;
+      query?: JsonSchema;
+      params?: JsonSchema;
+    };
   },
 ): HandlerFacts {
   const { ts, checker } = analysis;
@@ -786,6 +863,22 @@ export function analyzeHandler(
       "high",
       validator.required || location === "path",
     );
+  }
+
+  // ---- Joi / celebrate schema middleware: { query: {...}, params: {...} } ----
+  const validatedQuery = context.validatedRequest?.query;
+  if (validatedQuery?.properties) {
+    const requiredSet = new Set<string>(Array.isArray(validatedQuery.required) ? validatedQuery.required : []);
+    for (const [name, schema] of Object.entries(validatedQuery.properties)) {
+      addParam("query", name, schema as JsonSchema, "high", requiredSet.has(name));
+    }
+  }
+  const validatedParams = context.validatedRequest?.params;
+  if (validatedParams?.properties) {
+    const requiredSet = new Set<string>(Array.isArray(validatedParams.required) ? validatedParams.required : []);
+    for (const [name, schema] of Object.entries(validatedParams.properties)) {
+      addParam("path", name, schema as JsonSchema, "high", requiredSet.has(name) || true);
+    }
   }
 
   if (genericQuery) {
@@ -1387,7 +1480,15 @@ export function analyzeHandler(
 
   // ---- request body ----
   let requestBody: HandlerFacts["requestBody"];
-  if (zodBody) {
+  const validatedBody = context.validatedRequest?.body;
+  if (validatedBody && Object.keys(validatedBody).length) {
+    const requiredNames = Array.isArray(validatedBody.required) ? validatedBody.required : [];
+    requestBody = {
+      required: requiredNames.length > 0,
+      content: [{ mediaType: "application/json", schema: validatedBody }],
+      confidence: "high",
+    };
+  } else if (zodBody) {
     const schema = zodBody.schema;
     requestBody = {
       required: true,
@@ -1416,7 +1517,8 @@ export function analyzeHandler(
 
   if (
     queryFields.some((f) => !f.schema) &&
-    !genericQuery
+    !genericQuery &&
+    !validatedQuery
   ) {
     gaps.add("query-unknown");
   }

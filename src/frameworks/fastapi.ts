@@ -472,6 +472,95 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         ? { file: resolveModuleFile(resolveRelativeModule(file, imported.module)) ?? file, name: imported.importedName }
         : { file, name };
     };
+
+    // Walk a class (and its single inheritance chain) for a field whose default
+    // is a string literal. Returns null when no literal default is provable.
+    const findClassFieldLiteral = (start: { file: string; name: string }, fieldName: string): string | null => {
+      const seen = new Set<string>();
+      let symbol = start;
+      for (let guard = 0; guard < 8; guard += 1) {
+        const key = `${symbol.file}:${symbol.name}`;
+        if (seen.has(key)) return null;
+        seen.add(key);
+        const resolved = resolveSymbol(symbol.file, symbol.name);
+        symbol = resolved;
+        const cls = analysis.classes.find((candidate) => candidate.file === symbol.file && candidate.name === symbol.name);
+        if (!cls) return null;
+        const field = cls.fields.find((candidate) => candidate.name === fieldName);
+        if (field) {
+          const literal = literalString(field.default);
+          if (literal !== null) return literal;
+        }
+        if (cls.bases.length !== 1) return null;
+        symbol = resolveSymbol(cls.file, cls.bases[0]!.text);
+      }
+      return null;
+    };
+
+    // Resolve `<instance>.<field>` where instance is a settings/config object
+    // created with `instance = Cls(...)`, either in this file or imported from
+    // another module (e.g. `from app.core.config import settings`). Pydantic
+    // settings class attributes carry literal defaults that are the documented
+    // contract, so a proven literal is treated as a static prefix.
+    const resolveSettingsField = (file: string, baseName: string, fieldName: string): string | null => {
+      const instanceCall = (root: TsNode, name: string): TsNode | undefined =>
+        findAll(
+          root,
+          (item) =>
+            item.type === "assignment" &&
+            item.namedChildren[0]?.text === name &&
+            item.namedChildren.at(-1)?.type === "call",
+        )
+          .map((item) => item.namedChildren.at(-1)!)
+          .find((call) => call.namedChildren[0]?.type === "identifier");
+
+    // Resolve the settings class behind an instantiation call: either a direct
+    // `Settings()` call or a factory `get_settings()` annotated `-> Settings`.
+    const classSymbolFromCall = (file: string, call: TsNode): { file: string; name: string } | null => {
+      const callee = call.namedChildren?.[0];
+      if (!callee || callee.type !== "identifier") return null;
+      const direct = resolveSymbol(file, callee.text);
+      if (analysis.classes.some((candidate) => candidate.file === direct.file && candidate.name === direct.name)) {
+        return direct;
+      }
+      const fn = analysis.functions.find((candidate) => candidate.file === direct.file && candidate.name === direct.name);
+      if (fn?.returnType?.type === "identifier") {
+        const returned = resolveSymbol(fn.file, fn.returnType.text);
+        if (analysis.classes.some((candidate) => candidate.file === returned.file && candidate.name === returned.name)) {
+          return returned;
+        }
+      }
+      return null;
+    };
+
+    const resolveField = (file: string, call: TsNode, fieldName: string): string | null => {
+      const symbol = classSymbolFromCall(file, call);
+      return symbol ? findClassFieldLiteral(symbol, fieldName) : null;
+    };
+
+    const localRoot = analysis.files.get(file)?.root;
+    if (localRoot) {
+      const call = instanceCall(localRoot, baseName);
+      if (call) {
+        const literal = resolveField(file, call, fieldName);
+        if (literal !== null) return literal;
+      }
+    }
+
+    const imported = analysis.files.get(file)?.imports.get(baseName);
+    if (imported?.importedName) {
+      const target = resolveModuleFile(resolveRelativeModule(file, imported.module));
+      const targetRoot = target ? analysis.files.get(target)?.root : undefined;
+      if (target && targetRoot) {
+        const call = instanceCall(targetRoot, imported.importedName);
+        if (call) {
+          const literal = resolveField(target, call, fieldName);
+          if (literal !== null) return literal;
+        }
+      }
+    }
+    return null;
+  };
     const prefixInfo = (node: TsNode | null, file: string, depth = 0): { prefix: string; dynamicPrefix: boolean } => {
       if (!node) return { prefix: "", dynamicPrefix: false };
       const literal = literalString(node);
@@ -493,21 +582,16 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         if (value && value !== node) return prefixInfo(value, file, depth + 1);
       }
       if (node.type === "attribute" && node.namedChildren[0]?.type === "identifier") {
-        const value = binding(node.namedChildren[0].text);
+        const baseName = node.namedChildren[0].text;
+        const fieldName = node.namedChildren[1]?.text;
+        if (baseName && fieldName) {
+          const settingsLiteral = resolveSettingsField(file, baseName, fieldName);
+          if (settingsLiteral !== null) return { prefix: settingsLiteral, dynamicPrefix: false };
+        }
+        const value = binding(baseName);
         if (value?.type === "call" && value.namedChildren[0]?.type === "identifier") {
-          let symbol = resolveSymbol(file, value.namedChildren[0].text);
-          const fn = analysis.functions.find(fn => fn.file === symbol.file && fn.name === symbol.name);
-          if (fn?.returnType?.type === "identifier") symbol = resolveSymbol(fn.file, fn.returnType.text);
-          let cls = analysis.classes.find(cls => cls.file === symbol.file && cls.name === symbol.name);
-          const seen = new Set<string>();
-          while (cls && !seen.has(`${cls.file}:${cls.name}`)) {
-            seen.add(`${cls.file}:${cls.name}`);
-            const field = cls.fields.find(field => field.name === node.namedChildren[1]?.text);
-            if (field) return { prefix: literalString(field.default) ?? "", dynamicPrefix: true };
-            if (cls.bases.length !== 1) break;
-            symbol = resolveSymbol(cls.file, cls.bases[0]!.text);
-            cls = analysis.classes.find(cls => cls.file === symbol.file && cls.name === symbol.name);
-          }
+          const literal = findClassFieldLiteral(resolveSymbol(file, value.namedChildren[0].text), fieldName ?? "");
+          if (literal !== null) return { prefix: literal, dynamicPrefix: false };
         }
       }
       return { prefix: "", dynamicPrefix: true };
