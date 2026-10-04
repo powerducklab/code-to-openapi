@@ -520,8 +520,18 @@ function genericBaseName(node: TsNode): string | null {
 function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
   const returnType = findReturnType(fn);
   if (!returnType) {
-    gaps.push("response-unknown");
-    return [{ statusCode: "200", description: "", confidence: "low" }];
+    // A Rust handler with no `-> T` returns the unit type `()`. axum's
+    // IntoResponse for `()` is an empty 200 with no body — a complete
+    // contract, not an unknown response (common for DELETE handlers).
+    return [{ statusCode: "200", description: "", confidence: "high" }];
+  }
+
+  // Explicit `-> ()` is the same unit/empty-body case.
+  if (
+    returnType.type === "tuple_type" &&
+    returnType.namedChildren.filter((child) => child.type.endsWith("_type")).length === 0
+  ) {
+    return [{ statusCode: "200", description: "", confidence: "high" }];
   }
 
   // Sse<T> stream.
