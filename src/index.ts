@@ -11,7 +11,7 @@
  * resolver that only fills explicitly identified per-handler gaps.
  */
 
-export { scanProject } from "./core/engine.js";
+export { scanProject, convertProject } from "./core/engine.js";
 export { indexProject } from "./core/indexer.js";
 export { probeManifest } from "./core/probe.js";
 export { applyCompletenessGate } from "./core/completeness.js";
@@ -53,6 +53,15 @@ export {
   sanitizeSchema,
   type GapPromptMessage,
 } from "./ai/prompt.js";
+export {
+  buildGapReview,
+  proposeGap,
+  applyGapDecision,
+  type GapReview,
+  type GapProposal,
+  type GapDecision,
+  type GapDecisionResult,
+} from "./ai/review.js";
 export type {
   ExtractionResult,
   FileEntry,

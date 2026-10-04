@@ -31,6 +31,7 @@ import type {
   ScanResult,
 } from "./types.js";
 import type { ComponentCatalogEntry } from "../ai/gapResolver.js";
+import { buildGapReview } from "../ai/review.js";
 import { stripPrototypeHazards } from "./sanitizeSchemas.js";
 import { createTsAnalysis, type TsAnalysis } from "../lang/typescript/index.js";
 import { createPythonAnalysis, type PythonAnalysis } from "../lang/python/index.js";
@@ -666,7 +667,16 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   let aiResolved = 0;
   const aiResolvedRoutes: ScanReport["aiResolvedRoutes"] = [];
   const componentCatalog = buildComponentCatalog(componentsByName);
-  if (options.gapResolver) {
+  let gapReviews: import("../ai/review.js").GapReview[] | undefined;
+  const reviewMode = options.aiReview ?? (options.gapResolver ? "auto" : "manual");
+  if (reviewMode === "manual") {
+    // Surface unresolved handlers for interactive review without calling a
+    // model; the host proposes and the user accepts/edits/rejects each one.
+    gapReviews = candidates
+      .map((candidate) => buildGapReview(candidate, componentCatalog))
+      .filter((review): review is import("../ai/review.js").GapReview => review !== null);
+    ctx.onProgress?.("ai-review-pending", JSON.stringify({ total: gapReviews.length }));
+  } else if (options.gapResolver) {
     const targets = candidates
       .map((candidate, index) => ({ candidate, index }))
       .filter(({ candidate }) => candidate.gaps.length > 0 && Boolean(candidate.handlerSource));
@@ -764,6 +774,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     aiAttempted,
     aiResolved,
     aiResolvedRoutes,
+    ...(gapReviews?.length ? { aiPending: gapReviews.length } : {}),
     diagnostics,
   };
 
@@ -771,6 +782,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     project,
     report,
     files: index.files,
+    ...(gapReviews?.length ? { gapReviews } : {}),
     sidecar: buildSidecar({
       files: index.files,
       operations,
@@ -782,6 +794,17 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       return discoveryToOpenApi(project, { validate: true });
     },
   };
+}
+
+/**
+ * Converts a (possibly user-reviewed, AI-decorated) discovered project back
+ * into a validated OpenAPI 3.2 document. Hosts use this after applying manual
+ * AI gap decisions to the operations returned by a manual-review scan.
+ */
+export async function convertProject(
+  project: DiscoveredProject,
+): Promise<DiscoveryResult> {
+  return discoveryToOpenApi(project, { validate: true });
 }
 
 const PROTOTYPE_HAZARD_KEYS = new Set(["constructor", "__proto__", "prototype"]);

@@ -160,6 +160,12 @@ export interface ScanOptions {
   onProgress?: (phase: string, detail?: string) => void;
   /** AI gap resolver; absent means deterministic-only output. */
   gapResolver?: import("../ai/gapResolver.js").GapResolver;
+  /**
+   * How model-derived gaps are handled. "auto" (default) resolves and merges
+   * immediately. "manual" leaves every gap open and returns `gapReviews` for
+   * the host to propose, show to the user, and apply only after acceptance.
+   */
+  aiReview?: "auto" | "manual";
 }
 
 export interface ScanReport {
@@ -180,6 +186,8 @@ export interface ScanReport {
     path: string;
     gapsClosed: number;
   }>;
+  /** Handlers with open gaps awaiting manual AI review (manual review mode). */
+  aiPending?: number;
   /** Non-fatal problems encountered during analysis (pack failures, etc.). */
   diagnostics: string[];
 }
@@ -189,6 +197,8 @@ export interface ScanResult {
   report: ScanReport;
   /** Indexed source files (relative path and content hash) used by the scan. */
   files: FileEntry[];
+  /** Pending AI gap reviews when `aiReview: "manual"`. */
+  gapReviews?: import("../ai/review.js").GapReview[];
   /** Sidecar snapshot for incremental rescans. */
   sidecar: import("./sidecar.js").DiscoverySidecar;
   /** Re-exported conversion result; document is validated OAS 3.2. */
