@@ -962,6 +962,10 @@ function analyzeHonoHandler(
               { type: "string" },
               "high",
             );
+          } else if (method === "redirect") {
+            // c.redirect(location, status?) defaults to HTTP 302 with no body.
+            hasResponseSite = true;
+            responses.recordEmpty(statusCodeFrom(ts, node.arguments[1]) ?? "302", "high");
           } else if (method === "streamSSE") {
             sse = true;
             // Inspect the SSE callback for stream.writeData(payload).
@@ -987,6 +991,22 @@ function analyzeHonoHandler(
               ...(itemSchema ? { itemSchema } : {}),
             });
           }
+        }
+      }
+    } else if (ts.isNewExpression(node)) {
+      // Native Fetch `new Response("...")` / `new Response(null)` returned by a
+      // handler produces a 200 text response (or an empty 200 body).
+      const ctor = node.expression;
+      const ctorName = ts.isIdentifier(ctor) ? ctor.text : ts.isPropertyAccessExpression(ctor) ? ctor.name.text : undefined;
+      if (ctorName === "Response") {
+        hasResponseSite = true;
+        const bodyArg = node.arguments?.[0];
+        if (bodyArg && (ts.isStringLiteralLike(bodyArg) || ts.isNoSubstitutionTemplateLiteral(bodyArg))) {
+          responses.record("200", "text/plain", { type: "string" }, "high");
+        } else if (!bodyArg || bodyArg.kind === ts.SyntaxKind.NullKeyword) {
+          responses.recordEmpty("200", "high");
+        } else {
+          responses.record("200", "text/plain", undefined, "medium");
         }
       }
     }

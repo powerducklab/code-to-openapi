@@ -338,7 +338,7 @@ function analyzeHandler(
         wrapperVars.has(sel.receiver.text) &&
         method !== "JSON"
       ) {
-        resolveWrapperResponse(analysis, modelIndex, fn, method, args, wrapperVars.get(sel.receiver.text)!, addResponse);
+        resolveWrapperResponse(analysis, modelIndex, fn, method, args, wrapperVars.get(sel.receiver.text)!, addResponse, (code) => gaps.add(code));
         continue;
       }
 
@@ -659,6 +659,7 @@ function resolveWrapperResponse(
   callArgs: TsNode[],
   recvTypeName: string,
   addResponse: (status: string, response: RouteCandidate["responses"][number]) => void,
+  reportGap: (code: GapCode) => void,
 ): void {
   const methodFn = analysis.methods.find(
     (m) => receiverTypeName(m) === recvTypeName && m.name === method,
@@ -736,6 +737,14 @@ function resolveWrapperResponse(
       ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
       : {}),
   });
+
+  // A success (2xx) body whose payload cannot be proven from source must not be
+  // presented as a concrete empty object. Error branches legitimately carry a
+  // proven `null` data value and are left intact.
+  const isSuccess = /^2\d\d$/.test(resolvedStatus);
+  if (isSuccess && (!schema || hasEmptyProperties(schema))) {
+    reportGap("response-schema-unknown");
+  }
 }
 
 /**
