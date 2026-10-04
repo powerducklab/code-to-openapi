@@ -88,10 +88,59 @@ const FIELD_SCHEMAS: Record<string, JsonSchemaLocal> = {
   ImageField: { type: "string", format: "binary" },
 };
 
+/**
+ * Field contracts for Django built-in models that live outside the scanned
+ * source tree (notably django.contrib.auth.models.User). Only fields a
+ * serializer explicitly lists are emitted, so registering the common set is
+ * safe. `required` reflects the model contract (non-blank / always present on
+ * read). Values follow the stock Django field definitions and validators.
+ */
+interface ExternalField {
+  schema: JsonSchemaLocal;
+  required: boolean;
+}
+const DJANGO_EXTERNAL_FIELDS: Record<string, Record<string, ExternalField>> = {
+  "django.contrib.auth.models.User": {
+    id: { schema: { type: "integer", readOnly: true }, required: true },
+    username: { schema: { type: "string", maxLength: 150, pattern: "^[\\w.@+-]+$" }, required: true },
+    email: { schema: { type: "string", format: "email", maxLength: 254 }, required: false },
+    first_name: { schema: { type: "string", maxLength: 150 }, required: false },
+    last_name: { schema: { type: "string", maxLength: 150 }, required: false },
+    password: { schema: { type: "string", writeOnly: true, minLength: 1 }, required: true },
+    is_staff: { schema: { type: "boolean" }, required: false },
+    is_active: { schema: { type: "boolean" }, required: false },
+    is_superuser: { schema: { type: "boolean" }, required: false },
+    last_login: { schema: { type: ["string", "null"], format: "date-time" }, required: false },
+    date_joined: { schema: { type: "string", format: "date-time" }, required: false },
+  },
+  "django.contrib.auth.models.Group": {
+    id: { schema: { type: "integer", readOnly: true }, required: true },
+    name: { schema: { type: "string", maxLength: 150 }, required: true },
+  },
+};
+
+/** Resolve a serializer Meta `model = X` to a built-in Django model table when the model source is external. */
+function externalDjangoFields(cls: PyClass, modelNode: TsNode | undefined, index: SerializerIndex): Record<string, ExternalField> | null {
+  if (!modelNode) return null;
+  const modelName = modelNode.text.trim().split(".").pop()!;
+  const file = index.analysis.files.get(cls.file);
+  let module = "";
+  for (const [binding, imported] of file?.imports ?? []) {
+    if (binding === modelName || imported.importedName === modelName) {
+      module = imported.module;
+      break;
+    }
+  }
+  if (!module) return null;
+  return DJANGO_EXTERNAL_FIELDS[`${module}.${modelName}`] ?? null;
+}
+
 interface SerializerIndex {
   classNames: Set<string>;
   componentsByName: Map<string, JsonSchemaLocal>;
   analysis: PythonAnalysis;
+  /** Required field names proven from built-in external Django models (auth.User). */
+  externalRequired: Map<string, Set<string>>;
   dynamicConstraints: Set<string>;
   bindings: ReturnType<typeof pythonBindingResolver>;
 }
@@ -178,6 +227,12 @@ function drfFieldSchema(call: TsNode, index: SerializerIndex, seen: Set<string>)
   if (!name) return {};
 
   if (name === "SerializerMethodField") return {};
+  if (name === "ReadOnlyField") {
+    // ReadOnlyField renders the resolved `source` value. A dotted source such as
+    // `owner.username` terminates at a text attribute; without a richer type
+    // resolution DRF represents it as a scalar string.
+    return { type: "string", readOnly: true };
+  }
   if (name === "DecimalField") return decimalFieldSchema(call, index);
   if (["HyperlinkedIdentityField", "HyperlinkedRelatedField"].includes(name)) {
     const schema = {type: "string", format: "uri"};
@@ -222,8 +277,17 @@ function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<str
   const result: Record<string, JsonSchemaLocal> = {};
   const names = meta.get("fields") ? listElements(meta.get("fields")!).map(n => literalString(n)).filter((n): n is string => !!n) : [];
   const readOnly = new Set(meta.get("read_only_fields") ? listElements(meta.get("read_only_fields")!).map(n => literalString(n)) : []);
+  // Built-in Django models (auth.User, ...) are external to the scanned tree;
+  // use their stock field contracts when the model class cannot be resolved.
+  const external = model ? null : externalDjangoFields(cls, meta.get("model"), index);
+  const externalRequired = new Set<string>();
   for (const name of names) {
     if (name === "url" && cls.bases.some(b => baseTail(b) === "HyperlinkedModelSerializer")) {result[name] = {type: "string", format: "uri", readOnly: true}; continue;}
+    if (external && external[name]) {
+      result[name] = { ...external[name].schema };
+      if (external[name].required) externalRequired.add(name);
+      continue;
+    }
     const field = model?.fields.find(f => f.name === name);
     if (!field?.default || field.default.type !== "call") {
       result[name] = name === "id" && model ? {type: "integer", readOnly: true} : {};
@@ -241,11 +305,12 @@ function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<str
     if (choices && ["list", "tuple"].includes(choices.type)) {
       const values = listElements(choices).map(n => literalString(listElements(n)[0] ?? null));
       if (values.length && values.every(v => v !== null)) schema.enum = values;
-      else index.dynamicConstraints.add(cls.name);
-    } else if (choices) index.dynamicConstraints.add(cls.name);
+      else { index.dynamicConstraints.add(cls.name); schema["x-dynamic-enum"] = true; }
+    } else if (choices) { index.dynamicConstraints.add(cls.name); schema["x-dynamic-enum"] = true; }
     if (kind === "DecimalField" && !schema.type) index.dynamicConstraints.add(cls.name);
     result[name] = schema;
   }
+  if (externalRequired.size) index.externalRequired.set(cls.name, externalRequired);
   return result;
 }
 
@@ -261,6 +326,7 @@ function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<s
   const model = serializerModel(cls, index);
   for (const [name, schema] of Object.entries(properties)) {
     const value = model?.fields.find(f => f.name === name)?.default;
+    if (index.externalRequired.get(cls.name)?.has(name)) required.push(name);
     if (schema.readOnly || (value?.type === "call" && !keywordArgument(value, "default") && keywordArgument(value, "blank")?.type !== "true" && keywordArgument(value, "null")?.type !== "true")) required.push(name);
   }
 
@@ -316,6 +382,7 @@ function buildSerializerIndex(analysis: PythonAnalysis): SerializerIndex {
     classNames: new Set(),
     componentsByName: new Map(),
     dynamicConstraints: new Set(),
+    externalRequired: new Map(),
     bindings: pythonBindingResolver(analysis),
     analysis,
   };

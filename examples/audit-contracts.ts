@@ -27,7 +27,7 @@ const knownFalseMismatch=(where:string,field:string,expected:any,actual:any):any
  }
  return undefined;
 };
-const errors:unknown[]=[];const baselineIssues:unknown[]=[];const unknownFields:unknown[]=[];const extraFields:unknown[]=[];let assertions=0;
+const errors:unknown[]=[];const baselineIssues:unknown[]=[];const unknownFields:unknown[]=[];const extraFields:unknown[]=[];const dynamicUnresolved:unknown[]=[];let assertions=0;
 // 9.5/10 scorecard counters (P1-22). Unknown fields are never credited: they
 // drag down precision until statically proven.
 let routeTotal=0,routeMatched=0,scannedRouteTotal=0;
@@ -71,6 +71,7 @@ function leaves(node:any,doc:any,path='',out=new Map<string,unknown>(),seen=new 
    out.set(path+'/'+key,value);
   }
  }
+ if(node['x-dynamic-enum']!==undefined)out.set(path+'/x-dynamic-enum',node['x-dynamic-enum']);
  if(node.properties&&(includePropertySets||node['x-audit-exact-properties']===true))out.set(path+'/propertyNames',Object.keys(node.properties).sort());
  for(const [key,value] of Object.entries(node.properties??{})){
   out.set(path+'/properties/'+key+'/present',true);
@@ -116,6 +117,15 @@ function compare(expected:any,observed:any,where:string,exactBaseline=false){
   // A mismatch under a statically-opaque observed field (empty object from an
   // `any`/ORM source) is an unknown gap, not a concrete contradiction.
   if(JSON.stringify(canonical(wantV))!==JSON.stringify(canonical(got))){
+   // A dynamic enum (choices generated at runtime, e.g. from a library call)
+   // cannot be statically enumerated; the scanner honestly flags the field with
+   // x-dynamic-enum. Report it as a statically-unresolvable item, neither a hard
+   // mismatch nor a correct assertion, instead of fabricating values.
+   if(field.endsWith('/enum')&&found.get(field.replace(/\/enum$/,'/x-dynamic-enum'))===true){
+    dynamicUnresolved.push({where,field,expectedEnumCount:Array.isArray(wantV)?wantV.length:null});
+    if(isConstraint)constraintTotal--;
+    continue;
+   }
    const parts=field.split('/');
    let opaque=false;
    for(let i=2;i<parts.length-1;i++){
@@ -230,9 +240,10 @@ const scorecard={
   request:{correct:reqCorrect,wrong:reqWrong,unknown:reqUnknown},
   response:{correct:resCorrect,wrong:resWrong,unknown:resUnknown},
   parameter:{correct:paramCorrect,wrong:paramWrong,unknown:paramUnknown}},
+ dynamicUnresolvedCount:dynamicUnresolved.length,
  pass95,
 };
-const result={assertions,mismatches:errors.length,unknown:unknownFields.length,unknownFields,extra:extraFields.length,extraFields,errors,baselineErrors,baselineIssues,scorecard,limitation:'Checks documented properties/constraints. `unknown` fields are present but statically unresolved types; `extra` fields are observed fields absent from a partial baseline and are not hard mismatches unless the baseline is exact. `baselineErrors` are proven defects in the upstream baseline (source-evidenced), excluded from the scanner score.'};
+const result={assertions,mismatches:errors.length,unknown:unknownFields.length,unknownFields,dynamicUnresolved,dynamicUnresolvedCount:dynamicUnresolved.length,extra:extraFields.length,extraFields,errors,baselineErrors,baselineIssues,scorecard,limitation:'Checks documented properties/constraints. `unknown` fields are present but statically unresolved types; `dynamicUnresolved` are honest gaps where a runtime-generated constraint (e.g. dynamic choices) cannot be statically enumerated and is flagged rather than fabricated; `extra` fields are observed fields absent from a partial baseline and are not hard mismatches unless the baseline is exact. `baselineErrors` are proven defects in the upstream baseline (source-evidenced), excluded from the scanner score.'};
 writeFileSync(args[2]!,JSON.stringify(result,null,2));console.log(JSON.stringify({assertions,mismatches:errors.length,unknown:unknownFields.length,extra:extraFields.length,baselineErrors:baselineErrors.length,overall,pass95,routeRecall,routePrecision,requestCompleteness,responseCompleteness,constraintAccuracy,unresolvedRatio}));
 
 if(strict && (errors.length || baselineIssues.length || !assertions)) process.exitCode=1;
