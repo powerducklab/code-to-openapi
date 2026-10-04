@@ -1,0 +1,125 @@
+{
+  "generatedAt": "2026-10-05",
+  "batch": 2,
+  "purpose": "Second fresh generality batch: a new set of real open-source apps pinned to a commit, scanned with an empty ledger. Each scanRoot points at one coherent application; the MinimalApiPlayground repository contains three independent apps and is scanned three times with separate roots. Expected route counts were verified by reading each project's route registrations directly, never from the scanner output.",
+  "scoring": {
+    "gate": 0.96,
+    "axes": [
+      "routeRecall",
+      "routePrecision",
+      "requestCompleteness",
+      "responseCompleteness",
+      "parameterCompleteness",
+      "constraintAccuracy"
+    ],
+    "unknownCountsAsIncorrect": true,
+    "notes": "Deterministic = provable from source. AiReview = contract the deterministic pass honestly cannot prove (opaque ORM/service returns, dynamic serializers, custom binders, non-compiled scratch entry points); routed to the interactive AI gap review where the user accepts/edits/rejects each fragment (tagged x-ai-inferred). These are reported separately, never silently merged, and never hard-coded."
+  },
+  "projects": [
+    {
+      "key": "gin-example",
+      "framework": "gin",
+      "repo": "EDDYCJY/go-gin-example",
+      "commit": "4f5174ca325b37f23edadad7c88d49586816a69c",
+      "scanRoot": "",
+      "baseline": "source-verified gin route table; the gin-swagger UI handler is not an API route",
+      "expectedRoutes": 14,
+      "falseRoutes": 0
+    },
+    {
+      "key": "hono-blog",
+      "framework": "hono",
+      "repo": "honojs/examples",
+      "commit": "3b0b62875a0e1265763fea1c6388866d5697ef81",
+      "scanRoot": "blog",
+      "baseline": "source-verified Hono app/api routes; KV store get/put/delete calls are not routes",
+      "expectedRoutes": 7,
+      "falseRoutes": 0
+    },
+    {
+      "key": "slim-skeleton",
+      "framework": "slim",
+      "repo": "slimphp/Slim-Skeleton",
+      "commit": "0ef01549870b3234a3a9f602904a39c3ed73f44c",
+      "scanRoot": "",
+      "baseline": "source-verified app/routes.php; the CORS OPTIONS catch-all is not an API operation",
+      "expectedRoutes": 3,
+      "falseRoutes": 0
+    },
+    {
+      "key": "symfony-demo",
+      "framework": "symfony",
+      "repo": "symfony/demo",
+      "commit": "8d2e2ef75c3e18df173d8bf2379a14abb58c4c31",
+      "scanRoot": "",
+      "baseline": "15 method-level PHP8 Route attributes (four declare GET+POST) plus the YAML TemplateController homepage; class-level Route attributes are prefixes only; method-less routes are one GET operation, not one per verb",
+      "expectedRoutes": 19,
+      "falseRoutes": 0
+    },
+    {
+      "key": "spring-petclinic",
+      "framework": "spring",
+      "frameworkNote": "server-rendered Spring MVC (Thymeleaf)",
+      "repo": "spring-projects/spring-petclinic",
+      "commit": "500158f732419217507c7656904b8e6aa1bcc0d6",
+      "scanRoot": "",
+      "baseline": "17 method-level @GetMapping/@PostMapping annotations; the class-level @RequestMapping on PetController is a prefix",
+      "expectedRoutes": 17,
+      "falseRoutes": 0
+    },
+    {
+      "key": "flask-tutorial",
+      "framework": "flask",
+      "frameworkNote": "server-rendered Jinja blog with HTML form posts",
+      "repo": "pallets/flask",
+      "commit": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35",
+      "scanRoot": "examples/tutorial",
+      "baseline": "8 @bp.route/@app.route decorators expanding to 12 operations across GET+POST; render_template views, redirects, abort pages and request.form fields verified from source",
+      "expectedRoutes": 12,
+      "falseRoutes": 0
+    },
+    {
+      "key": "chi-myapp",
+      "framework": "chi",
+      "repo": "learning-cloud-native-go/myapp",
+      "commit": "8b6ce3acde5f6c7815ac204d051d95d44e84a470",
+      "scanRoot": "",
+      "baseline": "/livez plus five /v1/books routes registered through book.Handler.Register; the GORM-backed list response is dynamically shaped and routed to AI review",
+      "expectedRoutes": 6,
+      "falseRoutes": 0
+    },
+    {
+      "key": "minimal-playground",
+      "framework": "aspnet",
+      "frameworkNote": "ASP.NET Core Minimal API",
+      "repo": "DamianEdwards/MinimalApiPlayground",
+      "commit": "3ead24b0c90662311c41f381f7ee54c0883d8ad1",
+      "scanRoot": "src/MinimalApiPlayground",
+      "baseline": "50 compiled endpoint registrations in Program.cs; one extra POST / is emitted from the non-compiled Properties/Scratch/Program2.cs dead-code entry point and is honestly flagged unknown (falseRoute=1, routed to AI review). Custom binders, antiforgery tokens and dynamic exception statuses are routed to AI review.",
+      "expectedRoutes": 50,
+      "falseRoutes": 1
+    },
+    {
+      "key": "minimal-efcore",
+      "framework": "aspnet",
+      "frameworkNote": "ASP.NET Core Minimal API with EF Core",
+      "repo": "DamianEdwards/MinimalApiPlayground",
+      "commit": "3ead24b0c90662311c41f381f7ee54c0883d8ad1",
+      "scanRoot": "src/Todo.EFCore",
+      "baseline": "13 endpoint registrations; EF Core ToListAsync/FindAsync/ExecuteSqlRawAsync return shapes resolved through data-flow inference",
+      "expectedRoutes": 13,
+      "falseRoutes": 0
+    },
+    {
+      "key": "minimal-dapper",
+      "framework": "aspnet",
+      "frameworkNote": "ASP.NET Core Minimal API with Dapper",
+      "repo": "DamianEdwards/MinimalApiPlayground",
+      "commit": "3ead24b0c90662311c41f381f7ee54c0883d8ad1",
+      "scanRoot": "src/Todo.Dapper",
+      "baseline": "13 endpoint registrations; Dapper QueryAsync/ExecuteAsync return shapes resolved through data-flow inference; SqliteConnection is an injected service, not a request body",
+      "expectedRoutes": 13,
+      "falseRoutes": 0
+    }
+  ]
+}
