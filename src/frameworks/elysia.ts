@@ -426,6 +426,27 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       }
     }
 
+    // app.guard({ ... }, (scoped) => scoped.get(...).post(...)) — guard adds
+    // no path prefix but its callback receives the scoped Elysia instance, so
+    // that parameter must be treated as a valid route receiver.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "guard"
+    ) {
+      const cb = [...node.arguments].find(
+        (a: any) =>
+          a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a)),
+      );
+      if (
+        cb &&
+        cb.parameters[0] &&
+        ts.isIdentifier(cb.parameters[0].name)
+      ) {
+        model.groupParams.add(cb.parameters[0].name.text);
+      }
+    }
+
     // <receiver>.<verb>(path, handler, options?)
     if (ts.isCallExpression(node)) classifyCall(analysis, model, node);
     ts.forEachChild(node, visit);
