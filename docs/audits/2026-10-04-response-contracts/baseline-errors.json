@@ -1,0 +1,24 @@
+{
+  "_comment": "Documented defects in the independent upstream baselines (not scanner bugs). Each entry is proven from the pinned sample source and excluded from the scanner accuracy scorecard, but reported separately for transparency. The original baseline files are never modified to make a scan pass.",
+  "express": {
+    "missingRoutes": [
+      {
+        "method": "get",
+        "path": "/",
+        "evidence": "src/main.ts:21 `app.get('/', (req,res)=>res.json({status:'API is running on /api'}))`",
+        "resolution": "The RealWorld baseline omits the root health route that the application actually registers. The scanner correctly emits it; this is baseline incompleteness, not a false positive."
+      }
+    ],
+    "falseMismatches": [
+      {
+        "whereContains": "delete /api/articles/{slug}/comments/{id}",
+        "fieldContains": "/type",
+        "parameter": "path:id",
+        "baseline": "string",
+        "scanner": "number",
+        "evidence": "src/app/routes/article/article.controller.ts:195 `deleteComment(Number(req.params.id), ...)` explicitly coerces the path id with Number(), so the accepted runtime value is a number.",
+        "resolution": "The baseline types the path id as string, but the handler coerces it to a number before use. Runtime-proven contract wins (same rule as the Spring boundary cases)."
+      }
+    ]
+  }
+}

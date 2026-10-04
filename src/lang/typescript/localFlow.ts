@@ -64,13 +64,41 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
   }
   if(ts.isAwaitExpression(node)||ts.isParenthesizedExpression(node)||ts.isNonNullExpression(node))return infer(node.expression,next,depth+1);
   if(ts.isAsExpression(node))return fill(infer(node.expression,next,depth+1),fallback(node),0);
+ // Ternary `cond ? a : b`: union the proven branches. When both branches prove
+ // the same primitive (e.g. boolean), collapse to that primitive.
+ if(ts.isConditionalExpression(node)){
+  const a=infer(node.whenTrue,next,depth+1);
+  const b=infer(node.whenFalse,next,depth+1);
+  if(a||b){
+   onEvidence?.();
+   if(a&&b&&a.type===b.type&&!Array.isArray(a.type))return a;
+   const branches=[a,b].filter(Boolean) as JsonSchema[];
+   return branches.length===1?branches[0]:{anyOf:branches};
+  }
+ }
+ // Null coalescing / logical fallback `a ?? b`, `a || b`: union both sides.
+ if(ts.isBinaryExpression(node)&&(node.operatorToken.kind===ts.SyntaxKind.QuestionQuestionToken||node.operatorToken.kind===ts.SyntaxKind.BarBarToken)){
+  const a=infer(node.left,next,depth+1);
+  const b=infer(node.right,next,depth+1);
+  if(a&&b&&a.type===b.type&&!Array.isArray(a.type))return a;
+  const branches=[a,b].filter(Boolean) as JsonSchema[];
+  if(branches.length)return branches.length===1?branches[0]:{anyOf:branches};
+ }
   if(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)){
    const property=ts.isPropertyAccessExpression(node)?node.name.text:node.argumentExpression&&ts.isStringLiteralLike(node.argumentExpression)?node.argumentExpression.text:undefined;
    if(property!==undefined){
-    const receiver=infer(node.expression,next,depth+1);const shape=receiver&&resolve(receiver);
+    const receiver=infer(node.expression,next,depth+1);let shape=receiver&&resolve(receiver);
     if(shape?.['x-code-to-openapi-unresolved-mutation'])return shape;
-    if(shape?.type==='object'&&shape.properties&&typeof shape.properties==='object'&&property in shape.properties)return (shape.properties as Record<string,JsonSchema>)[property];
-    if(shape?.type==='array'&&property==='length')return {type:'integer',minimum:0};
+    // A nullable entity (findUnique -> anyOf[object, null]) still exposes its
+    // object-branch properties when present; read them from the object branch.
+    const objectBranch=(s:any):any=>{
+     if(s?.type==='object')return s;
+     if(Array.isArray(s?.anyOf))return s.anyOf.map(objectBranch).find((b:any)=>b?.type==='object');
+     return undefined;
+    };
+    const obj=objectBranch(shape);
+    if(obj?.properties&&typeof obj.properties==='object'&&property in obj.properties)return (obj.properties as Record<string,JsonSchema>)[property];
+    if(shape?.type==='array'&&property==='length')return {type:'number'};
    }
   }
   if(ts.isCallExpression(node)){
@@ -116,6 +144,11 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
       finally{bindings.clear();for(const [key,value] of saved)bindings.set(key,value);}
      }
     }
+    // Boolean array predicates over a proven array receiver always resolve to a
+    // boolean present in the response (e.g. `tags.some(t => t.id === id)`).
+    if((name==='some'||name==='every')&&receiverIsArray){
+      onEvidence?.();return {type:'boolean'};
+    }
     const module=resolveStaticValue(analysis,receiver);
     const packageName=module&&ts.isCallExpression(module)&&module.expression.getText()==='require'?module.arguments[0]?.text:undefined;
     if(packageName==='jsonwebtoken'&&name==='sign'&&node.arguments.length>=2&&node.arguments.length<=3&&(!node.arguments[2]||ts.isObjectLiteralExpression(resolveStaticValue(analysis,node.arguments[2])??node.arguments[2]))){onEvidence?.();return {type:'string'};}
@@ -153,11 +186,13 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     if(isMutable(decl)){onEvidence?.();return {description:'Mutable or escaping value requires serialization review'};}
     if(decl.parent.flags&ts.NodeFlags.Const)return infer(decl.initializer,next,depth+1)??fallback(node);
    }
-   // `const { _count, ...rest } = await db.user.findMany(...)`: the rest
-   // binding carries every key the destructuring did not name. Resolve the
-   // source object and drop the destructured keys so `{...rest}` keeps only the
-   // returned relation/scalar fields the projection proved.
-   if(decl&&decl.kind===ts.SyntaxKind.RestElement&&decl.parent&&ts.isObjectBindingPattern(decl.parent)){
+   // `const { _count, ...rest } = await db.user.update(...)`: in an object
+   // binding pattern the rest element is a BindingElement carrying a
+   // dotDotDotToken (RestElement is only used for array/parameter rests). The
+   // rest binding carries every key the destructuring did not name. Resolve the
+   // source object and drop the named keys so `{...rest}` keeps only the
+   // relation/scalar fields the projection proved.
+   if(decl&&ts.isBindingElement(decl)&&decl.dotDotDotToken&&decl.parent&&ts.isObjectBindingPattern(decl.parent)){
     const binding=decl.parent;
     const vd=binding.parent;
     if(vd&&ts.isVariableDeclaration(vd)&&vd.initializer){
@@ -176,6 +211,19 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
       const required=(shape.required as string[]??[]).filter((key)=>!omitted.has(key));
       return {type:'object',properties,...(required.length?{required}:{})};
      }
+    }
+   }
+   // Named object destructuring `const { _count } = await db.update(...)`: the
+   // binding is the named property of the source object (respecting aliases).
+   if(decl&&ts.isBindingElement(decl)&&!decl.dotDotDotToken&&decl.parent&&ts.isObjectBindingPattern(decl.parent)){
+    const vd=decl.parent.parent;
+    if(vd&&ts.isVariableDeclaration(vd)&&vd.initializer&&(ts.isIdentifier(decl.name)||ts.isStringLiteralLike(decl.name))){
+     const key=(decl.propertyName&&ts.isIdentifier(decl.propertyName)?decl.propertyName.text:decl.propertyName&&ts.isStringLiteralLike(decl.propertyName)?decl.propertyName.text:decl.name.text);
+     const source=infer(vd.initializer,next,depth+1);
+     const shape=source&&resolve(source);
+     const obj=shape?.type==='object'?shape:Array.isArray(shape?.anyOf)?(shape!.anyOf as JsonSchema[]).find((b:any)=>b?.type==='object'):undefined;
+     const prop=(obj?.properties as Record<string,JsonSchema>|undefined)?.[key];
+     if(prop!==undefined)return prop;
     }
    }
   }

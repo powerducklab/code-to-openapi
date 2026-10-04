@@ -68,7 +68,9 @@ app.get('/search', async (req, res) => {
     // The mapper's element is an `any` Prisma row; field names are retained but
     // element types beyond what the include proves stay open (not fabricated).
     expect(mapped.properties.posts.type).toBe("array");
-    expect(mapped.properties.total.type).toBe("integer");
+    // Array.length and Prisma counts reach JSON as `number` (TS has no int type),
+    // matching the independent API contract rather than OpenAPI `integer`.
+    expect(mapped.properties.total.type).toBe("number");
 
     const search = doc.paths["/search"].get.parameters;
     const limit = search.find((p: any) => p.name === "limit");
