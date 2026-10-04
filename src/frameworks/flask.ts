@@ -1042,12 +1042,50 @@ function buildFlaskRoute(
       };
       gaps.add("body-schema-unknown");
     } else if (evidenceForMethod("form")) {
-      requestBody = {
-        required: true,
-        confidence: "medium",
-        content: [{ mediaType: "application/x-www-form-urlencoded", schema: { type: "object" } }],
-      };
-      gaps.add("body-schema-unknown");
+      // Recover proven field names from request.form["x"] (required) and
+      // request.form.get("x") (optional) accesses in the handler body.
+      const sourceText = body.text ?? "";
+      const required = new Set<string>();
+      const optional = new Set<string>();
+      for (const m of sourceText.matchAll(/\.form\s*\[\s*["']([A-Za-z0-9_.\-\[\]]+)["']\s*\]/g)) {
+        required.add(m[1]!);
+      }
+      for (const m of sourceText.matchAll(/\.form\s*\.\s*get\(\s*["']([A-Za-z0-9_.\-\[\]]+)["']/g)) {
+        optional.add(m[1]!);
+      }
+      const hasFiles = evidenceForMethod("files");
+      const fieldNames = [...new Set([...required, ...optional])];
+      const properties: Record<string, JsonSchemaLocal> = Object.fromEntries(
+        fieldNames.map((n) => [n, { type: "string" }]),
+      );
+      if (fieldNames.length) {
+        requestBody = {
+          required: required.size > 0,
+          confidence: "medium",
+          content: [
+            {
+              mediaType: hasFiles ? "multipart/form-data" : "application/x-www-form-urlencoded",
+              schema: {
+                type: "object",
+                properties,
+                ...(required.size ? { required: [...required] } : {}),
+              },
+            },
+          ],
+        };
+      } else {
+        requestBody = {
+          required: true,
+          confidence: "medium",
+          content: [
+            {
+              mediaType: hasFiles ? "multipart/form-data" : "application/x-www-form-urlencoded",
+              schema: { type: "object" },
+            },
+          ],
+        };
+        gaps.add("body-schema-unknown");
+      }
     } else if (evidenceForMethod("data")) {
       gaps.add("body-unknown");
     }
@@ -1389,6 +1427,27 @@ function buildFlaskResponses(
           statusCode: String(redirectStatus ?? 302),
           description: "",
           confidence: "high",
+        });
+        proven = true;
+        continue;
+      }
+      if (name === "render_template" || name === "render_template_string") {
+        // Server-rendered HTML views carry no JSON schema.
+        responses.push({
+          statusCode: String(status),
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "text/html", schema: { type: "string" } }],
+        });
+        proven = true;
+        continue;
+      }
+      if (name === "send_file" || name === "send_from_directory") {
+        responses.push({
+          statusCode: String(status),
+          description: "",
+          confidence: "medium",
+          content: [{ mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } }],
         });
         proven = true;
         continue;
