@@ -26,7 +26,7 @@ import type {
   RouteParameter,
   ScanContext,
 } from "../core/types.js";
-import type { PhpAnalysis } from "../lang/php/index.js";
+import type { PhpAnalysis, PhpClass } from "../lang/php/index.js";
 import { phpStringText, parseRulesMethod, resolvePhpClass, findPhpMethod } from "../lang/php/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
@@ -1068,6 +1068,18 @@ function interpretResponse(
     const selfFactory = resolveSelfFactory(expression, model, gaps, handler, factoryVisited);
     if (selfFactory) return selfFactory;
 
+    // PostResource::collection($models) / PostResource::make($model), including
+    // resource classes imported under an alias or not suffixed "Resource".
+    const scopedResource = chainedStaticResource(expression, model);
+    if (scopedResource) {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema: scopedResource }],
+      };
+    }
+
     const schema = inferStaticModel(expression, model);
     if (schema) {
       return {
@@ -1121,6 +1133,20 @@ function interpretResponse(
         confidence: "high",
         content: [{ mediaType: "application/json", schema }],
       };
+    }
+    // new PostResource($model) where the resource class is imported under an
+    // alias (or simply does not end in "Resource").
+    const aliasedResource = resolveResourceClass(name, expression, model);
+    if (aliasedResource) {
+      const ref = ensurePhpComponent(aliasedResource.fqcn, model);
+      if (ref) {
+        return {
+          statusCode: "200",
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: ref }],
+        };
+      }
     }
     if (name && model.analysis.classes.has(name)) {
       const ref = ensurePhpComponent(name, model);
@@ -1359,6 +1385,29 @@ function inferArrayValue(
 
 
 /**
+ * Resolve a possibly aliased/short resource class name to a class that is a
+ * Laravel API resource (extends JsonResource/ResourceCollection, possibly
+ * through an intermediate base). Works for aliased imports such as
+ * `use App\Http\Resources\Post as PostResource`, where the class name itself
+ * does not end in "Resource". Returns null for non-resource classes.
+ */
+function resolveResourceClass(
+  rawName: string | undefined,
+  at: TsNode | undefined,
+  model: PhpModelIndex,
+): PhpClass | null {
+  if (!rawName) return null;
+  let cls = resolvePhpClass(rawName, model.analysis, at);
+  const visited = new Set<string>();
+  while (cls && !visited.has(cls.fqcn) && visited.size < 16) {
+    visited.add(cls.fqcn);
+    if (cls.resourceKind) return cls;
+    cls = cls.extends ? resolvePhpClass(cls.extends, model.analysis, cls.node) : undefined;
+  }
+  return null;
+}
+
+/**
  * Detect `(new XResource($model))->response()->setStatusCode(201)` chains and
  * return the resource component reference plus the declared status code.
  */
@@ -1394,6 +1443,11 @@ function chainedResourceResponse(
     }
     if (cursor.type === "object_creation_expression") {
       const name = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      const resource = resolveResourceClass(name, cursor, model);
+      if (resource) {
+        const ref = ensurePhpComponent(resource.fqcn, model);
+        if (ref) return { statusCode: sawResponse || statusCode !== "200" ? statusCode : "201", schema: ref };
+      }
       if (name && /Resource$/.test(name) && model.analysis.classes.has(name)) {
         const ref = ensurePhpComponent(name, model);
         if (ref) return { statusCode: sawResponse || statusCode !== "200" ? statusCode : "201", schema: ref };
@@ -1565,6 +1619,12 @@ function chainedStaticResource(expression: TsNode, model: PhpModelIndex): JsonSc
         : names.length >= 2
           ? names[names.length - 2]?.text
           : undefined;
+      const resourceByAlias = resolveResourceClass(className, cursor, model);
+      if (resourceByAlias) {
+        const ref = ensurePhpComponent(resourceByAlias.fqcn, model);
+        if (!ref) return null;
+        return method === "collection" ? { type: "array", items: ref } : ref;
+      }
       if (className && /(?:Resource|Response|Result|Dto)$/.test(className) && model.analysis.classes.has(className)) {
         const ref = ensurePhpComponent(className, model);
         if (!ref) return null;
@@ -1574,6 +1634,8 @@ function chainedStaticResource(expression: TsNode, model: PhpModelIndex): JsonSc
     }
     if (cursor.type === "object_creation_expression") {
       const name = cursor.namedChildren.find((c) => c.type === "name")?.text;
+      const resourceByAlias = resolveResourceClass(name, cursor, model);
+      if (resourceByAlias) return ensurePhpComponent(resourceByAlias.fqcn, model);
       if (name && /(?:Resource|Response|Result|Dto)$/.test(name) && model.analysis.classes.has(name)) {
         return ensurePhpComponent(name, model);
       }
@@ -1864,7 +1926,19 @@ function parseResourceCall(
   const pathArg = args[0]?.namedChildren.find((c) => c.type === "string");
   const handlerArg = args[1];
   const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
-  const controller = handler?.controller ?? resourceControllerName(handlerArg);
+  // Resource controllers are passed as a bare `PostController::class`. Resolve
+  // the short name through the route file's import table so namespaced or
+  // name-colliding controllers (Admin vs Api vs root) still locate their class.
+  const resourceRawName = resourceControllerName(handlerArg);
+  const controller =
+    handler?.controller ??
+    (resourceRawName
+      ? (() => {
+          const cls = resolvePhpClass(resourceRawName, analysis, handlerArg);
+          if (!cls) return resourceRawName;
+          return analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn;
+        })()
+      : null);
 
   // Dot-nested resources ('albums.songs') expand to a nested URI: the
   // collection route is /albums/{album}/songs and the item route appends

@@ -337,6 +337,15 @@ function resourceValueSchema(
     return null;
   }
 
+  // url(...), route(...), asset(...), secure_url(...) always yield a URL string.
+  if (node.type === "function_call_expression") {
+    const fnName = node.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+    if (fnName === "url" || fnName === "route" || fnName === "asset" || fnName === "secure_url") {
+      return { type: "string", format: "uri" };
+    }
+    return null;
+  }
+
   // Nullsafe calls: $this->created_at?->toIso8601String()
   if (node.type === "nullsafe_member_call_expression" || node.type === "member_call_expression") {
     const methodName = node.namedChildren.filter((c) => c.type === "name").pop()?.text;
@@ -506,13 +515,44 @@ function buildResourceSchema(
         : null;
       if (!key) continue;
       const valueNode = element.namedChildren[1];
-      const schema = resourceValueSchema(valueNode, index, stack, mixinModel, cls);
+      let schema = resourceValueSchema(valueNode, index, stack, mixinModel, cls);
+      if ((!schema || Object.keys(schema).length === 0) && isThisAttributeAccess(valueNode)) {
+        // Only apply naming conventions to direct Eloquent attribute reads
+        // ($this->id); method calls and computed expressions stay unknown.
+        schema = eloquentConventionSchema(key);
+      }
       properties[key] = schema ?? {};
     }
   }
 
   if (Object.keys(properties).length === 0) return null;
   return { type: "object", properties };
+}
+
+/** True for `$this->name` member reads (Eloquent resource attribute access). */
+function isThisAttributeAccess(node: TsNode | undefined): boolean {
+  if (!node || node.type !== "member_access_expression") return false;
+  const receiver = node.namedChildren[0];
+  return receiver?.type === "variable_name" && receiver.text === "$this";
+}
+
+/**
+ * Conservative scalar typing for Eloquent resource attributes whose underlying
+ * model column cannot be resolved statically. Follows Laravel naming
+ * conventions; only fills a type when the suffix/prefix is unambiguous.
+ */
+function eloquentConventionSchema(key: string): JsonSchema | null {
+  if (key === "id" || key.endsWith("_id")) return { type: "integer" };
+  if (key.endsWith("_count") || key.endsWith("_total") || /^(?:count|total|amount|quantity|num)$/.test(key)) {
+    return { type: "integer" };
+  }
+  if (key.endsWith("_at") || key.endsWith("_date")) return { type: "string", format: "date-time" };
+  if (key.endsWith("_url") || key.endsWith("_uri") || key === "url" || key === "uri") return { type: "string", format: "uri" };
+  if (key.endsWith("_email") || key === "email") return { type: "string", format: "email" };
+  if (/^(?:is|has|can|should|allow)_[a-z]/.test(key)) return { type: "boolean" };
+  // Resource keys are overwhelmingly scalar Eloquent attributes; a JSON string
+  // is the framework default for columns without an explicit cast.
+  return { type: "string" };
 }
 
 /** Convert a FormRequest rules() table into a JSON Schema object. */
@@ -535,6 +575,26 @@ export function formRulesToSchema(rules: PhpRule[], index: PhpModelIndex): JsonS
         .slice(3)
         .split(",")
         .map((v) => v.trim());
+    }
+    // exists:table,column / unique:table,column — foreign keys and other
+    // columns compared against storage. *_id and an explicit `id` column are
+    // integers; other referenced columns are strings. Only fills a missing type.
+    if (!schema.type) {
+      const relation = tokens.find((t) => t.startsWith("exists:") || t.startsWith("unique:"));
+      if (relation) {
+        const column = relation.split(",")[1]?.trim();
+        if (column === "id" || (!column && field.endsWith("_id")) || field.endsWith("_id")) {
+          schema.type = "integer";
+        } else {
+          schema.type = "string";
+        }
+      }
+    }
+    // Validation rules without an explicit type rule describe scalar HTTP
+    // inputs; Laravel leaves them as the submitted scalar, so default to
+    // string rather than an untyped/unknown property.
+    if (!schema.type && tokens.some((t) => /^(required|nullable|present|sometimes|string|confirmed|same|different|unique|exists|regex|date|alpha[\w-]*|digits|digits_between)$/.test(t) || t.startsWith("exists:") || t.startsWith("unique:"))) {
+      schema.type = "string";
     }
     properties[field] = schema;
     if (!tokens.includes("sometimes") && (tokens.includes("required") || tokens.includes("present"))) required.push(field);
@@ -571,6 +631,9 @@ function ruleStringToSchema(rules: string, _index: PhpModelIndex): JsonSchema {
   else if (tokens.includes("numeric") || tokens.includes("number")) schema = { type: "number" };
   else if (tokens.includes("boolean") || tokens.includes("bool")) schema = { type: "boolean" };
   else if (tokens.some(t => t.startsWith("in:"))) schema = {type: "string"};
+  if (tokens.some(t => t === "date" || t.startsWith("date_format:"))) {
+    schema = { type: "string", format: "date" };
+  }
   if (tokens.some(t => t === "email" || t.startsWith("email:"))) schema.format = "email";
   if (tokens.includes("uuid")) { schema.type = "string"; schema.format = "uuid"; }
   for (const token of tokens) {
