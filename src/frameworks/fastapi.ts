@@ -1291,6 +1291,77 @@ const STRING_SUFFIX_PROPERTIES = new Set([
 ]);
 const INTEGER_SUFFIX_PROPERTIES = new Set(["size", "count", "total", "length"]);
 
+/** Climb to the enclosing module root node. */
+function moduleRootOf(node: TsNode): TsNode {
+  let current = node;
+  while (current.parent) current = current.parent;
+  return current;
+}
+
+const moduleLiteralCache = new WeakMap<TsNode, Map<string, TsNode>>();
+
+/** Resolve a module-level `name = <literal>` initializer in the handler's file. */
+function moduleGlobalInitializer(fn: PyFunction, name: string): TsNode | null {
+  const root = moduleRootOf(fn.node);
+  const cached = moduleLiteralCache.get(root);
+  if (cached) return cached.get(name) ?? null;
+  const bindings = new Map<string, TsNode>();
+  const collect = (statement: TsNode) => {
+    let assignment: TsNode | null = null;
+    if (statement.type === "assignment" || statement.type === "assignment_statement") {
+      assignment = statement;
+    } else if (statement.type === "expression_statement") {
+      const inner = statement.namedChildren[0];
+      if (inner && (inner.type === "assignment" || inner.type === "assignment_statement")) {
+        assignment = inner;
+      }
+    }
+    if (!assignment) return;
+    const lhs = assignment.namedChildren[0];
+    const rhs = assignment.namedChildren[assignment.namedChildren.length - 1];
+    if (lhs?.type === "identifier" && rhs) bindings.set(lhs.text, rhs);
+  };
+  for (const child of root.namedChildren) collect(child);
+  moduleLiteralCache.set(root, bindings);
+  return bindings.get(name) ?? null;
+}
+
+/** Unify object property schemas reached through a dynamic (non-literal) key. */
+function mergePropertySchemas(schemas: JsonSchemaLocal[]): JsonSchemaLocal {
+  const objectSchemas = schemas.filter((s) => s && s.type === "object" && s.properties);
+  if (objectSchemas.length !== schemas.length || objectSchemas.length === 0) {
+    return schemas[0] ?? {};
+  }
+  const properties: Record<string, JsonSchemaLocal> = {};
+  for (const schema of objectSchemas) {
+    for (const [key, value] of Object.entries(schema.properties ?? {})) {
+      if (!(key in properties)) properties[key] = value;
+    }
+  }
+  return { type: "object", properties };
+}
+
+/** Infer the value type of `obj[index]` from a literal dict / module table. */
+function subscriptValueSchema(
+  node: TsNode,
+  fn: PyFunction,
+  modelIndex: ModelIndex,
+  depth: number,
+): JsonSchemaLocal {
+  const objNode = node.namedChildren[0];
+  const indexNode = node.namedChildren[1];
+  if (!objNode) return {};
+  const objSchema = responseValueSchema(objNode, fn, modelIndex, depth + 1);
+  if (!objSchema || objSchema.type !== "object" || !objSchema.properties) return {};
+  const properties = objSchema.properties as Record<string, JsonSchemaLocal>;
+  if (indexNode) {
+    const literalKey = literalString(indexNode);
+    if (literalKey && literalKey in properties) return properties[literalKey] ?? {};
+  }
+  // Dynamic key (a path/query parameter): the result spans every value shape.
+  return mergePropertySchemas(Object.values(properties));
+}
+
 /** Infer the schema of a dict/list value expression returned by a handler. */
 function responseValueSchema(
   node: TsNode,
@@ -1311,7 +1382,24 @@ function responseValueSchema(
     if (param?.annotation) {
       return annotationToSchema(param.annotation, modelIndex) ?? {};
     }
+    // A module-level binding initialized to a literal (e.g. a fake in-memory
+    // table returned directly by a handler) is deterministic evidence. The
+    // literal subtree is acyclic, so resolve it with a fresh depth budget.
+    const globalInit = moduleGlobalInitializer(fn, node.text);
+    if (globalInit) {
+      if (["dictionary", "list", "tuple", "set"].includes(globalInit.type)) {
+        const globalLiteral = literalToSchema(globalInit, 0);
+        if (globalLiteral && Object.keys(globalLiteral).length > 0 && !isLooseLiteralSchema(globalLiteral)) {
+          return globalLiteral;
+        }
+      }
+      return responseValueSchema(globalInit, fn, modelIndex, depth + 1) ?? {};
+    }
     return {};
+  }
+
+  if (node.type === "subscript") {
+    return subscriptValueSchema(node, fn, modelIndex, depth);
   }
 
   if (node.type === "attribute") {
@@ -1408,18 +1496,24 @@ function buildResponses(
 
   if (!successSchema && fn.body && successStatus !== "204") {
     const returned = findFirst(fn.body, (node) => node.type === "return_statement");
-    const value = returned?.namedChildren[0];
+    let value: TsNode | null | undefined = returned?.namedChildren[0];
     if (value) {
       if (value.type === "call") {
         const name = callName(value.namedChildren[0] ?? null);
         if (name && /Response$/.test(name) && name !== "Response") {
           // Typed response wrappers carry no inspectable body here.
-          successSchema = null;
+          value = null;
         }
       }
-      if (!successSchema && (value.type === "dictionary" || value.type === "list")) {
+      if (
+        value &&
+        (value.type === "dictionary" ||
+          value.type === "list" ||
+          value.type === "identifier" ||
+          value.type === "subscript")
+      ) {
         const literal = responseLiteralSchema(value, fn, modelIndex);
-        if (literal) {
+        if (literal && Object.keys(literal).length > 0) {
           successSchema = literal;
           if (isLooseLiteralSchema(literal)) gaps.add("response-schema-unknown");
         }
