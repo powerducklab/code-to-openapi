@@ -365,6 +365,16 @@ function buildCandidate(
 
   const { parameters, requestBody, gaps } = collectHandlerParameters(fn, model, pathParams);
   const responses = collectResponses(fn, rustSerializationIndex(model), gaps);
+  // Explicit `Err(StatusCode::NOT_FOUND)` arms return an empty body at that
+  // status (StatusCode implements IntoResponse directly). Recover them from the
+  // body so Result<T, StatusCode> handlers document their error responses.
+  const presentStatus = new Set(responses.map((r) => r.statusCode));
+  for (const status of bodyErrorStatuses(fn)) {
+    if (!presentStatus.has(status)) {
+      responses.push({ statusCode: status, description: "", confidence: "high" });
+      presentStatus.add(status);
+    }
+  }
 
   return {
     method: verb,
@@ -522,6 +532,26 @@ function collectHandlerParameters(
       continue;
     }
 
+    // Untagged `Bytes` / `String` parameters are axum body extractors (they
+    // implement FromRequest directly): Bytes takes any raw body, String a text
+    // body. They are distinct from the generic Path/Query/State wrappers.
+    if (extractor === "Bytes") {
+      requestBody = {
+        required: true,
+        content: [{ mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } }],
+        confidence: "high",
+      };
+      continue;
+    }
+    if (extractor === "String") {
+      requestBody = {
+        required: true,
+        content: [{ mediaType: "text/plain", schema: { type: "string" } }],
+        confidence: "high",
+      };
+      continue;
+    }
+
     // Unknown extractors are left out rather than guessed.
   }
 
@@ -561,6 +591,25 @@ function genericBaseName(node: TsNode): string | null {
       c.type === "scoped_type_identifier",
   );
   return base?.text.split("::").pop() ?? null;
+}
+
+/** Status codes returned through explicit `Err(StatusCode::X)` arms. */
+function bodyErrorStatuses(fn: TsNode): string[] {
+  const statuses: string[] = [];
+  for (const errCall of findAll(
+    fn,
+    (n) =>
+      n.type === "call_expression" &&
+      n.namedChildren[0]?.type === "identifier" &&
+      n.namedChildren[0]?.text === "Err",
+  )) {
+    for (const sc of findAll(errCall, (n) => n.type === "scoped_identifier")) {
+      const segment = sc.text.split("::").pop()!;
+      const status = STATUS_CONSTANTS[segment];
+      if (status && !statuses.includes(status)) statuses.push(status);
+    }
+  }
+  return statuses;
 }
 
 function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
@@ -705,6 +754,16 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
           content: [
             { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
           ],
+        },
+      ];
+    }
+    if (isTextType(resultInner)) {
+      return [
+        {
+          statusCode: "200",
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "text/plain", schema: { type: "string" } }],
         },
       ];
     }
