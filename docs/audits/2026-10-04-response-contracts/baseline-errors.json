@@ -136,5 +136,50 @@
       }
     ],
     "falseMismatches": []
+  },
+  "nethttp": {
+    "missingRoutes": [],
+    "falseMismatches": [
+      {
+        "whereContains": "response",
+        "fieldContains": "/required",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "Response DTOs in pkg/health/check.go (appName,version), pkg/status/response.go (status,message) and internal/passport/models/*.go declare JSON tags WITHOUT omitempty, so Go encoding/json always emits the key. The baseline marks these fields optional (required=false) across the board.",
+        "resolution": "A field without omitempty is always present in the JSON object even when its value is zero/empty. The scanner's required=true is correct; the baseline systematically omits required keys."
+      },
+      {
+        "whereContains": "get /users query:offset",
+        "fieldContains": "/minimum",
+        "baseline": 0,
+        "scanner": null,
+        "evidence": "internal/passport/handlers.go parsePagination(): offset,_=strconv.Atoi(...); if offset<0 { offset=0 }. Out-of-range or non-numeric input is normalized, never rejected with 4xx.",
+        "resolution": "minimum:0 describes an internal normalization result, not an accepted-value constraint. The endpoint accepts any string and clamps it, so emitting minimum would falsely imply rejection. The scanner correctly omits it."
+      },
+      {
+        "whereContains": "get /users query:limit",
+        "fieldContains": "/minimum",
+        "baseline": 1,
+        "scanner": null,
+        "evidence": "parsePagination(): limit,_=Atoi(...); if limit<=0 || limit>100 { limit=25 }. Invalid or out-of-range input is replaced with a default, not rejected.",
+        "resolution": "No minimum is enforced on accepted input; the value is normalized. The scanner correctly omits minimum."
+      },
+      {
+        "whereContains": "get /users query:limit",
+        "fieldContains": "/maximum",
+        "baseline": 100,
+        "scanner": null,
+        "evidence": "parsePagination() maps limit>100 to the default 25 rather than rejecting the request with a 4xx status.",
+        "resolution": "maximum:100 is a normalization threshold, not a validation constraint. The endpoint accepts larger values (and clamps them), so maximum is correctly omitted."
+      },
+      {
+        "whereContains": "put /users/{id} path:id",
+        "fieldContains": "/type",
+        "baseline": "integer",
+        "scanner": "string",
+        "evidence": "handleUpdateUser (internal/passport/handlers.go:114) decodes the entity from the request body and never reads or converts the {id} path value (no strconv.Atoi on the path). Go 1.22 ServeMux path values are always strings.",
+        "resolution": "With no numeric conversion or use, the accepted path value is a string. The baseline assumes integer; the scanner's string matches the actual contract."
+      }
+    ]
   }
 }

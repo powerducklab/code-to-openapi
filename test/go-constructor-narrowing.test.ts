@@ -71,3 +71,111 @@ func main() { e := echo.New(); e.GET("/list", handle) }`,
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// An interface-typed field dispatches to a concrete implementation. When every
+// implementation normalizes its slice result (nil guard), the wire value is
+// provably non-null even though the declared interface return is a nullable slice.
+it("proves non-nil slices through interface method implementations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "go-iface-narrow-"));
+  try {
+    await writeFile(join(root, "go.mod"), "module example\ngo 1.22");
+    await writeFile(
+      join(root, "main.go"),
+      `package main
+import("encoding/json";"net/http")
+type Item struct { Name string \x60json:"name"\x60 }
+type Storage interface { List() ([]Item, error) }
+type goodService struct{}
+func (s *goodService) List() ([]Item, error) {
+\tvar items []Item
+\tfor _, x := range []Item{{Name:"a"}} { items = append(items, x) }
+\tif items == nil { items = []Item{} }
+\treturn items, nil
+}
+type Server struct{ store Storage }
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+\titems, _ := s.store.List()
+\tjson.NewEncoder(w).Encode(map[string]any{"items": items})
+}
+func main(){ s:=&Server{store:&goodService{}}; m:=http.NewServeMux(); m.HandleFunc("GET /items", s.list) }`,
+    );
+    const doc = (await (await scanProject({ root })).convert()).document as any;
+    const schema = doc.paths["/items"].get.responses["200"].content["application/json"].schema;
+    expect(schema.properties.items.type).toBe("array");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// When an implementation can return nil on another branch, the slice must stay
+// nullable; the proof never forces non-null against a real nil return.
+it("keeps slices nullable when an implementation has a nil return branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "go-iface-nil-"));
+  try {
+    await writeFile(join(root, "go.mod"), "module example\ngo 1.22");
+    await writeFile(
+      join(root, "main.go"),
+      `package main
+import("encoding/json";"net/http")
+type Item struct { Name string \x60json:"name"\x60 }
+type Storage interface { List() ([]Item, error) }
+type maybeService struct{}
+func (s *maybeService) List() ([]Item, error) {
+\tif true { return nil, nil }
+\treturn []Item{{Name:"a"}}, nil
+}
+type Server struct{ store Storage }
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+\titems, _ := s.store.List()
+\tjson.NewEncoder(w).Encode(map[string]any{"items": items})
+}
+func main(){ s:=&Server{store:&maybeService{}}; m:=http.NewServeMux(); m.HandleFunc("GET /items", s.list) }`,
+    );
+    const doc = (await (await scanProject({ root })).convert()).document as any;
+    const schema = doc.paths["/items"].get.responses["200"].content["application/json"].schema;
+    expect(schema.properties.items.type).toContain("null");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Hand-written validators (`if u.Field == ""` / `u.Field.IsZero()` -> 422) define
+// required request fields even though the struct tags carry no binding rule.
+it("recovers required request fields from a hand-written validate function", async () => {
+  const root = await mkdtemp(join(tmpdir(), "go-validate-"));
+  try {
+    await writeFile(join(root, "go.mod"), "module example\ngo 1.22");
+    await writeFile(
+      join(root, "main.go"),
+      `package main
+import("encoding/json";"net/http";"time")
+type User struct {
+\tName string \x60json:"name"\x60
+\tDob  time.Time \x60json:"dob"\x60
+\tNote string \x60json:"note"\x60
+}
+func validateUser(u User) []string {
+\tvar errs []string
+\tif u.Name == "" { errs = append(errs, "name is required") }
+\tif u.Dob.IsZero() { errs = append(errs, "dob is required") }
+\treturn errs
+}
+func create(w http.ResponseWriter, r *http.Request) {
+\tvar u User
+\tif err := json.NewDecoder(r.Body).Decode(&u); err != nil { w.WriteHeader(400); return }
+\tif errs := validateUser(u); len(errs) > 0 { w.WriteHeader(422); return }
+\tjson.NewEncoder(w).Encode(u)
+}
+func main(){ m:=http.NewServeMux(); m.HandleFunc("POST /users", create) }`,
+    );
+    const doc = (await (await scanProject({ root })).convert()).document as any;
+    const schema = doc.paths["/users"].post.requestBody.content["application/json"].schema;
+    expect(schema.$ref).toBeUndefined();
+    expect(schema.required.sort()).toEqual(["dob", "name"]);
+    // `note` is read by no emptiness check and must not be marked required.
+    expect(schema.required).not.toContain("note");
+    expect(schema.properties.note).toBeTruthy();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -28,6 +28,8 @@ import {
   goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
+  extractGoValidatorRequired,
+  goTypeBaseName,
   type GoModelIndex,
 } from "./schema.js";
 import type { TsNode } from "../treesitter/runtime.js";
@@ -137,6 +139,41 @@ export function referencedTypeOf(arg: TsNode | undefined, body: TsNode): TsNode 
   const target = arg.type === "unary_expression" ? arg.namedChildren[0] : arg;
   if (!target || target.type !== "identifier") return null;
   return resolveLocalType(body, target.text);
+}
+
+/**
+ * When the decoded variable is passed to a hand-written validator in this
+ * handler (validateX(varName) or validateX(&varName)), return the required
+ * JSON field set recorded for the validator's parameter type.
+ */
+function validatorRequiredFields(
+  body: TsNode,
+  decodedVar: string,
+  analysis: GoAnalysis,
+  validatorRequired: Map<string, Set<string>>,
+): Set<string> | null {
+  for (const call of findAll(body, node => node.type === "call_expression")) {
+    const callee = call.namedChildren[0];
+    const calleeName = callee?.type === "identifier" ? callee.text
+      : callee?.type === "selector_expression" ? callee.namedChildren[1]?.text : undefined;
+    if (!calleeName || !/^(validate|check|require|ensure)/i.test(calleeName)) continue;
+    const firstArg = positionalArguments(call)[0];
+    const argName = firstArg?.type === "unary_expression"
+      ? firstArg.namedChildren.find(child => child.type === "identifier")?.text
+      : firstArg?.type === "identifier" ? firstArg.text : undefined;
+    if (argName !== decodedVar) continue;
+    // Resolve the validator's first parameter type name.
+    const candidates = analysis.functions.get(calleeName) ?? [];
+    for (const fn of candidates) {
+      const param = fn.node.namedChildren
+        .find(node => node.type === "parameter_list")?.namedChildren
+        .find(node => node.type === "parameter_declaration");
+      const typeNode = param?.childForFieldName?.("type") ?? param?.namedChildren.at(-1);
+      const baseName = goTypeBaseName(typeNode);
+      if (baseName && validatorRequired.has(baseName)) return validatorRequired.get(baseName)!;
+    }
+  }
+  return null;
 }
 
 export interface StdHandlerEvidence {
@@ -506,6 +543,9 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
     //   decoder := json.NewDecoder(r.Body); decoder.Decode(&x)   (split)
     //   json.Unmarshal(data, &x)
     const decoderVars = new Set<string>();
+    // Required fields proven by hand-written validators (validateX with
+    // `if p.Field == ""` / `p.Field.IsZero()` checks), keyed by type name.
+    const validatorRequired = extractGoValidatorRequired(analysis, index);
     for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
       const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
       if (lists.length < 2) continue;
@@ -538,10 +578,28 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       }
       const typeNode = referencedTypeOf(targetArg, body);
       if (typeNode) {
+        const model = opts.inputModel ?? index;
+        let bodySchema: JsonSchema = goTypeToSchema(typeNode, model);
+        // Apply hand-written validator required fields when the decoded value
+        // is passed to a validateX(...) call in the same handler.
+        const decodedVar = targetArg?.type === "unary_expression"
+          ? targetArg.namedChildren.find(child => child.type === "identifier")?.text
+          : targetArg?.type === "identifier" ? targetArg.text : undefined;
+        const requiredFields = decodedVar
+          ? validatorRequiredFields(body, decodedVar, analysis, validatorRequired)
+          : null;
+        if (requiredFields?.size) {
+          const component = bodySchema.$ref
+            ? model.components.get(String(bodySchema.$ref).split("/").pop()!)
+            : bodySchema;
+          if (component) {
+            bodySchema = { ...structuredClone(component), required: [...requiredFields] };
+          }
+        }
         requestBody = {
           required: true,
           confidence: "high",
-          content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, opts.inputModel ?? index), confidence: "high" }],
+          content: [{ mediaType: "application/json", schema: bodySchema, confidence: "high" }],
         };
       } else {
         gaps.add("body-schema-unknown");

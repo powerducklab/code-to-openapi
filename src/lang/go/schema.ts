@@ -124,6 +124,16 @@ function nullableGoSchema(schema: JsonSchema): JsonSchema {
   return {anyOf: [schema, {type: 'null'}]};
 }
 
+/** Whether a schema admits null (type union or anyOf null branch). */
+function isNullableGoSchema(schema: JsonSchema | null | undefined): boolean {
+  if (!schema) return true; // an unproven/empty schema is treated as nullable
+  if (Array.isArray(schema.type)) return schema.type.includes('null');
+  if (Array.isArray(schema.anyOf)) return schema.anyOf.some(branch => (branch as JsonSchema)?.type === 'null');
+  // A concrete type or $ref is non-null; an empty/unresolved schema is not proof.
+  if (schema.type || schema.$ref) return false;
+  return true;
+}
+
 function nonNullGoSchema(schema: JsonSchema): JsonSchema {
   if (Array.isArray(schema.type)) {
     const type = schema.type.filter(value => value !== 'null');
@@ -754,7 +764,128 @@ function constructorNonNullPaths(
  * type is opaque (e.g. `render.Renderer` or `[]render.Renderer`) follow the
  * function body to learn the concrete struct it builds. Also extracts a
  * statically provable HTTP status from an `HTTPStatusCode: <code>` literal.
- */export function followCallToSchema(
+ */
+
+/** Receiver base type name (pointer stripped) for a method declaration. */
+function methodReceiverName(method: GoFunction): string | null {
+  const param = method.receiver?.namedChildren.find(child => child.type === 'parameter_declaration') ?? method.receiver;
+  const typeNode = param?.childForFieldName?.('type');
+  return typeNode?.text?.replace(/^\*/, '') ?? null;
+}
+
+/**
+ * Resolve an interface method call to the concrete receiver methods that
+ * implement the interface in the same package. A candidate qualifies only if
+ * its receiver type implements the full interface method set, so an unrelated
+ * same-named method is never mistaken for the implementation.
+ */
+function interfaceMethodImplementations(call: TsNode, methodName: string, analysis: GoAnalysis): GoFunction[] {
+  const callee = call.type === 'call_expression' ? call.namedChildren[0] : call;
+  if (callee?.type !== 'selector_expression') return [];
+  const receiver = callee.namedChildren[0];
+  if (!receiver) return [];
+  const ifaceType = goExpressionType(receiver, analysis);
+  if (!ifaceType) return [];
+  const def = goTypeDeclaration(ifaceType, analysis);
+  if (!def || def.type.type !== 'interface_type') return [];
+  const ifaceMethods = new Set(def.type.namedChildren
+    .filter(node => node.type === 'method_spec')
+    .map(node => node.namedChildren[0]?.text)
+    .filter((text): text is string => !!text));
+  if (!ifaceMethods.has(methodName)) return [];
+
+  // Implementations can live in a different package (interface in models,
+  // concrete service in the parent package); the full method-set match is the
+  // binding constraint, so a same-named unrelated method is still rejected.
+  const sameName = analysis.methods.filter(method => method.name === methodName && method.body);
+  const implementations = sameName.filter(method => {
+    const receiverName = methodReceiverName(method);
+    if (!receiverName) return false;
+    const provided = new Set(analysis.methods
+      .filter(other => methodReceiverName(other) === receiverName)
+      .map(other => other.name));
+    for (const required of ifaceMethods) {
+      if (!provided.has(required)) return false;
+    }
+    return true;
+  });
+  return implementations;
+}
+
+/** Base name of a possibly qualified/pointer type node (models.User -> User). */
+export function goTypeBaseName(typeNode: TsNode | undefined | null): string | null {
+  if (!typeNode) return null;
+  if (typeNode.type === 'pointer_type') return goTypeBaseName(typeNode.namedChildren[0]);
+  if (typeNode.type === 'qualified_type') return typeNode.namedChildren[1]?.text ?? null;
+  if (typeNode.type === 'type_identifier' || typeNode.type === 'identifier') return typeNode.text;
+  return null;
+}
+
+/**
+ * Extract required request fields from hand-written validator functions:
+ *   func validateUser(u User) []string {
+ *     if u.Name == "" { errs = append(errs, ...) }
+ *     if u.Dob.IsZero() { ... }
+ *   }
+ * Returns a map keyed by the parameter's (base) type name to the set of JSON
+ * field names that are rejected when empty/zero. Only explicit emptiness checks
+ * are collected, so a field that is merely read is never marked required.
+ */
+export function extractGoValidatorRequired(analysis: GoAnalysis, index: GoModelIndex): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const record = (typeName: string, goFieldName: string) => {
+    let jsonName = goFieldName;
+    const struct = index.byName.get(typeName);
+    if (struct) {
+      const match = struct.fields.find(field => field.goName === goFieldName);
+      if (match) {
+        const tagged = jsonTag(match);
+        if (tagged.name) jsonName = tagged.name;
+      }
+    }
+    const set = out.get(typeName) ?? new Set<string>();
+    set.add(jsonName);
+    out.set(typeName, set);
+  };
+
+  for (const [fnName, fns] of analysis.functions) {
+    if (!/^(validate|check|require|ensure)/i.test(fnName)) continue;
+    for (const fn of fns) {
+      if (!fn.body || !fn.node) continue;
+      const paramList = fn.node.namedChildren.find(node => node.type === 'parameter_list');
+      const firstParam = paramList?.namedChildren.find(node => node.type === 'parameter_declaration');
+      if (!firstParam) continue;
+      const paramName = firstParam.namedChildren.find(node => node.type === 'identifier')?.text;
+      const typeName = goTypeBaseName(firstParam.childForFieldName?.('type') ?? firstParam.namedChildren.at(-1));
+      if (!paramName || !typeName) continue;
+
+      // `if param.Field == ""` / `"" == param.Field` emptiness checks.
+      for (const binary of findAll(fn.body, node => node.type === 'binary_expression')) {
+        const operands = binary.namedChildren;
+        const selector = operands.find(node => node.type === 'selector_expression' && node.namedChildren[0]?.text === paramName);
+        const literal = operands.find(node => node !== selector && node.type === 'interpreted_string_literal' && node.text === '""');
+        if (selector && literal && binary.text.includes('==')) {
+          const fieldName = selector.namedChildren[1]?.text;
+          if (fieldName) record(typeName, fieldName);
+        }
+      }
+      // `if param.Field.IsZero()` time/value zero checks.
+      for (const call of findAll(fn.body, node => node.type === 'call_expression')) {
+        const method = call.namedChildren[0];
+        if (method?.type === 'selector_expression' && method.namedChildren[1]?.text === 'IsZero') {
+          const receiver = method.namedChildren[0];
+          if (receiver?.type === 'selector_expression' && receiver.namedChildren[0]?.text === paramName) {
+            const fieldName = receiver.namedChildren[1]?.text;
+            if (fieldName) record(typeName, fieldName);
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export function followCallToSchema(
   call: TsNode,
   analysis: GoAnalysis,
   index: GoModelIndex,
@@ -773,19 +904,48 @@ function constructorNonNullPaths(
     const resolved = localGoTypeToSchema(resultType, analysis, index);
     schema = Object.keys(resolved).length ? resolved : null;
     // A declared pointer can be nil; prove non-null constructions/local flows
-    // independently for every return. Do not infer this from a name.
-    if (schema && resultType.type === 'pointer_type' && fn.body) {
-      const returns = findAll(fn.body, node => node.type === 'return_statement');
-      const directAddress = (statement: TsNode) => {
+    // independently for every return. Do not infer this from a name. The same
+    // proof applies to declared slices: make()/append plus a nil guard proves
+    // the success-path value serializes as [] rather than null. An interface
+    // method has no body, so resolve it to every concrete implementation and
+    // require the proof on each one before narrowing.
+    if (schema && (resultType.type === 'pointer_type' || resultType.type === 'slice_type')) {
+      const isSlice = resultType.type === 'slice_type';
+      const targets = fn.body ? [fn] : interfaceMethodImplementations(call, name, analysis);
+      const directAddress = (target: GoFunction) => (statement: TsNode) => {
         let owner = statement.parent;
-        while (owner && owner.id !== fn.body!.id) {
+        while (owner && target.body && owner.id !== target.body.id) {
           if (owner.type === 'func_literal') return false;
           owner = owner.parent;
         }
         const expression = statement.namedChildren.find(node => node.type === 'expression_list')?.namedChildren[0];
-        return !!expression && (provenNonNilConstruction(expression, fn.body!, analysis) || provenNonNilLocalValue(expression, fn.body!, analysis));
+        if (!expression || !target.body) return false;
+        if (expression.type === 'nil') return false;
+        if (isSlice) {
+          if (expression.type === 'composite_literal') return expression.namedChildren[0]?.type === 'slice_type';
+          if (expression.type === 'identifier') return provenNonNilLocalValue(expression, target.body, analysis);
+          if (expression.type === 'call_expression') return provenNonNilConstruction(expression, target.body, analysis);
+          return false;
+        }
+        return provenNonNilConstruction(expression, target.body, analysis) || provenNonNilLocalValue(expression, target.body, analysis);
       };
-      if (returns.length && returns.every(directAddress)) schema = nonNullGoSchema(schema);
+      // Only returns directly owned by this function body; a return nested in
+      // a func-literal callback (e.g. sort.Slice) belongs to that callback.
+      const ownedReturns = (body: TsNode): TsNode[] => findAll(body, node => node.type === 'return_statement')
+        .filter(statement => {
+          let owner = statement.parent;
+          while (owner && owner.id !== body.id) {
+            if (owner.type === 'func_literal') return false;
+            owner = owner.parent;
+          }
+          return true;
+        });
+      const proven = targets.length > 0 && targets.every(target => {
+        if (!target.body) return false;
+        const returns = ownedReturns(target.body);
+        return returns.length > 0 && returns.every(directAddress(target));
+      });
+      if (proven) schema = nonNullGoSchema(schema);
     }
   }
 
@@ -898,7 +1058,11 @@ export function resolveGoPayloadValue(
     const inferredType = goExpressionType(node, analysis);
     if (inferredType) {
       const inferred = localGoTypeToSchema(inferredType, analysis, index);
-      if (Object.keys(inferred).length) return { schema: handlerBody && provenNonNilLocalValue(node, handlerBody, analysis) ? nonNullGoSchema(inferred) : inferred, status: null };
+      if (Object.keys(inferred).length) {
+        const proven = handlerBody && (provenNonNilLocalValue(node, handlerBody, analysis) ||
+          (inferredType.type === "slice_type" && provenNonNilSliceVariable(node, handlerBody, analysis, index, vars)));
+        return { schema: proven ? nonNullGoSchema(inferred) : inferred, status: null };
+      }
     }
     // Local variable assigned a constructor call: resp := NewArticleResponse(...)
     if (handlerBody) {
@@ -951,9 +1115,24 @@ function provenNonNilLocalValue(value: TsNode, body: TsNode, analysis: GoAnalysi
   const lists = declaration.namedChildren.filter(child => child.type === 'expression_list');
   const position = declaration.type === 'var_spec' ? declaration.namedChildren.filter(child => child.type === 'identifier').findIndex(child => child.text === value.text) : lists[0]?.namedChildren.findIndex(child => child.text === value.text) ?? -1;
   const initializer = lists.at(-1)?.namedChildren[position];
-  if (!initializer || !provenNonNilConstruction(initializer, body, analysis)) return false;
+  // A nil guard `if x == nil { x = []T{} }` normalizes a zero-value slice to an
+  // empty, non-nil slice before return. Treat it as a proven allocation.
+  const nilGuards = findAll(body, node => {
+    if (node.type !== 'if_statement') return false;
+    const condition = node.namedChildren.find(child => /==/.test(child.text ?? '') && /\bnil\b/.test(child.text ?? ''));
+    const normalized = (condition?.text ?? '').replace(/\s+/g, ' ').trim();
+    if (normalized !== `${value.text} == nil` && normalized !== `nil == ${value.text}`) return false;
+    return findAll(node, assignment => assignment.type === 'assignment_statement' &&
+      assignment.namedChildren[0]?.namedChildren.some(child => child.text === value.text) &&
+      assignment.namedChildren[1]?.namedChildren.some(child => child.type === 'composite_literal' && child.namedChildren[0]?.type === 'slice_type')).length > 0;
+  });
+  const nilGuard = nilGuards.length > 0;
+  const baseProven = (initializer && provenNonNilConstruction(initializer, body, analysis)) || nilGuard;
+  if (!baseProven) return false;
   if (findAll(body, node => node.type === 'unary_expression' && /^&\s*/.test(node.text) && node.namedChildren[0]?.text === value.text).length) return false;
-  const assignments = findAll(body, node => node.type === 'assignment_statement' && node.namedChildren[0]?.namedChildren.some(child => child.text === value.text));
+  const guardIds = new Set(nilGuards.flatMap(guard => findAll(guard, node => node.type === 'assignment_statement').map(node => node.id)));
+  const assignments = findAll(body, node => node.type === 'assignment_statement' &&
+    node.namedChildren[0]?.namedChildren.some(child => child.text === value.text) && !guardIds.has(node.id));
   const appendShadowed = analysis.functions.has('append') || analysis.vars.has('append') || findAll(body.parent ?? body, node => ['short_var_declaration','var_spec','parameter_declaration'].includes(node.type) &&
     (node.type === 'short_var_declaration' ? node.namedChildren[0]?.namedChildren : node.namedChildren)?.some(child => child.type === 'identifier' && child.text === 'append')).length > 0;
   return assignments.every(assignment => {
@@ -962,6 +1141,80 @@ function provenNonNilLocalValue(value: TsNode, body: TsNode, analysis: GoAnalysi
     const right = sides[1]?.namedChildren[at];
     return !appendShadowed && right?.type === 'call_expression' && right.namedChildren[0]?.text === 'append' && positionalArguments(right)[0]?.text === value.text;
   });
+}
+
+/**
+ * Prove a slice-typed local variable can never be nil on the success path.
+ * Unlike provenNonNilLocalValue this accepts the full set of non-nil slice
+ * producers: make()/append, an empty slice literal `[]T{}`, a slice expression
+ * `s[lo:hi]` (always non-nil), or a call whose followed result is non-null.
+ * An explicit `= nil` write or any unrecognized right-hand side fails closed.
+ */
+function provenNonNilSliceVariable(
+  value: TsNode,
+  body: TsNode,
+  analysis: GoAnalysis,
+  index: GoModelIndex,
+  vars: Map<string, { value: TsNode | null }>,
+): boolean {
+  const name = value.text;
+  // Address escape (`mutate(&items)`) lets another function assign nil; fail closed.
+  if (findAll(body, node => node.type === 'unary_expression' && /^&\s*/.test(node.text) && node.namedChildren[0]?.text === name).length) {
+    return false;
+  }
+  // A locally shadowed `append` may return nil; never trust `x = append(...)` then.
+  const appendShadowed = analysis.functions.has('append') || analysis.vars.has('append') || findAll(body.parent ?? body, node =>
+    ['short_var_declaration', 'var_spec', 'parameter_declaration'].includes(node.type) &&
+    (node.type === 'short_var_declaration' ? node.namedChildren[0]?.namedChildren : node.namedChildren)?.some(child => child.type === 'identifier' && child.text === 'append')).length > 0;
+  const leftIdentifiers = (node: TsNode): TsNode[] => {
+    if (node.type === 'short_var_declaration' || node.type === 'assignment_statement') {
+      const list = node.namedChildren.find(child => child.type === 'expression_list');
+      return list ? list.namedChildren.filter(child => child.type === 'identifier') : [];
+    }
+    return node.namedChildren.filter(child => child.type === 'identifier');
+  };
+  const writes = findAll(body, node =>
+    (node.type === 'short_var_declaration' || node.type === 'var_spec' || node.type === 'assignment_statement') &&
+    leftIdentifiers(node).some(child => child.text === name));
+  if (!writes.length) return false;
+
+  const classify = (rhs: TsNode | undefined): 'nil' | 'anchor' | 'neutral' => {
+    if (!rhs) return 'neutral'; // `var x []T` with no initializer; decided by later writes
+    if (rhs.type === 'nil') return 'nil';
+    if (rhs.type === 'composite_literal' && rhs.namedChildren[0]?.type === 'slice_type') return 'anchor';
+    if (rhs.type === 'slice_expression') return 'anchor';
+    if (rhs.type === 'call_expression') {
+      const callee = rhs.namedChildren[0]?.text;
+      if (callee === 'make') return provenNonNilConstruction(rhs, body, analysis) ? 'anchor' : 'neutral';
+      if (callee === 'append') return appendShadowed ? 'nil' : 'neutral'; // append zero times leaves nil
+      const followed = followCallToSchema(rhs, analysis, index, vars, 1)?.schema;
+      return followed && !isNullableGoSchema(followed) ? 'anchor' : 'neutral';
+    }
+    return 'neutral';
+  };
+
+  let hasAnchor = false;
+  for (const write of writes) {
+    let owner = write.parent;
+    while (owner && owner.id !== body.id) {
+      if (owner.type === 'func_literal') return false; // closure writes are not tracked here
+      owner = owner.parent;
+    }
+    const lists = write.namedChildren.filter(child => child.type === 'expression_list');
+    const positions: number[] = [];
+    if (write.type === 'var_spec') {
+      write.namedChildren.filter(child => child.type === 'identifier').forEach((id, i) => { if (id.text === name) positions.push(i); });
+    } else {
+      (lists[0]?.namedChildren ?? []).forEach((id, i) => { if (id.text === name) positions.push(i); });
+    }
+    for (const at of positions) {
+      const rhs = write.type === 'var_spec' ? lists[0]?.namedChildren[at] : lists[1]?.namedChildren[at];
+      const kind = classify(rhs);
+      if (kind === 'nil') return false;
+      if (kind === 'anchor') hasAnchor = true;
+    }
+  }
+  return hasAnchor;
 }
 
 /** Find `name := Foo(...)` / `name = Foo(...)` and return the call node. */
