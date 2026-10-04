@@ -1,3 +1,5 @@
+import { belongsToPhpFunction } from "../lang/php/scope.js";
+import {mergeResponseVariants} from "../core/response-variants.js";
 /**
  * Laravel framework pack (PHP, tree-sitter based).
  *
@@ -25,7 +27,7 @@ import type {
   ScanContext,
 } from "../core/types.js";
 import type { PhpAnalysis } from "../lang/php/index.js";
-import { phpStringText, parseRulesMethod } from "../lang/php/index.js";
+import { phpStringText, parseRulesMethod, resolvePhpClass, findPhpMethod } from "../lang/php/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
@@ -37,7 +39,9 @@ import {
   type PhpModelIndex,
 } from "../lang/php/schema.js";
 
-const VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "any"]);
+import { declaredPhpPropertySchema } from "../lang/php/response.js";
+
+const VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "trace"]);
 const RESOURCE_VERBS = new Set(["resource", "apiresource"]);
 
 const COLLECTION_METHODS = new Set([
@@ -112,9 +116,12 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
           continue;
         }
         if (name !== "group" && name !== "prefix") {
-          if (!VERBS.has(name)) continue;
+          if (!VERBS.has(name) && name !== "any" && name !== "match") continue;
           const prefix = groupPrefixChain(call);
-          const verbs = name === "any" ? ["get", "post", "put", "patch", "delete"] : expandMatchVerbs(name, args);
+          const verbs = name === "any" ? ["get", "head", "post", "put", "patch", "delete", "options"] : expandMatchVerbs(name, args);
+          if (!verbs.length) {
+            unresolved.push({reason: "dynamic-methods", message: "Cannot statically resolve Laravel Route::match HTTP methods", origin: {file: rel, line: call.startPosition.row + 1}});
+          }
           for (const verb of verbs) {
             // Route::match(['get','post'], $path, $handler) shifts the path
             // and handler past the verb-list argument.
@@ -246,11 +253,12 @@ function expandMatchVerbs(name: string, args: TsNode[]): string[] {
   // Route::match(['get','post'], ...)
   const first = args[0];
   const array = first?.namedChildren.find((c) => c.type === "array_creation_expression");
-  if (!array) return ["get"];
-  const verbs = childrenOfType(array, "string")
+  if (!array) return [];
+  const verbs = childrenOfType(array, "array_element_initializer")
+    .map(element => element.namedChildren.find(child => child.type === "string"))
     .map((s) => phpStringText(s)?.toLowerCase() ?? "")
-    .filter((v) => VERBS.has(v) && v !== "any");
-  return verbs.length ? verbs : ["get"];
+    .filter((v) => VERBS.has(v));
+  return [...new Set(verbs)];
 }
 
 function buildRoute(
@@ -367,19 +375,9 @@ function resolveHandler(
   // by mapping the first segment through the import table.
   const resolveClassName = (raw: string | null): string | null => {
     if (!raw) return null;
-    if (raw.includes("\\")) {
-      const segments = raw.split("\\").filter(Boolean);
-      const mapped = routeImports?.get(segments[0]!);
-      if (mapped) {
-        const fqcn = [mapped, ...segments.slice(1)].join("\\");
-        return fqcn.split("\\").pop() ?? raw;
-      }
-      raw = segments[segments.length - 1] ?? raw;
-    }
-    if (analysis.classes.has(raw)) return raw;
-    const fqcn = routeImports?.get(raw);
-    const declared = fqcn?.split("\\").pop();
-    return declared && analysis.classes.has(declared) ? declared : raw;
+    const cls = resolvePhpClass(raw, analysis, handlerArg);
+    if (!cls) return raw;
+    return analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn;
   };
 
   // Read the class reference from a ::class constant access, excluding the
@@ -420,7 +418,7 @@ function resolveHandler(
     const controller = resolveClassName(controllerRaw);
     const method = methodString ? phpStringText(methodString) : null;
     const cls = controller ? analysis.classes.get(controller) : null;
-    const node = cls && method ? cls.methods.get(method) ?? null : null;
+    const node = cls && method ? findPhpMethod(cls, method, analysis) ?? null : null;
     if (node) return { node, controller, method };
     if (controller && method) {
       // Controller outside the scanned tree: return a synthetic marker.
@@ -434,7 +432,7 @@ function resolveHandler(
     const controllerRaw = classRefName(inner);
     const controller = resolveClassName(controllerRaw);
     const cls = controller ? analysis.classes.get(controller) : null;
-    const node = cls?.methods.get("__invoke") ?? null;
+    const node = cls ? findPhpMethod(cls, "__invoke", analysis) ?? null : null;
     if (node) return { node, controller, method: "__invoke" };
   }
 
@@ -551,22 +549,30 @@ function collectParameters(
           ? (typeNode.namedChildren.find((c) => c.type === "named_type")?.namedChildren.find((x) => x.type === "name")?.text ?? "")
           : typeNode.text;
     const shortType = typeName.split("\\").pop()!;
-    const cls = analysis.classes.get(shortType);
+    const cls = resolvePhpClass(typeName, analysis, typeNode);
 
     // FormRequest subclass -> JSON or multipart request body from rules().
-    if (cls && (cls.formRules.length || cls.extends?.endsWith("FormRequest"))) {
-      const schema = cls.formRules.length
-        ? formRulesToSchema(cls.formRules, model)
+    const rulesMethod = cls ? findPhpMethod(cls, 'rules', analysis) : undefined;
+    if (cls && (rulesMethod || cls.extends?.endsWith("FormRequest"))) {
+      const rules = rulesMethod ? parseRulesMethod(rulesMethod) : cls.formRules;
+      const schema = rules.length
+        ? formRulesToSchema(rules, model)
         : undefined;
       if (schema && Object.keys(schema.properties ?? {}).length) {
-        const fileFields = fileFieldsFromRules(cls.formRules);
+        if (verb === 'get' || verb === 'head') {
+          for (const [field, fieldSchema] of Object.entries(schema.properties ?? {})) {
+            addParam('query', field, fieldSchema as JsonSchema, 'medium', Array.isArray(schema.required) && schema.required.includes(field));
+          }
+          continue;
+        }
+        const fileFields = fileFieldsFromRules(rules);
         const mediaType = fileFields.size ? "multipart/form-data" : "application/json";
         const ruleProperties = schema.properties as Record<string, JsonSchema> | undefined;
         for (const field of fileFields) {
           if (ruleProperties) ruleProperties[field] = { type: "string", format: "binary" };
         }
         requestBody = {
-          required: true,
+          required: Array.isArray(schema.required) && schema.required.length > 0,
           content: [{ mediaType, schema }],
           confidence: "high",
         };
@@ -739,7 +745,7 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     }
   }
 
-  const returns = findAll(handler, (n) => n.type === "return_statement");
+  const returns = findAll(handler, (n) => n.type === "return_statement" && belongsToPhpFunction(n, handler));
   const responses: DiscoveredResponse[] = [];
   const factoryVisited = new Set<TsNode>();
 
@@ -827,19 +833,13 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     return [{ statusCode: "200", description: "", confidence: "low", content: [{ mediaType: "application/json" }] }];
   }
 
-  // Merge identical status codes, keeping the highest-confidence candidate.
+  // Preserve all observed response branches sharing a status code.
   const merged = new Map<string, DiscoveredResponse>();
   for (const response of responses) {
     const existing = merged.get(response.statusCode);
-    if (!existing || confidenceRank(response.confidence) > confidenceRank(existing.confidence)) {
-      merged.set(response.statusCode, response);
-    }
+    merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
   }
   return [...merged.values()];
-}
-
-function confidenceRank(confidence: Confidence): number {
-  return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
 }
 
 function interpretResponse(
@@ -936,13 +936,13 @@ function interpretResponse(
       }
     }
 
-    if (method === "noContent" || method === "noContent") {
-      const status = integerText(argNodes[0]) ?? "204";
+    if (method === "noContent") {
+      const status = responseStatus(argNodes[0], "204", gaps);
       return { statusCode: status, description: "", confidence: "high" };
     }
 
     if (method === "redirect" || method === "redirectRoute" || method === "redirectGuest") {
-      const status = integerText(argNodes[1]) ?? "302";
+      const status = responseStatus(argNodes[1], "302", gaps);
       return { statusCode: status, description: "", confidence: "high" };
     }
 
@@ -959,7 +959,8 @@ function interpretResponse(
     if (downloadLike) return downloadLike;
 
     if (method === "json") {
-      const status = integerText(argNodes[1]) ?? "200";
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
       const payload = argNodes[0];
       if (!payload) {
         // response()->json() with no data is an intentionally empty success body.
@@ -1028,7 +1029,7 @@ function interpretResponse(
     if (fnName === "redirect") {
       const args = expression.namedChildren.find((c) => c.type === "arguments");
       const argNodes = args ? childrenOfType(args, "argument") : [];
-      const status = integerText(argNodes[1]) ?? "302";
+      const status = responseStatus(argNodes[1], "302", gaps);
       return { statusCode: status, description: "", confidence: "high" };
     }
     // view('page') renders an HTML document.
@@ -1086,14 +1087,15 @@ function interpretResponse(
     if (name === "StreamedResponse" || name === "BinaryFileResponse") {
       const args = expression.namedChildren.find((c) => c.type === "arguments");
       const argNodes = args ? childrenOfType(args, "argument") : [];
-      return binaryResponse(integerText(argNodes[1]) ?? "200");
+      return binaryResponse(responseStatus(argNodes[1], "200", gaps));
     }
     // new JsonResponse([...], $status, $headers) — Illuminate/Symfony JSON response
     // built directly rather than via the response()->json() helper.
     if (name === "JsonResponse") {
       const args = expression.namedChildren.find((c) => c.type === "arguments");
       const argNodes = args ? childrenOfType(args, "argument") : [];
-      const status = integerText(argNodes[1]) ?? "200";
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
       const payload = argNodes[0];
       if (!payload) {
         return {
@@ -1347,8 +1349,7 @@ function inferArrayValue(
     return {};
   }
   if (node.type === "member_access_expression") {
-    const prop = node.namedChildren.filter((c) => c.type === "name").pop()?.text ?? "";
-    return heuristicPropertySchema(prop);
+    return declaredPhpPropertySchema(node, model, handler);
   }
   if (node.type === "variable_name" && handler) {
     return inferVariableModel(handler, node, model);
@@ -1356,22 +1357,6 @@ function inferArrayValue(
   return undefined;
 }
 
-/** Conservative scalar inference for common Laravel property names. */
-function heuristicPropertySchema(prop: string): JsonSchema {
-  if (/^(id|.*_id)$/.test(prop) || /(count|total|quantity|size|age)$/.test(prop)) {
-    return { type: "integer" };
-  }
-  if (/^(is_|has_|should_)/.test(prop) || /^(active|enabled|deleted|archived)$/.test(prop)) {
-    return { type: "boolean" };
-  }
-  if (/(price|amount|cost|fee|balance|total)$/.test(prop)) return { type: "number" };
-  if (/(url|uri|path|link|href)$/.test(prop)) return { type: "string", format: "uri" };
-  if (/(at)$/.test(prop)) return { type: "string", format: "date-time" };
-  if (/(name|title|sku|slug|email|phone|token|key|status|type|description|caption|filename|file_name)$/.test(prop)) {
-    return { type: "string" };
-  }
-  return {};
-}
 
 /**
  * Detect `(new XResource($model))->response()->setStatusCode(201)` chains and
@@ -1500,7 +1485,7 @@ function facadeResponse(call: TsNode, gaps: GapCode[]): DiscoveredResponse | nul
   const args = call.namedChildren.find((c) => c.type === "arguments");
   const argNodes = args ? childrenOfType(args, "argument") : [];
   if (method.toLowerCase() === "nocontent") {
-    return { statusCode: integerText(argNodes[0]) ?? "204", description: "", confidence: "high" };
+    return { statusCode: responseStatus(argNodes[0], "204", gaps), description: "", confidence: "high" };
   }
   if (method.toLowerCase() === "view") {
     return {
@@ -1830,7 +1815,7 @@ function downloadLikeResponse(
 ): DiscoveredResponse | null {
   const m = method.toLowerCase();
   if (m === "download") {
-    return binaryResponse(integerText(argNodes[2]) ?? "200", staticString(argNodes[1]));
+    return binaryResponse("200", staticString(argNodes[1]));
   }
   if (m === "streamdownload" || m === "stream") {
     const headersArray = argNodes[2]?.namedChildren.find((c) => c.type === "array_creation_expression");
@@ -1846,22 +1831,22 @@ function downloadLikeResponse(
     if (isSse) {
       gaps.push("sse-events-unknown");
       return {
-        statusCode: integerText(argNodes[1]) ?? "200",
+        statusCode: m === "streamdownload" ? "200" : responseStatus(argNodes[1], "200", gaps),
         description: "Server-sent events",
         confidence: "medium",
         content: [{ mediaType: "text/event-stream", itemSchema: {} }],
       };
     }
     if (m === "streamdownload") return binaryResponse("200", staticString(argNodes[1]));
-    return { statusCode: integerText(argNodes[1]) ?? "200", description: "", confidence: "low" };
+    return { statusCode: responseStatus(argNodes[1], "200", gaps), description: "", confidence: "low" };
   }
   if (m === "file") {
-    // response()->file($path, $headers = [], $status = null)
-    return binaryResponse(integerText(argNodes[2]) ?? "200");
+    // ResponseFactory::file accepts only the file and headers.
+    return binaryResponse("200");
   }
   if (m === "make") {
     // response()->make($content = '', $status = 200, $headers = [])
-    return binaryResponse(integerText(argNodes[1]) ?? "200");
+    return binaryResponse(responseStatus(argNodes[1], "200", gaps));
   }
   return null;
 }
@@ -1919,12 +1904,9 @@ function parseResourceCall(
     if (onlyActions && !onlyActions.has(method)) return [];
     if (exceptActions.has(method)) return [];
     const cls = controller ? analysis.classes.get(controller) : null;
-    const methodNode = cls?.methods.get(method) ?? null;
-    // apiResource registers only the actions the controller actually
-    // implements. Skip phantom routes for unresolved methods instead of
-    // emitting low-confidence response-unknown operations. When the
-    // controller itself cannot be resolved, keep the conventional set.
-    if (controller && cls && !methodNode) return [];
+    // Laravel registers the conventional actions independently of whether
+    // the controller implements them. Missing handlers must remain visible.
+    const methodNode = cls ? findPhpMethod(cls, method, analysis) ?? null : null;
     const gaps: GapCode[] = [];
     // update() serves both PUT and PATCH; keep operationIds unique and explicit.
     const operationId =
@@ -1953,7 +1935,7 @@ function parseResourceCall(
     const responses: DiscoveredResponse[] = methodNode
       ? collectResponses(methodNode, model, gaps)
       : [{ statusCode: "200", description: "", confidence: "low" }];
-    if (!methodNode && !cls) gaps.push("response-unknown");
+    if (!methodNode) gaps.push("response-unknown");
 
     return {
       method: verb,
@@ -2116,4 +2098,11 @@ function detectServers(ctx: ScanContext): DiscoveredServer[] {
     }
   }
   return [...urls].map((url) => ({ url }));
+}
+
+/** An omitted optional status has a framework default; a dynamic one does not. */
+function responseStatus(argument: TsNode | undefined, fallback: string, gaps: GapCode[]): string {
+  const status = integerText(argument) ?? (argument ? "default" : fallback);
+  if (status === "default") gaps.push("response-unknown");
+  return status;
 }

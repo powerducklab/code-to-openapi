@@ -30,6 +30,7 @@ import {
   expandStructFields,
   functionParameters,
   rustTypeToSchema,
+  rustSerializationIndex,
   type RustModelIndex,
 } from "../lang/rust/schema.js";
 
@@ -317,7 +318,7 @@ function buildCandidate(
   );
 
   const { parameters, requestBody, gaps } = collectHandlerParameters(fn, model, pathParams);
-  const responses = collectResponses(fn, model, gaps);
+  const responses = collectResponses(fn, rustSerializationIndex(model), gaps);
 
   return {
     method: verb,

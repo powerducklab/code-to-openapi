@@ -24,19 +24,19 @@ describe("asp.net generic response wrappers", () => {
     const { doc } = await scan();
 
     const single = doc.paths["/api/products/{id}"].get.responses["200"].content["application/json"].schema;
-    expect(single).toEqual({ $ref: "#/components/schemas/Result_ProductDto" });
+    expect(single).toEqual({ $ref: "#/components/schemas/serialized_Result_ProductDto" });
 
-    const wrapper = doc.components.schemas.Result_ProductDto;
+    const wrapper = doc.components.schemas.serialized_Result_ProductDto;
     expect(wrapper.type).toBe("object");
     expect(wrapper.properties.code).toEqual({ type: "integer" });
     expect(wrapper.properties.message).toEqual({ type: "string" });
-    expect(wrapper.properties.data).toEqual({ $ref: "#/components/schemas/ProductDto" });
+    expect(wrapper.properties.data).toEqual({ anyOf: [{ $ref: "#/components/schemas/serialized_ProductDto" }, { type: "null" }] });
 
-    const product = doc.components.schemas.ProductDto;
+    const product = doc.components.schemas.serialized_ProductDto;
     expect(product.properties.id).toEqual({ type: "string", format: "uuid" });
     expect(product.properties.name).toEqual({ type: "string" });
     expect(product.properties.price).toEqual({ type: "number" });
-    expect(product.properties.category).toEqual({ $ref: "#/components/schemas/ProductCategory" });
+    expect(product.properties.category).toEqual({ anyOf: [{ $ref: "#/components/schemas/serialized_ProductCategory" }, { type: "null" }] });
     expect(product.properties.tags).toEqual({
       type: "array",
       items: { type: "string" },
@@ -47,15 +47,15 @@ describe("asp.net generic response wrappers", () => {
     const { doc } = await scan();
 
     const list = doc.paths["/api/products"].get.responses["200"].content["application/json"].schema;
-    expect(list).toEqual({ $ref: "#/components/schemas/PagedResult_ProductDto" });
+    expect(list).toEqual({ $ref: "#/components/schemas/serialized_PagedResult_ProductDto" });
 
-    const paged = doc.components.schemas.PagedResult_ProductDto;
+    const paged = doc.components.schemas.serialized_PagedResult_ProductDto;
     // Inherited Result<List<T>> fields bind T to ProductDto.
     expect(paged.properties.code).toEqual({ type: "integer" });
     expect(paged.properties.message).toEqual({ type: "string" });
     expect(paged.properties.data).toEqual({
-      type: "array",
-      items: { $ref: "#/components/schemas/ProductDto" },
+      type: ["array", "null"],
+      items: { $ref: "#/components/schemas/serialized_ProductDto" },
     });
     expect(paged.properties.page).toEqual({ type: "integer" });
     expect(paged.properties.perPage).toEqual({ type: "integer" });

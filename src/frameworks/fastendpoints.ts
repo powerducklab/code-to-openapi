@@ -10,6 +10,7 @@
  * components respectively.
  */
 
+import { mergeResponseVariants } from "../core/response-variants.js";
 import type {
   Confidence,
   DiscoveredMediaType,
@@ -25,12 +26,15 @@ import type {
   ScanContext,
   SourceLocation,
 } from "../core/types.js";
+import { buildCsSerializationIndex, serializedComponents, remapSchemaReferences } from "../lang/csharp/serialization.js";
+import { inferExpressionSchema } from "./aspnet.js";
 import type { CSharpAnalysis } from "../lang/csharp/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   buildCsModelIndex,
   csTypeToSchema,
+  findAttribute,
   type CsModelIndex,
 } from "../lang/csharp/schema.js";
 
@@ -64,15 +68,20 @@ export const fastendpointsPack: FrameworkPack<CSharpAnalysis> = {
     const unresolved: DiscoveredUnresolved[] = [];
     const candidates: RouteCandidate[] = [];
     const model = buildCsModelIndex(analysis);
+    const responseModel = buildCsSerializationIndex(analysis);
 
     for (const [rel, file] of analysis.files) {
-      extractEndpoints(file.root, rel, model, candidates);
+      for (const error of findAll(file.root, n => n.type === "ERROR")) unresolved.push({ reason: "handler-unresolved", message: "C# syntax could not be parsed; API coverage and DTO fields in this file are unverified.", origin: { file: rel, line: error.startPosition.row + 1 } });
+      extractEndpoints(file.root, rel, model, responseModel, candidates);
     }
 
     const components = [...model.components.entries()].map(([name, schema]) => ({
       name,
       schema,
     }));
+    const serialized = serializedComponents(responseModel, new Set([...model.byName.keys(), ...model.components.keys()]));
+    components.push(...serialized.components);
+    for (const route of candidates) route.responses = remapSchemaReferences(route.responses, serialized.names);
     const securitySchemes: DiscoveredSecurityScheme[] = [];
     const servers: DiscoveredServer[] = [];
 
@@ -86,6 +95,7 @@ function extractEndpoints(
   root: TsNode,
   rel: string,
   model: CsModelIndex,
+  responseModel: CsModelIndex,
   out: RouteCandidate[],
 ): void {
   for (const cls of findAll(root, (n) => n.type === "class_declaration")) {
@@ -113,11 +123,40 @@ function extractEndpoints(
         confidence: "high" as Confidence,
       }));
 
+      const gaps: GapCode[] = [];
+      const requestDef = requestType ? model.byName.get(requestType.text) : undefined;
+      if (requestType && !requestDef && !["EmptyRequest", "object"].includes(requestType.text)) gaps.push("body-schema-unknown");
+      for (const parameter of parameters) {
+        const field = requestDef?.fields.find(field => field.name.toLowerCase() === parameter.name.toLowerCase());
+        if (field) parameter.schema = csTypeToSchema(field.typeNode, model);
+      }
+      const queryProperties = requestDef ? findAll(requestDef.node, n => n.type === "property_declaration" && Boolean(findAttribute(n, new Set(["FromQuery"])))) : [];
+      for (const property of queryProperties) {
+        const name = property.childForFieldName("name")?.text;
+        const field = requestDef?.fields.find(field => field.name.toLowerCase() === name?.toLowerCase());
+        if (field) collectComplexQuery(field.typeNode, model, parameters, gaps);
+      }
       let requestBody:
         | { required: boolean; content: DiscoveredMediaType[]; confidence: Confidence }
         | undefined;
-      if (requestType) {
-        const schema = csTypeToSchema(requestType, model);
+      if (requestType && requestType.text !== "EmptyRequest" && requestType.text !== "object") {
+        let schema = csTypeToSchema(requestType, model);
+        if (queryProperties.length && requestDef) {
+          const excluded = new Set(queryProperties.map(property => property.childForFieldName("name")?.text.toLowerCase()));
+          const fields = requestDef.fields.filter(field => !excluded.has(field.name.toLowerCase()));
+          schema = fields.length ? { type: "object", properties: Object.fromEntries(fields.map(field => [field.jsonName ?? field.name, csTypeToSchema(field.typeNode, model)])), required: fields.filter(field => field.required).map(field => field.jsonName ?? field.name) } : {};
+        }
+        if (requestDef && !requestDef.fields.length) schema = {};
+        if (!cfg || !findAll(cfg, n => n.type === "invocation_expression").some(n => invocationName(n) === "DontAutoValidate")) schema = applyRequestValidation(schema, requestType.text, model);
+        // Route binding supplies matching DTO properties independently of
+        // JSON input. Do not demand a duplicate copy in the request body.
+        if (pathParams.size && requestDef) {
+          const bodySchema = typeof schema.$ref === "string" ? model.components.get(schema.$ref.split("/").pop()!) : schema;
+          if (bodySchema && Array.isArray(bodySchema.required)) {
+            const bound = new Set(requestDef.fields.filter(field => [...pathParams].some(name => name.toLowerCase() === field.name.toLowerCase())).map(field => field.jsonName ?? field.name));
+            if (bodySchema.required.some(name => bound.has(String(name)))) schema = { ...bodySchema, required: bodySchema.required.filter(name => !bound.has(String(name))) };
+          }
+        }
         if (Object.keys(schema).length) {
           requestBody = {
             required: true,
@@ -127,8 +166,7 @@ function extractEndpoints(
         }
       }
 
-      const gaps: GapCode[] = [];
-      const responses = collectResponses(handler, responseType, model, gaps);
+      const responses = collectResponses(handler, responseType, responseModel, gaps);
 
       out.push({
         method: verb,
@@ -147,6 +185,74 @@ function extractEndpoints(
       });
     }
   }
+}
+
+/** Apply only direct, unconditional rules; never mutate response/shared DTOs. */
+function applyRequestValidation(input: JsonSchema, type: string, model: CsModelIndex): JsonSchema {
+  const definition = model.byName.get(type);
+  if (!definition || !Object.keys(input).length) return input;
+  const base = typeof input.$ref === "string" ? model.components.get(input.$ref.split("/").pop()!) : input;
+  if (!base?.properties) return input;
+  const schema = structuredClone(base);
+  const properties = schema.properties as Record<string, JsonSchema>;
+  const required = new Set(schema.required as string[] ?? []);
+  let changed = false;
+  const validators = [...model.byName.values()].filter(validator => {
+    const parent = validator.baseList?.namedChildren.find(n => n.type === "generic_name");
+    return parent?.namedChildren.find(n => n.type === "identifier")?.text === "Validator" && parent.namedChildren.find(n => n.type === "type_argument_list")?.namedChildren[0]?.text === type;
+  });
+  if (validators.length !== 1) return input;
+  for (const validator of validators) {
+    for (const constructor of findAll(validator.node, n => n.type === "constructor_declaration")) {
+      const body = constructor.namedChildren.find(n => n.type === "block");
+      for (const statement of body?.namedChildren ?? []) {
+        if (statement.type !== "expression_statement") continue;
+        let call = statement.namedChildren[0];
+        const calls: TsNode[] = [];
+        while (call?.type === "invocation_expression") {
+          calls.unshift(call);
+          const receiver = call.namedChildren.find(n => n.type === "member_access_expression")?.namedChildren[0];
+          if (!receiver || receiver.type !== "invocation_expression") break;
+          call = receiver;
+        }
+        if (!calls.length || invocationName(calls[0]!) !== "RuleFor" || calls.some(c => ["When", "Unless", "WhenAsync", "UnlessAsync", "DependentRules", "Transform", "TransformAsync"].includes(invocationName(c) ?? ""))) continue;
+        const lambda = findFirst(calls[0], n => n.type === "lambda_expression");
+        const access = lambda?.namedChildren.at(-1);
+        if (access?.type !== "member_access_expression" || access.namedChildren[0]?.type !== "identifier") continue;
+        const field = definition.fields.find(f => f.name.toLowerCase() === access.namedChildren.at(-1)?.text.toLowerCase());
+        const key = field?.jsonName ?? field?.name;
+        if (!key || !properties[key]) continue;
+        let property = properties[key]!;
+        for (const rule of calls.slice(1)) {
+          const name = invocationName(rule);
+          const args = rule.namedChildren.find(n => n.type === "argument_list");
+          const value = args?.namedChildren[0]?.text;
+          const number = value && /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : undefined;
+          const types = Array.isArray(property.type) ? property.type : [property.type];
+          if (name === "NotEmpty" || name === "NotNull") {
+            const declaration = findAll(definition.node, n => n.type === "property_declaration").find(n => n.childForFieldName("name")?.text.toLowerCase() === field?.name.toLowerCase());
+            if (!declaration?.children.some(n => n.text === "=")) required.add(key);
+            changed = true;
+            if (Array.isArray(property.anyOf)) property.anyOf = property.anyOf.filter(s => !(s && typeof s === "object" && (s as JsonSchema).type === "null"));
+            const nonNull = types.filter(t => t !== "null");
+            if (nonNull.length && nonNull[0]) property.type = nonNull.length === 1 ? nonNull[0] : nonNull;
+            if (name === "NotEmpty" && types.includes("string")) property.minLength = Math.max(Number(property.minLength ?? 0), 1);
+            if (name === "NotEmpty" && types.includes("array")) property.minItems = Math.max(Number(property.minItems ?? 0), 1);
+          }
+          if (number !== undefined && Number.isSafeInteger(Math.ceil(number)) && Number.isSafeInteger(Math.floor(number)) && ["GreaterThan", "GreaterThanOrEqualTo"].includes(name ?? "") && types.includes("integer")) {
+            property.minimum = Math.max(Number(property.minimum ?? -Infinity), name === "GreaterThan" ? Math.floor(number) + 1 : Math.ceil(number)); changed = true;
+          }
+          if (number !== undefined && Number.isSafeInteger(Math.ceil(number)) && Number.isSafeInteger(Math.floor(number)) && ["LessThan", "LessThanOrEqualTo"].includes(name ?? "") && types.includes("integer")) {
+            property.maximum = Math.min(Number(property.maximum ?? Infinity), name === "LessThan" ? Math.ceil(number) - 1 : Math.floor(number)); changed = true;
+          }
+        }
+        properties[key] = property;
+      }
+    }
+  }
+  if (!changed) return input;
+  schema.required = [...required];
+  return schema;
 }
 
 interface EndpointBase {
@@ -249,58 +355,55 @@ function collectResponses(
   model: CsModelIndex,
   gaps: GapCode[],
 ): DiscoveredResponse[] {
-  let status: string | null = null;
-  let explicitPayload = false;
+  const responses: DiscoveredResponse[] = [];
+  const declared = responseType?.text === "EmptyResponse" && !model.byName.has("EmptyResponse")
+    ? { type: "object", properties: {} } : responseType ? csTypeToSchema(responseType, model) : {};
+  if (handler) for (const call of findAll(handler, n => n.type === "invocation_expression")) {
+    const name = invocationName(call);
+    if (!name) continue;
+    const access = call.namedChildren.find(n => n.type === "member_access_expression");
+    const receiver = access?.namedChildren[0]?.text;
+    const modern = receiver === "Send" || receiver === "this.Send";
+    const modernStatus: Record<string, string> = { OkAsync: "200", CreatedAtAsync: "201", NoContentAsync: "204", NotFoundAsync: "404", UnauthorizedAsync: "401", ForbiddenAsync: "403" };
+    let status = SEND_STATUS[name] ?? (modern ? modernStatus[name] : undefined);
+    const args = call.namedChildren.find(n => n.type === "argument_list");
+    const values = args ? childrenOfType(args, "argument") : [];
+    if (name === "SendAsync" || (modern && name === "Async")) status = values[1]?.namedChildren.find(n => n.type === "integer_literal")?.text ?? "200";
+    if (!status) continue;
+    const noBody = status === "204" || ["NotFoundAsync", "UnauthorizedAsync", "ForbiddenAsync", "SendNotFoundAsync", "SendUnauthorizedAsync", "SendForbiddenAsync"].includes(name) || !values.length;
+    let schema = !noBody && values[0] ? inferExpressionSchema(values[0], model, handler) : undefined;
+    if (schema?.properties && values[0] && findFirst(values[0], n => n.type === "anonymous_object_creation_expression")) schema = { ...schema, required: Object.keys(schema.properties) };
+    if (!schema && !noBody && Object.keys(declared).length) schema = declared;
+    if (!noBody && !schema) gaps.push("response-unknown");
+    responses.push({ statusCode: status, description: "", confidence: noBody || schema ? "high" : "low", ...(schema ? { content: [{ mediaType: "application/json", schema }] } : {}) });
+  }
+  if (!responses.length) {
+    if (!Object.keys(declared).length) gaps.push("response-unknown");
+    responses.push({ statusCode: "200", description: "", confidence: "low", ...(Object.keys(declared).length ? { content: [{ mediaType: "application/json", schema: declared }] } : {}) });
+  }
+  const merged = new Map<string, DiscoveredResponse>();
+  for (const response of responses) {
+    const existing = merged.get(response.statusCode);
+    if (!existing) { merged.set(response.statusCode, response); continue; }
+    merged.set(response.statusCode, mergeResponseVariants(existing, response));
+  }
+  return [...merged.values()];
+}
 
-  if (handler) {
-    for (const call of findAll(handler, (n) => n.type === "invocation_expression")) {
-      const name = invocationName(call);
-      if (!name) continue;
-      if (name === "SendAsync") {
-        // SendAsync(payload, [statusCode])
-        const args = call.namedChildren.find((c) => c.type === "argument_list");
-        const argNodes = args ? childrenOfType(args, "argument") : [];
-        if (argNodes[1]) {
-          const lit = findFirst(argNodes[1], (n) => n.type === "integer_literal");
-          if (lit) status = lit.text;
-        }
-        if (!status) status = "200";
-        explicitPayload = true;
-      } else if (SEND_STATUS[name]) {
-        status = SEND_STATUS[name]!;
-      }
-    }
+/** Complex FromQuery uses flattened dot-separated keys, not a JSON body. */
+function collectComplexQuery(type: TsNode, model: CsModelIndex, parameters: RouteParameter[], gaps: GapCode[], prefix = "", seen = new Set<string>()): void {
+  const name = type.text.replace(/\?$/, "");
+  const definition = model.byName.get(name);
+  if (!definition || seen.has(name) || seen.size >= 8) { gaps.push("query-unknown"); return; }
+  const next = new Set(seen).add(name);
+  for (const field of definition.fields) {
+    const key = prefix + field.name;
+    const schema = csTypeToSchema(field.typeNode, model);
+    const nested = field.typeNode.text.replace(/\?$/, "");
+    if (model.byName.has(nested)) collectComplexQuery(field.typeNode, model, parameters, gaps, key + ".", next);
+    else if (schema.type === "array" && (schema.items as JsonSchema | undefined)?.$ref) gaps.push("query-unknown");
+    else parameters.push({ name: key, in: "query", required: false, schema, confidence: "medium" });
   }
-
-  const code = status ?? "200";
-  const schema = responseType ? csTypeToSchema(responseType, model) : {};
-
-  if (code === "204") {
-    return [{ statusCode: "204", description: "", confidence: "high" }];
-  }
-  if (!responseType) {
-    gaps.push("response-unknown");
-    return [{ statusCode: code, description: "", confidence: "low" }];
-  }
-  if (!Object.keys(schema).length) {
-    gaps.push("response-unknown");
-    return [
-      {
-        statusCode: code,
-        description: "",
-        confidence: "low",
-        content: [{ mediaType: "application/json" }],
-      },
-    ];
-  }
-  return [
-    {
-      statusCode: code,
-      description: "",
-      confidence: explicitPayload ? "high" : "medium",
-      content: [{ mediaType: "application/json", schema }],
-    },
-  ];
 }
 
 // ---------------------------------------------------------------------------

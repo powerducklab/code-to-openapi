@@ -1,0 +1,211 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Starlette source-known contract",
+    "version": "1"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Source-known contract",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/msg": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Source-known contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "version"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dt": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Source-known contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hello": {
+                      "type": "string"
+                    },
+                    "now": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "hello",
+                    "now"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Normal response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Source-known contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "created"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact/{item_id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Normal response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Normal response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": {},
+                  "lastName": {},
+                  "email": {},
+                  "company": {},
+                  "phone": {},
+                  "creationTime": {}
+                },
+                "required": [
+                  "firstName",
+                  "lastName",
+                  "email",
+                  "company",
+                  "phone",
+                  "creationTime"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Normal response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/error": {
+      "get": {
+        "responses": {
+          "500": {
+            "description": "Unconditional RuntimeError; debug mode controls error body"
+          }
+        }
+      }
+    }
+  },
+  "x-audit-limitations": [
+    "Database row shapes are unknown; no database schema is assumed.",
+    "Only known literal response fields and directly indexed request keys are checked."
+  ],
+  "x-audit-source": {
+    "repository": "https://github.com/gtfisher/starlette-example-crud.git",
+    "commit": "d948b7b7b076a92438f64e8f49f32dcc108bc10c",
+    "files": [
+      "app.py"
+    ]
+  }
+}

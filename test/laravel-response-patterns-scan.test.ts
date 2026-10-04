@@ -85,7 +85,7 @@ describe("laravel response patterns", () => {
     expect(redirected.responses.map((r: any) => r.statusCode)).toContain("302");
   });
 
-  it("registers only apiResource actions the controller actually implements", async () => {
+  it("respects explicit apiResource only action filters", async () => {
     const { result } = await scan();
     const paths = new Set(
       result.project.operations.map((o) => `${o.method} ${o.fullPath ?? o.path}`),

@@ -1,0 +1,47 @@
+{
+  "assertions": 795,
+  "mismatches": 5,
+  "errors": [
+    {
+      "where": "put /api/user request application/json",
+      "field": "/properties/user/properties/image/minLength",
+      "expected": 1,
+      "actual": null
+    },
+    {
+      "where": "put /api/user request application/json",
+      "field": "/properties/user/properties/image/maxLength",
+      "expected": 2083,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles query:tag",
+      "field": "/type",
+      "expected": "string",
+      "actual": [
+        "string",
+        "null"
+      ]
+    },
+    {
+      "where": "get /api/articles query:author",
+      "field": "/type",
+      "expected": "string",
+      "actual": [
+        "string",
+        "null"
+      ]
+    },
+    {
+      "where": "get /api/articles query:favorited",
+      "field": "/type",
+      "expected": "string",
+      "actual": [
+        "string",
+        "null"
+      ]
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

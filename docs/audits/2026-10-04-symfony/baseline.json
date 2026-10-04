@@ -1,0 +1,404 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Native Symfony routes baseline",
+    "version": "1"
+  },
+  "paths": {
+    "/{_locale}/admin/post/": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/admin/post/new": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/admin/post/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/admin/post/{id}/edit": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/admin/post/{id}/delete": {
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/rss.xml": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/page/{page}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/posts/{slug}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/comment/{postSlug}/new": {
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "postSlug",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/blog/search": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/login": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "head": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "options": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "trace": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/profile/edit": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}/profile/change-password": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/{_locale}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "head": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "options": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      },
+      "trace": {
+        "parameters": [
+          {
+            "name": "_locale",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {}
+      }
+    }
+  }
+}

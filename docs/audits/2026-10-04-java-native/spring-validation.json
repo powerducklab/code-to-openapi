@@ -1,0 +1,24 @@
+{
+  "probes": [
+    {
+      "status": 399,
+      "accepted": false
+    },
+    {
+      "status": 400,
+      "accepted": true
+    },
+    {
+      "status": 599,
+      "accepted": true
+    },
+    {
+      "status": 600,
+      "accepted": true
+    },
+    {
+      "status": 601,
+      "accepted": false
+    }
+  ]
+}

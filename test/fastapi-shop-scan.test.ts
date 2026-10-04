@@ -55,7 +55,7 @@ describe("fastapi-shop project fixture", () => {
       minimum: 1,
       maximum: 100,
     });
-    expect(byName.keyword.schema).toEqual({ type: "string", nullable: true });
+    expect(byName.keyword.schema).toEqual({ type: "string" });
   });
 
   it("keeps header, cookie and path parameters on their operations", async () => {
@@ -84,7 +84,7 @@ describe("fastapi-shop project fixture", () => {
 
     const envelope = doc.components.schemas.ApiResponse_PageResult_Product;
     expect(envelope.properties.data).toEqual({
-      $ref: "#/components/schemas/PageResult_Product",
+      anyOf: [{ $ref: "#/components/schemas/PageResult_Product" }, { type: "null" }],
     });
     const page = doc.components.schemas.PageResult_Product;
     expect(page.properties.items).toEqual({

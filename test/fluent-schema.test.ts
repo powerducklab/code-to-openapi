@@ -72,3 +72,15 @@ describe("fluent-json-schema syntactic conversion", () => {
     expect(convert("S.not(S.string())")).toEqual({ not: { type: "string" } });
   });
 });
+
+it("distinguishes required object markers from the last declared child", () => {
+  expect(convert("S.object().prop('a', S.object().prop('x', S.string()).required())")).toEqual({
+    type: 'object', properties: { a: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] } },
+  });
+  expect(convert("S.object().prop('a', S.object().required().prop('x', S.string()))")).toEqual({
+    type: 'object', properties: { a: { type: 'object', properties: { x: { type: 'string' } } } }, required: ['a'],
+  });
+  expect(convert("S.object().prop('a', S.object().required(['x']).prop('x', S.string()))")).toEqual({
+    type: 'object', properties: { a: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] } },
+  });
+});

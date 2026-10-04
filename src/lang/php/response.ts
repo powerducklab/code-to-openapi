@@ -4,8 +4,7 @@
  * Symfony and Slim controllers both return JSON built from PHP arrays and
  * models (as does the Laravel pack, which ships its own copy). This module
  * ports the shared, framework-neutral subset: literal/assignment-built arrays,
- * scalar literals, typed model components and conservative property-name
- * heuristics. Dynamic values become honest `{}` schemas rather than fabricated
+ * scalar literals and typed model components. Dynamic values become honest `{}` schemas rather than fabricated
  * types. Framework-specific response methods (`$this->json(...)`,
  * `$response->withJson(...)`, `render(...)`, redirects) are interpreted by the
  * packs themselves on top of these primitives.
@@ -18,9 +17,9 @@ import type {
 } from "../../core/types.js";
 import type { TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findAll, findFirst } from "../treesitter/ast.js";
-import { phpStringText } from "./index.js";
+import { phpStringText, resolvePhpClass, findPhpMethod, type PhpClass } from "./index.js";
 import type { PhpModelIndex } from "./schema.js";
-import { ensurePhpComponent, formalParameters } from "./schema.js";
+import { ensurePhpResponseComponent, formalParameters, phpTypeToSchema } from "./schema.js";
 
 /** Read an integer literal node as its decimal text, or null. */
 export function integerText(node: TsNode | undefined): string | null {
@@ -58,21 +57,74 @@ export function binaryResponse(status: string, filename?: string | null): Discov
   return response;
 }
 
-/** Conservative scalar inference for common PHP property names. */
-export function heuristicPropertySchema(prop: string): JsonSchema {
-  if (/^(id|.*_id)$/.test(prop) || /(count|total|quantity|size|age)$/.test(prop)) {
-    return { type: "integer" };
+function declaredProperty(cls: PhpClass | undefined, name: string, model: PhpModelIndex) {
+  const visited = new Set<string>();
+  while (cls && !visited.has(cls.fqcn) && visited.size < 16) {
+    visited.add(cls.fqcn);
+    const property = cls.properties.find(property => property.name === name);
+    if (property) return property;
+    cls = cls.extends ? resolvePhpClass(cls.extends, model.analysis, cls.node) : undefined;
   }
-  if (/^(is_|has_|should_)/.test(prop) || /^(active|enabled|deleted|archived)$/.test(prop)) {
-    return { type: "boolean" };
+  return undefined;
+}
+
+function receiverClass(node: TsNode, model: PhpModelIndex, handler?: TsNode, depth = 0): PhpClass | undefined {
+  if (depth > 8) return undefined;
+  if (node.type === "member_access_expression") {
+    const owner = node.namedChildren[0];
+    const property = owner ? declaredProperty(receiverClass(owner, model, handler, depth + 1), node.namedChildren.at(-1)?.text ?? '', model) : undefined;
+    const type = property?.typeNode;
+    return type ? resolvePhpClass(type.text.replace(/^\?/, ''), model.analysis, type) : undefined;
   }
-  if (/(price|amount|cost|fee|balance)$/.test(prop)) return { type: "number" };
-  if (/(url|uri|path|link|href)$/.test(prop)) return { type: "string", format: "uri" };
-  if (/(at)$/.test(prop)) return { type: "string", format: "date-time" };
-  if (/(name|title|sku|slug|email|phone|token|key|status|type|description|caption|filename)$/.test(prop)) {
-    return { type: "string" };
+  if (node.type === 'object_creation_expression') {
+    const name = node.namedChildren.find(child => child.type === 'name' || child.type === 'qualified_name');
+    return name ? resolvePhpClass(name.text, model.analysis, name) : undefined;
   }
-  return {};
+  if (node.type !== "variable_name") return undefined;
+  if (node.text === "$this") {
+    let scope = handler ?? node;
+    while (scope.parent && !["class_declaration", "interface_declaration"].includes(scope.type)) scope = scope.parent;
+    const className = ["class_declaration", "interface_declaration"].includes(scope.type) ? scope.namedChildren.find(child => child.type === "name")?.text : undefined;
+    return className ? resolvePhpClass(className, model.analysis, scope) : undefined;
+  }
+  if (!handler) return undefined;
+  const assignments = findAll(handler, child => child.type === "assignment_expression" && child.namedChildren[0]?.text === node.text);
+  if (assignments.length) {
+    const value = assignments.length === 1 && assignments[0]!.startIndex < node.startIndex ? assignments[0]!.namedChildren.at(-1) : undefined;
+    return value ? receiverClass(value, model, handler, depth + 1) : undefined;
+  }
+  const param = formalParameters(handler).find(parameter => parameter.namedChildren.some(child => child.type === "variable_name" && child.text === node.text));
+  const type = param && findFirst(param, child => child.type === "named_type");
+  return type ? resolvePhpClass(type.text, model.analysis, type) : undefined;
+}
+
+/** Property names are not type evidence. Resolve only declared receiver types. */
+export function declaredPhpPropertySchema(node: TsNode, model: PhpModelIndex, handler?: TsNode): JsonSchema {
+  const receiver = node.namedChildren[0];
+  const property = receiver ? declaredProperty(receiverClass(receiver, model, handler), node.namedChildren.at(-1)?.text ?? '', model) : undefined;
+  return property ? phpTypeToSchema(property.typeNode, model, new Set(), 0, true) : {};
+}
+
+/** Resolve typed service/interface methods without guessing from method names. */
+export function declaredPhpMethodSchema(node: TsNode, model: PhpModelIndex, handler?: TsNode): JsonSchema | undefined {
+  const receiver = node.namedChildren[0];
+  const cls = receiver ? receiverClass(receiver, model, handler) : undefined;
+  const name = node.namedChildren.find(child => child.type === 'name')?.text;
+  const method = cls && name ? findPhpMethod(cls, name, model.analysis) : undefined;
+  if (!method) return undefined;
+  const type = method.childForFieldName('return_type') ?? method.namedChildren.find(child => ['named_type','primitive_type','optional_type','union_type'].includes(child.type));
+  if (type?.text === 'array') {
+    const siblings = method.parent?.namedChildren ?? [];
+    const previous = siblings[siblings.findIndex(child => child.id === method.id) - 1];
+    const itemName = previous?.type === 'comment' ? /@return\s+([\\\w]+)\[\](?=\s|\*)/.exec(previous.text)?.[1] : undefined;
+    const item = itemName ? resolvePhpClass(itemName, model.analysis, method) : undefined;
+    if (item) return {type:'array',items:ensurePhpResponseComponent(item.fqcn,model)??{}};
+  }
+  if (type?.type === 'named_type') {
+    const returned = resolvePhpClass(type.text, model.analysis, type);
+    if (returned) return ensurePhpResponseComponent(returned.fqcn, model) ?? {};
+  }
+  return type ? phpTypeToSchema(type, model, new Set(), 0, true) : undefined;
 }
 
 /**
@@ -87,15 +139,16 @@ export function inferValueSchema(
   handler?: TsNode,
   depth = 0,
 ): JsonSchema | undefined {
-  const inner = node.namedChildren[0] ?? node;
+  if (depth > 6) return undefined;
+  const inner = node.type === "argument" ? node.namedChildren[0] ?? node : node;
 
   if (inner.type === "array_creation_expression") {
     return inferArraySchema(inner, model, handler, depth + 1);
   }
   if (inner.type === "object_creation_expression") {
-    const name = inner.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name")?.text
-      .split("\\").pop();
-    if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? {};
+    const name = inner.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name")?.text;
+    const cls = name ? resolvePhpClass(name, model.analysis, inner) : undefined;
+    if (cls) return ensurePhpResponseComponent(cls.fqcn, model) ?? {};
     return undefined;
   }
   if (inner.type === "scoped_call_expression") {
@@ -104,6 +157,8 @@ export function inferValueSchema(
     return {};
   }
   if (inner.type === "member_call_expression") {
+    const declared = declaredPhpMethodSchema(inner, model, handler);
+    if (declared) return declared;
     const method = inner.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
     if (method === "toarray" || method?.startsWith("toarray")) return { type: "object" };
     if (method === "json") return { type: "object" };
@@ -131,10 +186,13 @@ function inferArrayValue(
   if (node.type === "array_creation_expression") return inferArraySchema(node, model, handler, depth);
   if (node.type === "object_creation_expression") {
     const name = node.namedChildren.find((c) => c.type === "name")?.text;
-    if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? {};
+    const cls = name ? resolvePhpClass(name, model.analysis, node) : undefined;
+    if (cls) return ensurePhpResponseComponent(cls.fqcn, model) ?? {};
   }
   if (node.type === "scoped_call_expression") return inferStaticModel(node, model) ?? {};
   if (node.type === "member_call_expression") {
+    const declared = declaredPhpMethodSchema(node, model, handler);
+    if (declared) return declared;
     const method = node.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
     if (method === "toarray" || method?.startsWith("toarray")) return { type: "object" };
     // A known array key whose value comes from an untyped service/repository
@@ -143,8 +201,7 @@ function inferArrayValue(
     return {};
   }
   if (node.type === "member_access_expression") {
-    const prop = node.namedChildren.filter((c) => c.type === "name").pop()?.text ?? "";
-    return heuristicPropertySchema(prop);
+    return declaredPhpPropertySchema(node, model, handler);
   }
   if (node.type === "variable_name" && handler) {
     return inferVariableModel(handler, node, model);
@@ -216,10 +273,13 @@ export function inferVariableModel(
     if (rhs.type === "array_creation_expression") return inferArraySchema(rhs, model, handler);
     if (rhs.type === "object_creation_expression") {
       const name = rhs.namedChildren.find((c) => c.type === "name")?.text;
-      if (name && model.analysis.classes.has(name)) return ensurePhpComponent(name, model) ?? undefined;
+      const cls = name ? resolvePhpClass(name, model.analysis, rhs) : undefined;
+      if (cls) return ensurePhpResponseComponent(cls.fqcn, model) ?? undefined;
     }
     const memberCall = findFirst(rhs, (n) => n.type === "member_call_expression");
     if (memberCall) {
+      const declared = declaredPhpMethodSchema(memberCall, model, handler);
+      if (declared) return declared;
       const method = memberCall.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
       // Request accessors yield dynamically-shaped data: keep the property with
       // an unconstrained schema rather than asserting an object.
@@ -242,7 +302,7 @@ export function inferVariableModel(
       .find((c) => c.type === "named_type")
       ?.namedChildren.find((c) => c.type === "name")?.text;
     if (typeName && model.analysis.classes.has(typeName)) {
-      return ensurePhpComponent(typeName, model) ?? undefined;
+      return ensurePhpResponseComponent(typeName, model) ?? undefined;
     }
   }
   return undefined;
@@ -259,7 +319,7 @@ export function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema
       ? names[names.length - 2]?.text
       : undefined;
   if (!modelName || !model.analysis.classes.has(modelName)) return undefined;
-  const ref = ensurePhpComponent(modelName, model);
+  const ref = ensurePhpResponseComponent(modelName, model);
   if (!ref) return undefined;
   if (method && ["all", "get", "collection", "paginate"].includes(method)) {
     return { type: "array", items: ref };

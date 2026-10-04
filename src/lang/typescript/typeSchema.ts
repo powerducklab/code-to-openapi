@@ -314,9 +314,21 @@ function objectSchema(
         propType.isUnion?.() &&
           propType.types?.some((t: any) => t.flags & ctx.ts.TypeFlags.Undefined),
     );
-    const optional = Boolean(declaration?.questionToken) || includesUndefined;
+    // A project with strictNullChecks:false erases explicit null/undefined
+    // unions from checker types. Preserve the written wire contract.
+    const writtenTypes = declaration?.type && ctx.ts.isUnionTypeNode(declaration.type) ? declaration.type.types : [];
+    const writtenUndefined = writtenTypes.some((node:any) => node.kind === ctx.ts.SyntaxKind.UndefinedKeyword);
+    const writtenNull = writtenTypes.some((node:any) => ctx.ts.isLiteralTypeNode(node) && node.literal.kind === ctx.ts.SyntaxKind.NullKeyword);
+    const optional = Boolean(declaration?.questionToken) || includesUndefined || writtenUndefined;
     if (!optional) required.push(prop.name);
-    out[prop.name] = typeToSchema(propType, ctx, prop.name);
+    let schema = typeToSchema(propType, ctx, prop.name);
+    if (writtenNull && Object.keys(schema).length && schema.type !== "null" &&
+        !(Array.isArray(schema.type) && schema.type.includes("null")) &&
+        !(Array.isArray(schema.anyOf) && schema.anyOf.some(s => s.type === "null"))) {
+      if (typeof schema.type === "string" && !schema.enum && !("const" in schema)) schema = {...schema, type: [schema.type, "null"]};
+      else schema = {anyOf: [schema, {type: "null"}]};
+    }
+    out[prop.name] = schema;
   }
 
   const schema: JsonSchema = {

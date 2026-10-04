@@ -5,22 +5,106 @@ import type { JsonSchema } from "../core/types.js";
  * Bump when the prompt contract changes so cached gap resolutions from older
  * prompts cannot be reused.
  */
-export const GAP_PROMPT_VERSION = "2026-10-01";
+export const GAP_PROMPT_VERSION = "2026-10-04b";
 
 export interface GapPromptMessage {
   role: "system" | "user";
   content: string;
 }
 
-const SYSTEM_PROMPT = `You are a static-analysis assistant for ONE already-discovered Node.js (Express) request handler.
+/**
+ * Compact, framework-specific extraction idioms. The model is only asked to
+ * read ONE already-discovered handler, so the hint stays short: how that
+ * framework exposes query/header/body inputs and how it writes JSON/SSE
+ * responses. Anything not listed falls back to the language-level hint.
+ */
+const FRAMEWORK_HINTS: Record<string, string> = {
+  express:
+    "Node.js Express. Query: req.query.x or destructured objects from req.query. Headers: req.get('x') or req.headers.x. Body: req.body.x (express.json/urlencoded). Responses: res.status(n).json(value), res.json(value), res.send(value). SSE: res.write(\"event: NAME\\ndata: {...}\\n\\n\").",
+  fastify:
+    "Node.js Fastify. Query: request.query.x. Path: request.params.x. Headers: request.headers.x. Body: request.body.x (JSON schema or TypeScript type). Responses: reply.code(n).send(value), reply.send(value). SSE: reply.raw.write(\"event: NAME\\ndata: {...}\\n\\n\") with text/event-stream.",
+  nest:
+    "NestJS. Query: @Query('x') parameters or a query DTO. Body: @Body() DTO class (class-validator or TypeScript fields). Headers: @Headers('x'). Responses: the returned DTO/object, @HttpCode(n), or response.status(n).json(value).",
+  hono:
+    "Hono. Query: c.req.query('x') or c.req.queries(). Body: await c.req.json(). Path: c.req.param('x'). Header: c.req.header('x'). Responses: c.json(value, n) or new Response(JSON.stringify(value), {status: n}).",
+  koa:
+    "Koa (koa-router/koa-bodyparser). Query: ctx.query.x or ctx.params.x. Body: ctx.request.body.x. Responses: assign ctx.body = value with ctx.status = n. SSE: ctx.res.write(\"event: NAME\\ndata: {...}\\n\\n\").",
+  nextjs:
+    "Next.js route handlers/pages API. Query: request.nextUrl.searchParams.get('x') (app) or req.query.x (pages). Body: await request.json(). Params: context.params. Responses: NextResponse.json(value, { status: n }) or res.status(n).json(value).",
+  elysia:
+    "Elysia (Bun/Node). The handler receives a typed object { query, params, body, headers }; infer fields from destructured properties and referenced schema models.",
+  fastapi:
+    "Python FastAPI. Query: Query(...) or annotated default parameters. Path: Path(...) parameters. Body: a Pydantic model parameter. Headers: Header(...). Responses: the returned Pydantic model/dict, response_model, status_code, or JSONResponse(content, status_code=n). SSE: StreamingResponse yielding 'event: NAME\\ndata: {...}\\n\\n'.",
+  flask:
+    "Python Flask. Query: request.args.get('x'). Body: request.get_json()/request.json. Headers: request.headers.get('x'). Responses: jsonify(value) or (jsonify(value), n). SSE: Response(generator, mimetype='text/event-stream').",
+  djangorestframework:
+    "Django REST Framework. Query: request.query_params.get('x'). Body: request.data or a serializer's validated_data. Responses: Response(serializer.data, status=n).",
+  starlette:
+    "Python Starlette. Query: request.query_params.get('x'). Body: await request.json(). Path params arrive as handler arguments. Responses: JSONResponse(value, status_code=n). SSE: StreamingResponse.",
+  gin:
+    "Go Gin. Query: c.Query('x')/c.DefaultQuery. Path: c.Param('x'). Body: c.ShouldBindJSON(&v)/c.BindJSON; infer fields from the Go struct and its json tags. Headers: c.GetHeader('x'). Responses: c.JSON(n, value) from a struct or map. SSE: c.SSEvent('NAME', data).",
+  chi:
+    "Go chi with net/http. Query: r.URL.Query().Get('x'). Path: chi.URLParam(r, 'x'). Body: json.NewDecoder(r.Body).Decode(&v). Responses: w.WriteHeader(n) then json.NewEncoder(w).Encode(value).",
+  nethttp:
+    "Go net/http. Query: r.URL.Query().Get('x'). Body: json.NewDecoder(r.Body).Decode(&v). Responses: w.WriteHeader(n) and json.NewEncoder(w).Encode(value); infer struct fields from json tags.",
+  gorillamux:
+    "Go gorilla/mux with net/http. Path: mux.Vars(r)['x']. Query: r.URL.Query().Get('x'). Body: json.NewDecoder(r.Body).Decode(&v). Responses: json.NewEncoder(w).Encode(value) after w.WriteHeader(n).",
+  echo:
+    "Go Echo. Query: c.QueryParam('x'). Path: c.Param('x'). Body: c.Bind(&v). Responses: c.JSON(n, value); infer fields from the bound struct's json tags.",
+  fiber:
+    "Go Fiber. Query: c.Query('x'). Path: c.Params('x'). Body: c.BodyParser(&v). Responses: c.Status(n).JSON(value) or c.JSON(n, value).",
+  spring:
+    "Java Spring Boot. Query: @RequestParam parameters, @ModelAttribute or a query DTO bean. Body: @RequestBody DTO/record. Headers: @RequestHeader. Responses: ResponseEntity.ok(value), ResponseEntity.status(n).body(value), or the returned DTO/record. Infer properties from referenced Java beans, records, or DTO classes.",
+  jaxrs:
+    "JAX-RS (Jersey/Quarkus/RESTEasy/Dropwizard). @QueryParam, @PathParam, @HeaderParam, @BeanParam; entity body parameters or @BeanParam DTOs. Responses: Response.ok(value).status(n).build() or a returned POJO/record.",
+  micronaut:
+    "Micronaut. @QueryValue, @PathVariable, @Header, and @Body DTO parameters. Responses: HttpResponse.ok(value), HttpResponse.status(n).body(value), or the returned POJO.",
+  aspnet:
+    "C# ASP.NET Core. [FromQuery], [FromRoute], [FromHeader] parameters and [FromBody] DTO/record properties. Actions return Ok(value), OkObjectResult, StatusCode(n, value), or Results.Ok/TypedResults. Infer DTO/record properties.",
+  fastendpoints:
+    "C# FastEndpoints. Request DTO properties bind query/route/body according to the route; responses use SendAsync(value, n). Infer request/response DTO properties.",
+  axum:
+    "Rust Axum. Extractors Query::<T>, Path<T>, Json<T>, and HeaderMap; T is a serde struct (honor serde(rename) and skip attributes). Responses: Json(value) or (StatusCode, Json(value)); infer serde struct fields.",
+  actix:
+    "Rust actix-web. web::Query<T>, web::Path<T>, web::Json<T> extractors with serde structs. Responses: HttpResponse::Ok().json(value) or HttpResponse::build(StatusCode).json(value).",
+  rocket:
+    "Rust Rocket. #[query(...)]/#[path(...)] guards and #[data(...)] with serde structs. Responses: Json(value) with serde Serialize structs or serde_json::json! object literals.",
+  laravel:
+    "PHP Laravel. Query: $request->query('x') or $request->input('x'). Body: $request->input(), $request->json()->all(), or $request->validate() rules. Responses: response()->json($value, n), or API resources such as XResource / XResource::collection.",
+  symfony:
+    "PHP Symfony. Query: $request->query->get('x'). Body: $request->request->all() or json_decode($request->getContent(), true). Responses: new JsonResponse($value, n).",
+  slim:
+    "PHP Slim. Query: $request->getQueryParams()['x']. Body: $request->getParsedBody(). Responses: $response->withJson($value, n).",
+};
+
+const LANGUAGE_HINTS: Record<string, string> = {
+  typescript:
+    "Node.js/TypeScript HTTP handler. Look for framework request accessors (request.query, request.body, request.headers) and JSON replies (reply.send, res.json, ctx.body).",
+  python:
+    "Python web framework. Look for request query/body accessors (request.args/query_params, get_json/request.data/await request.json) and JSON responses (jsonify, JSONResponse, Response).",
+  go: "Go HTTP handler. Look for URL query accessors, bound structs with json tags for bodies and responses, and JSON encoders or framework JSON replies.",
+  java: "JVM web framework. Look for @RequestParam/@QueryParam/@RequestBody-style annotations, DTO/record/bean properties, and JSON responses such as ResponseEntity or Response builders.",
+  csharp: ".NET web stack. Look for [FromQuery]/[FromBody]/[FromRoute] bound DTO or record properties and Ok/StatusCode/Results JSON replies.",
+  rust: "Rust web framework. Look for serde extractor structs (Query/Path/Json) and Json responses; field names come from the struct and serde rename attributes.",
+  php: "PHP web framework. Look for request query/input accessors, validated data arrays, and JSON response helpers.",
+};
+
+const COMMON_RULES = `You are a static-analysis assistant for ONE already-discovered API request handler.
 The route, method and path are GIVEN. Never invent, rename or relocate routes, methods or paths.
-Infer request and response shapes ONLY from the handler source code:
-- Query parameters: req.query.x, req.query["x"], or destructured query objects.
-- Headers: req.headers.x, req.get("x"), req.header("x").
-- JSON request body: req.body.x, destructured bodies, express-validator chains, or zod schemas.
-- Responses: res.status(n).json(value), res.json(value), res.send(value). Infer each status code actually used.
-- SSE: res.write chunks shaped "event: NAME\\ndata: {...}\\n\\n". List each distinct event name and its data shape.
-Use only fields evidenced by the code. Do not guess standard fields (id, createdAt, pagination) unless present.
+Infer request and response shapes ONLY from the provided handler source code (and types, DTOs, structs, schemas or validator rules it directly references or declares inline).
+Rules:
+- Fill ONLY the categories listed in "missing"; omit every other category.
+- Report a parameter or field only when it is explicitly read, bound, validated, or declared in the provided code. Never invent conventional fields (id, createdAt, pagination, tenant ids) that are not present.
+- When a value is an opaque variable or an unseen DTO/struct, omit that property; never guess its inner shape and never emit an empty {} schema for a property.
+- Every schema of type "array" MUST include an "items" schema describing the element shape. If the element shape is unknown, do not report that array.
+- An object schema with no provable properties is not evidence; omit that schema (or the enclosing property) instead of returning {"type":"object"}.
+- Provide a schema for EVERY response status code the handler can return (for example 200/201 success and 400/401/404 errors when the code branches to them).
+- Path parameters are already known and must never be repeated.
+- Use only this JSON Schema subset: type (object, array, string, number, integer, boolean), properties, required, items, enum, format, const, nullable.
+- When the "existingComponents" list contains a model that the handler clearly accepts or returns, you MAY reference it with {"$ref":"#/components/schemas/Name"} using the EXACT listed name (for example array items or an entire body/response). Never invent, guess, rename or partially match component names; every $ref MUST come from that list. Do not nest extra keys alongside a $ref.
+- No other external references, and no example data copied from tests.
+- Omit any key you have no code evidence for. If nothing can be inferred, return {"confidence":"low"}.
+- confidence is "high" only when every returned shape is explicit in the code, "medium" when inferred from usage, "low" otherwise.
 Respond with ONE JSON object and nothing else (no markdown, no prose):
 {
   "queryParameters": [{"name": "string", "required": false, "schema": {"type": "string"}}],
@@ -30,28 +114,37 @@ Respond with ONE JSON object and nothing else (no markdown, no prose):
   "sseEvents": [{"name": "tick", "dataSchema": {"type": "object", "properties": {"t": {"type": "number"}}}}],
   "confidence": "high",
   "rationale": "one short English sentence"
-}
-Rules:
-- JSON Schema subset only: type (object, array, string, number, integer, boolean), properties, required, items, enum, format, const, nullable.
-- No $ref, no external references, no example data copied from tests.
-- Omit any key you have no code evidence for. If nothing can be inferred, return {"confidence": "low"}.
-- Path parameters are already known and must never be repeated.
-- confidence is high only when every returned shape is explicit in the code, medium when inferred from usage, low otherwise.`;
+}`;
 
 /** Build the OpenAI-compatible chat messages for one handler gap request. */
 export function buildGapMessages(request: GapRequest): GapPromptMessage[] {
+  const frameworkHint =
+    FRAMEWORK_HINTS[request.known.framework] ??
+    LANGUAGE_HINTS[request.known.language] ??
+    "";
+  const system = frameworkHint
+    ? `${COMMON_RULES}\nFramework: ${request.known.framework} (${request.known.language}).\n${frameworkHint}`
+    : COMMON_RULES;
   const userPayload = {
     route: request.route,
     origin: request.origin,
     missing: request.gaps,
     known: request.known,
+    ...(request.componentCatalog?.length
+      ? {
+          existingComponents: request.componentCatalog.map((entry) => ({
+            name: entry.name,
+            ...(entry.properties?.length ? { properties: entry.properties } : {}),
+          })),
+        }
+      : {}),
     handlerSource: request.handlerSource,
   };
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: system },
     {
       role: "user",
-      content: `Analyze this handler and return the JSON object described by the system message.\n${JSON.stringify(
+      content: `Analyze this handler and return the JSON object described by the system message. Only fill categories listed in "missing".\n${JSON.stringify(
         userPayload,
         null,
         2,
@@ -80,6 +173,7 @@ const MAX_ENUM = 50;
 export function sanitizeSchema(
   raw: unknown,
   depth = 0,
+  allowedRefs?: ReadonlySet<string>,
 ): JsonSchema | null {
   if (depth > MAX_DEPTH) return null;
   // Schema fragments must be objects; bare primitives are not valid schemas.
@@ -96,6 +190,20 @@ export function sanitizeSchema(
 
   const source = raw as Record<string, unknown>;
   const schema: JsonSchema = {};
+
+  // Component references are only valid when the deterministic pass already
+  // extracted that exact component name; anything else is discarded here so
+  // the model can never create dangling or fabricated references.
+  if (
+    allowedRefs &&
+    typeof source.$ref === "string" &&
+    /^#\/components\/schemas\/[A-Za-z0-9._$-]{1,120}$/.test(source.$ref)
+  ) {
+    const name = source.$ref.slice("#/components/schemas/".length);
+    if (allowedRefs.has(name)) {
+      return { $ref: source.$ref } as JsonSchema;
+    }
+  }
 
   if (typeof source.type === "string" && ALLOWED_TYPES.has(source.type)) {
     schema.type = source.type as JsonSchema["type"];
@@ -129,7 +237,7 @@ export function sanitizeSchema(
       )) {
         if (count >= MAX_PROPERTIES) break;
         if (!/^[A-Za-z0-9._$-]{1,80}$/.test(key)) continue;
-        const child = sanitizeSchema(value, depth + 1);
+        const child = sanitizeSchema(value, depth + 1, allowedRefs);
         if (child) {
           properties[key] = child;
           count += 1;
@@ -148,7 +256,7 @@ export function sanitizeSchema(
   }
 
   if (source.type === "array") {
-    const items = sanitizeSchema(source.items, depth + 1);
+    const items = sanitizeSchema(source.items, depth + 1, allowedRefs);
     if (items) schema.items = items;
   }
 
@@ -170,7 +278,7 @@ interface ParameterEntry {
   schema?: unknown;
 }
 
-function toParameterSchema(entries: unknown): JsonSchema | null {
+function toParameterSchema(entries: unknown, allowedRefs?: ReadonlySet<string>): JsonSchema | null {
   if (!Array.isArray(entries)) return null;
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
@@ -180,7 +288,7 @@ function toParameterSchema(entries: unknown): JsonSchema | null {
     if (typeof item.name !== "string" || !/^[A-Za-z0-9._$-]{1,80}$/.test(item.name)) {
       continue;
     }
-    const schema = sanitizeSchema(item.schema);
+    const schema = sanitizeSchema(item.schema, 0, allowedRefs);
     if (!schema) continue;
     properties[item.name] = schema;
     if (item.required === true) required.push(item.name);
@@ -203,7 +311,10 @@ function stripFences(text: string): string {
  * Parse and validate a raw model response into a GapResolution, or null when
  * it carries no usable, safe content.
  */
-export function parseGapResolution(raw: unknown): GapResolution | null {
+export function parseGapResolution(
+  raw: unknown,
+  allowedRefs?: ReadonlySet<string>,
+): GapResolution | null {
   let parsed: unknown = raw;
   if (typeof raw === "string") {
     try {
@@ -215,9 +326,9 @@ export function parseGapResolution(raw: unknown): GapResolution | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const source = parsed as Record<string, unknown>;
 
-  const querySchema = toParameterSchema(source.queryParameters);
-  const headerSchema = toParameterSchema(source.headerParameters);
-  const bodySchema = sanitizeSchema(source.bodySchema);
+  const querySchema = toParameterSchema(source.queryParameters, allowedRefs);
+  const headerSchema = toParameterSchema(source.headerParameters, allowedRefs);
+  const bodySchema = sanitizeSchema(source.bodySchema, 0, allowedRefs);
 
   const responseSchemas: Record<string, JsonSchema> = {};
   if (source.responseSchemas && typeof source.responseSchemas === "object" && !Array.isArray(source.responseSchemas)) {
@@ -225,7 +336,7 @@ export function parseGapResolution(raw: unknown): GapResolution | null {
       source.responseSchemas as Record<string, unknown>,
     )) {
       if (!/^([1-5][0-9Xx]{2}|default)$/.test(status)) continue;
-      const schema = sanitizeSchema(value);
+      const schema = sanitizeSchema(value, 0, allowedRefs);
       if (schema) responseSchemas[status] = schema;
     }
   }
@@ -240,6 +351,8 @@ export function parseGapResolution(raw: unknown): GapResolution | null {
       }
       const dataSchema = sanitizeSchema(
         (event as Record<string, unknown>).dataSchema,
+        0,
+        allowedRefs,
       );
       sseEvents ??= [];
       sseEvents.push({

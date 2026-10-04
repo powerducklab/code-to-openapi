@@ -1,0 +1,13 @@
+{
+  "assertions": 56,
+  "mismatches": 1,
+  "errors": [
+    {
+      "where": "get /users/{id}",
+      "error": "missing response",
+      "status": "404"
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

@@ -1,3 +1,4 @@
+import {mergeResponseVariants} from "../../core/response-variants.js";
 /**
  * Shared analysis for plain Go `func(w http.ResponseWriter, r *http.Request)`
  * handlers, used by the net/http and gorilla/mux packs. Echo and Fiber use
@@ -16,12 +17,15 @@
  * Anything not statically provable becomes an explicit GapCode.
  */
 
+import { resolveGoCall, goSourceFile } from "./symbols.js";
+import { dirname } from "node:path";
 import type { GapCode, RouteCandidate, RouteParameter } from "../../core/types.js";
 import type { JsonSchema } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "./index.js";
 import {
   ensureGoComponent,
   goTypeToSchema,
+  goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
@@ -94,22 +98,20 @@ export function scalarLiteral(node: TsNode): JsonSchema | null {
 }
 
 /** Literal maps/slices/structs used as an inline JSON body. */
-export function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): JsonSchema | null {
+export function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0, resolveValue?: (node: TsNode) => JsonSchema | null): JsonSchema | null {
   if (!node || depth > 6) return null;
   if (node.type === "unary_expression") {
-    return literalSchema(node.namedChildren[0], index, depth + 1);
+    return literalSchema(node.namedChildren[0], index, depth + 1, resolveValue);
   }
   if (node.type === "composite_literal") {
     const typeNode = node.namedChildren[0];
     const value = node.namedChildren[1];
     if (typeNode && (typeNode.type === "slice_type" || typeNode.type === "array_type")) {
-      const inner = typeNode.namedChildren[0];
-      return { type: "array", items: inner ? goTypeToSchema(inner, index, depth + 1) : {} };
+      return goConstructedTypeToSchema(typeNode, index);
     }
     if (typeNode && typeNode.type === "type_identifier") {
       if (index.byName.has(typeNode.text)) {
-        ensureGoComponent(typeNode.text, index);
-        return { $ref: `#/components/schemas/${typeNode.text}` };
+        return goTypeToSchema(typeNode, index, depth + 1);
       }
       return {};
     }
@@ -120,10 +122,10 @@ export function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 
         const valNode = unwrapElement(element.namedChildren[1]);
         const keyText = keyNode ? literalString(keyNode) : null;
         if (!keyText || !valNode) continue;
-        properties[keyText] = scalarLiteral(valNode) ?? literalSchema(valNode, index, depth + 1) ?? {};
+        properties[keyText] = scalarLiteral(valNode) ?? literalSchema(valNode, index, depth + 1, resolveValue) ?? resolveValue?.(valNode) ?? {};
       }
     }
-    if (Object.keys(properties).length > 0) return { type: "object", properties };
+    if (Object.keys(properties).length > 0) return { type: "object", properties, required: Object.keys(properties) };
     if (typeNode && typeNode.type === "map_type") return { type: "object" };
   }
   return null;
@@ -149,6 +151,7 @@ export interface StdHandlerOptions {
   body: TsNode | null;
   declaredPathParams: string[];
   modelIndex: GoModelIndex;
+  inputModel?: GoModelIndex;
   analysis: GoAnalysis;
   /**
    * Pack-specific path-param reader. Given a call node and its selector, return
@@ -157,9 +160,182 @@ export interface StdHandlerOptions {
   readPathParam?: (call: TsNode, sel: { receiver: TsNode; method: string }, args: TsNode[]) => string | null;
 }
 
+/** Recognize an actual local JSON writer, not a helper name convention. */
+function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, depth = 0): { status: TsNode | undefined; payload: TsNode | undefined } | null {
+  if (depth > 4) return null;
+  const callee = call.namedChildren[0];
+  if (callee?.type !== "identifier" || !analysis.functions.has(callee.text)) return null;
+  let root = body;
+  while (root.parent) root = root.parent;
+  const owner = [...analysis.files.values()].find(file => file.root.id === root.id);
+  if (!owner) return null;
+  const helpers = (analysis.functions.get(callee.text) ?? []).filter(fn => dirname(fn.file) === dirname(owner.path) && fn.body);
+  if (helpers.length !== 1) return null;
+  const helper = helpers[0]!;
+  const parameters = helper.node.namedChildren.find(node => node.type === "parameter_list")?.namedChildren.flatMap(parameter => parameter.namedChildren.filter(node => node.type === "identifier").map(node => ({name:node.text, type:parameter.namedChildren.at(-1)?.text ?? ""}))) ?? [];
+  const writer = parameters.find(parameter => /(?:^|\.)ResponseWriter$/.test(parameter.type));
+  if (!writer) return null;
+  const calls = findAll(helper.body!, node => node.type === "call_expression");
+  const headers = calls.filter(node => selectorCall(node)?.method === "WriteHeader" && selectorCall(node)?.receiver.text === writer.name);
+  if (!headers.length && calls.length === 1 && !findAll(helper.body!, n => n.type === "assignment_statement" || n.type === "short_var_declaration").length) {
+    const nested = jsonWriterHelper(calls[0]!, helper.body!, analysis, depth + 1);
+    const args = positionalArguments(call);
+    const callerParameters = body.parent?.childForFieldName("parameters");
+    const writerIndex = parameters.findIndex(p => p.name === writer.name);
+    const callerWriter = callerParameters?.namedChildren.some(p => p.namedChildren.some(n => n.type === "identifier" && n.text === args[writerIndex]?.text) && /(?:^|\.)ResponseWriter$/.test(p.childForFieldName("type")?.text ?? ""));
+    if (nested && callerWriter) {
+      const substitute = (node: TsNode | undefined) => {
+        const at = node?.type === "identifier" ? parameters.findIndex(p => p.name === node.text) : -1;
+        return at >= 0 ? args[at] : node;
+      };
+      return {status: substitute(nested.status), payload: substitute(nested.payload)};
+    }
+  }
+  const encodes = calls.filter(node => {
+    const encode = selectorCall(node);
+    if (encode?.method !== "Encode") return false;
+    const encoder = selectorCall(encode.receiver);
+    return encoder?.method === "NewEncoder" && encoder.receiver.text === "json" && positionalArguments(encode.receiver)[0]?.text === writer.name;
+  });
+  if (headers.length !== 1) return null;
+  const status = positionalArguments(headers[0]!)[0];
+  let payload = encodes.length === 1 ? positionalArguments(encodes[0]!)[0] : undefined;
+  if (!encodes.length) {
+    const writes = calls.filter(node => selectorCall(node)?.method === "Write" && selectorCall(node)?.receiver.text === writer.name);
+    const output = writes.length === 1 ? positionalArguments(writes[0]!)[0] : undefined;
+    if (output?.type === "identifier") {
+      const bindings = findAll(helper.body!, n => n.type === "short_var_declaration" || n.type === "assignment_statement")
+        .filter(n => n.namedChildren[0] && findAll(n.namedChildren[0], c => c.type === "identifier" && c.text === output.text).length);
+      const binding = bindings.length === 1 ? bindings[0] : undefined;
+      const lists = binding?.namedChildren.filter(n => n.type === "expression_list");
+      const value = lists?.[1]?.namedChildren[0];
+      const marshal = value ? selectorCall(value) : null;
+      const helperFile = goSourceFile(helper.node, analysis);
+      const imported = helperFile && marshal && findAll(helperFile.root, n => n.type === "import_spec").some(n =>
+        n.childForFieldName("path")?.text === '"encoding/json"' &&
+        (n.childForFieldName("name")?.text ?? "json") === marshal.receiver.text);
+      if (imported && !parameters.some(p => p.name === marshal?.receiver.text) && marshal?.method === "Marshal" && lists?.[0]?.namedChildren[0]?.text === output.text &&
+          binding!.startIndex + binding!.text.length < writes[0]!.startIndex) payload = positionalArguments(value!)[0];
+    }
+  }
+  if (encodes.length > 1) return null;
+  if (status?.type !== "identifier" || payload?.type !== "identifier") return null;
+  if (findAll(helper.body!, node => node.type === "assignment_statement").some(node => {
+    const left = node.namedChildren[0];
+    return left && findAll(left, item => item.type === "identifier" && [status.text, payload.text].includes(item.text)).length > 0;
+  })) return null;
+  const statusIndex = parameters.findIndex(parameter => parameter.name === status.text);
+  const payloadIndex = parameters.findIndex(parameter => parameter.name === payload.text);
+  const writerIndex = parameters.findIndex(parameter => parameter.name === writer.name);
+  const values = positionalArguments(call);
+  // Prove that the caller passed its response writer, not an unrelated buffer.
+  const enclosingParams = body.parent?.childForFieldName("parameters") ?? body.parent?.namedChildren.filter(node => node.type === "parameter_list").at(-1);
+  const callerWriter = enclosingParams?.namedChildren.some(parameter => parameter.namedChildren.some(node => node.type === "identifier" && node.text === values[writerIndex]?.text) && /(?:^|\.)ResponseWriter$/.test(parameter.namedChildren.at(-1)?.text ?? ""));
+  return statusIndex >= 0 && payloadIndex >= 0 && callerWriter ? { status:values[statusIndex], payload:values[payloadIndex] } : null;
+}
+
+/** Infer wire parameter types only from a verified standard-library conversion. */
+export function convertedParameterSchema(call: TsNode, analysis: GoAnalysis, depth = 0): JsonSchema {
+  const outer = call.parent?.parent;
+  const converter = outer?.type === "call_expression" ? selectorCall(outer) : null;
+  const owner = goSourceFile(call, analysis);
+  if (!owner) return {type:"string"};
+  if (!converter && depth === 0 && call.parent?.type === "expression_list" && call.parent.parent?.type === "short_var_declaration") {
+    const declaration = call.parent.parent;
+    const lists = declaration.namedChildren.filter(n => n.type === "expression_list");
+    const name = lists[0]?.namedChildren[0]?.text;
+    let body = declaration.parent;
+    while (body && body.type !== "function_declaration" && body.type !== "method_declaration") body = body.parent;
+    if (name && body && lists[0]?.namedChildren.length === 1 && lists[1]?.namedChildren.length === 1) {
+      const writes = findAll(body, n => (n.type === "assignment_statement" || n.type === "short_var_declaration") && n.namedChildren[0]?.namedChildren.some(c => c.text === name));
+      if (writes.length === 1) {
+        const types = new Set(findAll(body, n => n.type === "identifier" && n.text === name && n.startIndex > declaration.startIndex)
+          .map(n => convertedParameterSchema(n, analysis, 1).type).filter(type => type && type !== "string"));
+        if (types.size === 1) return {type:[...types][0]!};
+      }
+    }
+  }
+  if (!converter) return {type:"string"};
+  const imported = findAll(owner.root, n => n.type === "import_spec").some(n =>
+    n.childForFieldName("path")?.text === '"strconv"' &&
+    (n.childForFieldName("name")?.text ?? "strconv") === converter.receiver.text);
+  // A local binding can shadow the package alias.
+  let enclosing: TsNode | null = call;
+  while (enclosing && enclosing.type !== "function_declaration" && enclosing.type !== "method_declaration") enclosing = enclosing.parent;
+  const shadowed = enclosing && findAll(enclosing, n => n.type === "short_var_declaration" || n.type === "var_spec" || n.type === "parameter_declaration").some(n => {
+    const names = n.type === "short_var_declaration" ? n.namedChildren[0]?.namedChildren ?? [] : n.namedChildren;
+    return names.some(c => c.type === "identifier" && c.text === converter.receiver.text);
+  });
+  if (!imported || shadowed) return {type:"string"};
+  if (converter.method === "Atoi") return {type:"integer"};
+  if (converter.method === "ParseBool") return {type:"boolean"};
+  if (converter.method === "ParseFloat") return {type:"number"};
+  return {type:"string"};
+}
+
+/** Follow only helpers receiving the original request, with bounded cycle protection. */
+function helperQueryParameters(body: TsNode, analysis: GoAnalysis): RouteParameter[] {
+  const parameters: RouteParameter[] = [];
+  const visited = new Set<string>();
+  const walk = (current: TsNode, request: string, depth: number) => {
+    if (depth > 6 || visited.size >= 64) return;
+    const key = `${current.id}:${request}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    // Rebinding the request invalidates the forwarding proof.
+    if (findAll(current, n => n.type === "assignment_statement" || n.type === "short_var_declaration").some(n => n.namedChildren[0]?.namedChildren.some(c => c.text === request))) return;
+    const aliases = new Map<string, TsNode>();
+    const declarations = findAll(current, n => n.type === "short_var_declaration");
+    for (const declaration of declarations) {
+      const lists = declaration.namedChildren.filter(n => n.type === "expression_list");
+      if (lists[0]?.namedChildren.length !== 1 || lists[1]?.namedChildren.length !== 1) continue;
+      const name = lists[0].namedChildren[0]!;
+      if (lists[1].namedChildren[0]?.text !== `${request}.URL.Query()`) continue;
+      const writes = findAll(current, n => n.type === "assignment_statement" || n.type === "short_var_declaration").filter(n => n.namedChildren[0]?.namedChildren.some(c => c.text === name.text));
+      if (writes.length === 1) aliases.set(name.text, declaration);
+    }
+    for (const call of findAll(current, n => n.type === "call_expression")) {
+      let scope = call.parent;
+      while (scope && scope.id !== current.id && scope.type !== "func_literal") scope = scope.parent;
+      if (scope?.id !== current.id) continue;
+      const sel = selectorCall(call);
+      const alias = sel ? aliases.get(sel.receiver.text) : undefined;
+      let inScope = false;
+      if (alias && alias.startIndex < call.startIndex) {
+        let ancestor = call.parent;
+        while (ancestor && ancestor.id !== current.id) {
+          if (ancestor.id === alias.parent?.id) { inScope = true; break; }
+          ancestor = ancestor.parent;
+        }
+        if (alias.parent?.id === current.id) inScope = true;
+      }
+      if (depth > 0 && sel?.method === "Get" && (sel.receiver.text === `${request}.URL.Query()` || inScope)) {
+        const name = literalString(positionalArguments(call)[0]);
+        if (name && !parameters.some(p => p.name === name)) {
+          parameters.push({name, in:"query", required:false, schema:convertedParameterSchema(call, analysis), confidence:"medium"});
+        }
+      }
+      const args = positionalArguments(call);
+      if (!args.some(arg => arg.text === request)) continue;
+      const fn = resolveGoCall(call, analysis);
+      if (!fn?.body) continue;
+      const declarations = fn.node.childForFieldName("parameters")?.namedChildren ?? [];
+      const names = declarations.flatMap(p => p.namedChildren.filter(c => c.type === "identifier").map(c => c.text));
+      args.forEach((arg, i) => { if (arg.text === request && names[i]) walk(fn.body!, names[i]!, depth + 1); });
+    }
+  };
+  const declarations = body.parent?.childForFieldName("parameters")?.namedChildren ?? [];
+  for (const parameter of declarations) {
+    const type = parameter.childForFieldName("type")?.text;
+    if (type !== "*http.Request") continue;
+    for (const name of parameter.namedChildren.filter(n => n.type === "identifier")) walk(body, name.text, 0);
+  }
+  return parameters;
+}
+
 export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEvidence {
   const { body, declaredPathParams, modelIndex: index, analysis, readPathParam } = opts;
-  const parameters: RouteParameter[] = [];
+  const parameters: RouteParameter[] = body ? helperQueryParameters(body, analysis) : [];
   const gaps = new Set<GapCode>();
   let requestBody: RouteCandidate["requestBody"];
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
@@ -188,13 +364,26 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
 
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
-      if (!sel) continue;
+      if (!sel) {
+        const helper = jsonWriterHelper(call, body, analysis);
+        if (helper) {
+          const status = statusCodeOf(helper.status) ?? "default";
+          const noBody = helper.payload?.text === "nil" || /^(?:1\d\d|204|205|304)$/.test(status);
+          const resolved = !noBody && helper.payload ? resolveGoPayloadValue(helper.payload, body, analysis, index, analysis.vars).schema : undefined;
+          const schema = resolved ?? (!noBody && helper.payload ? literalSchema(helper.payload, index, 0, (value) => resolveGoPayloadValue(value, body, analysis, index, analysis.vars).schema) ?? undefined : undefined);
+          if (status === "default" || (!noBody && (!schema || !Object.keys(schema).length))) gaps.add("response-unknown");
+          const previous = responseStatus.get(status)?.content?.[0]?.schema;
+          const merged = previous && schema && JSON.stringify(previous) !== JSON.stringify(schema) ? {anyOf:[previous,schema]} : schema ?? previous;
+          addResponse(status, {statusCode:status, description:"", confidence:"medium", ...(!noBody ? {content:[{mediaType:"application/json",schema:merged ?? {}}]} : {})});
+        }
+        continue;
+      }
       const args = positionalArguments(call);
 
       const customPath = readPathParam?.(call, sel, args);
       if (customPath && declaredPathParams.includes(customPath) &&
         !parameters.some((p) => p.name === customPath)) {
-        parameters.push({ name: customPath, in: "path", required: true, schema: { type: "string" }, confidence: "high" });
+        parameters.push({ name: customPath, in: "path", required: true, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         continue;
       }
 
@@ -202,7 +391,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       if (sel.method === "PathValue" && sel.receiver.type === "identifier") {
         const name = literalString(args[0]);
         if (name && declaredPathParams.includes(name) && !parameters.some((p) => p.name === name)) {
-          parameters.push({ name, in: "path", required: true, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "path", required: true, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -215,7 +404,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       ) {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name)) {
-          parameters.push({ name, in: "query", required: false, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "query", required: false, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -224,7 +413,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       if (sel.method === "Get" && call.text.includes(".Header.Get(")) {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name)) {
-          parameters.push({ name, in: "header", required: false, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "header", required: false, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -233,7 +422,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       if (sel.method === "Cookie" && sel.receiver.type === "identifier") {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name && p.in === "cookie")) {
-          parameters.push({ name, in: "cookie", required: false, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "cookie", required: false, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -242,7 +431,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
       if (sel.method === "FormValue" || sel.method === "PostFormValue") {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name)) {
-          parameters.push({ name, in: "query", required: false, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "query", required: false, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -352,7 +541,7 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
         requestBody = {
           required: true,
           confidence: "high",
-          content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, index), confidence: "high" }],
+          content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, opts.inputModel ?? index), confidence: "high" }],
         };
       } else {
         gaps.add("body-schema-unknown");
@@ -362,15 +551,13 @@ export function analyzeStdHTTPHandler(opts: StdHandlerOptions): StdHandlerEviden
     // json.NewEncoder(w).Encode(x) — JSON responses with block-scoped status.
     collectEncodeResponses(body, analysis, index, (status, schema) => {
       const existing = responseStatus.get(status);
-      if (existing?.content) return;
-      responseStatus.set(status, {
+      const response: RouteCandidate["responses"][number] = {
         statusCode: status,
         description: "",
         confidence: schema ? "high" : "medium",
-        ...(schema
-          ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
-          : {}),
-      });
+        content: [{mediaType: "application/json", schema: schema ?? {}}],
+      };
+      responseStatus.set(status, existing ? mergeResponseVariants(existing, response) : response);
       if (!schema) gaps.add("response-schema-unknown");
     });
 
@@ -463,12 +650,11 @@ function responsePayloadSchema(
   index: GoModelIndex,
 ): JsonSchema | null {
   if (!arg) return null;
-  if (arg.type === "call_expression") {
-    return resolveGoPayloadValue(arg, body, analysis, index, analysis.vars).schema;
-  }
+  const resolved = resolveGoPayloadValue(arg, body, analysis, index, analysis.vars).schema;
+  if (resolved) return resolved;
   if (arg.type === "identifier") {
     const typeNode = resolveLocalType(body, arg.text);
     return typeNode ? goTypeToSchema(typeNode, index) : null;
   }
-  return literalSchema(arg, index);
+  return literalSchema(arg, index, 0, (value) => resolveGoPayloadValue(value, body, analysis, index, analysis.vars).schema);
 }

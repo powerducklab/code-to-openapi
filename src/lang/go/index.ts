@@ -97,49 +97,30 @@ export function formTag(field: GoField): string | null {
   return value.split(",")[0];
 }
 
+/** Parse named and anonymous struct fields with the same tag semantics. */
+export function goStructFields(structType: TsNode): GoField[] {
+  const list = structType.namedChildren.find(node => node.type === "field_declaration_list");
+  const fields: GoField[] = [];
+  for (const field of list?.namedChildren ?? []) {
+    if (field.type !== "field_declaration") continue;
+    const typeNode = field.childForFieldName("type");
+    if (!typeNode) continue;
+    const names = childrenOfType(field, "field_identifier");
+    const tag = field.namedChildren.find(node => node.type === "raw_string_literal")?.text ?? null;
+    if (!names.length) fields.push({ goName:typeNode.text.replace(/^\*/, ""),typeNode,tag,embedded:true });
+    else for (const name of names) fields.push({goName:name.text,typeNode,tag});
+  }
+  return fields;
+}
+
 function collectStructs(file: GoFile): GoStruct[] {
   const result: GoStruct[] = [];
   for (const declaration of findAll(file.root, (n) => n.type === "type_declaration")) {
     for (const spec of childrenOfType(declaration, "type_spec")) {
       const nameNode = spec.namedChildren[0];
-      const structType = findFirst(
-        spec,
-        (n) => n.type === "struct_type",
-      );
-      if (!nameNode || !structType) continue;
-      const fieldList = findFirst(structType, (n) => n.type === "field_declaration_list");
-      const fields: GoField[] = [];
-      if (fieldList) {
-        for (const field of childrenOfType(fieldList, "field_declaration")) {
-          const names = childrenOfType(field, "field_identifier");
-          const typeNode = field.namedChildren.find((child) =>
-            [
-              "type_identifier",
-              "pointer_type",
-              "slice_type",
-              "array_type",
-              "map_type",
-              "qualified_type",
-              "struct_type",
-              "interface_type",
-            ].includes(child.type),
-          );
-          const tagNode = field.namedChildren.find((child) => child.type === "raw_string_literal");
-          if (!typeNode) continue;
-          if (names.length === 0) {
-            // Embedded field.
-            fields.push({ goName: typeNode.text.replace(/^\*/, ""), typeNode, tag: null, embedded: true });
-            continue;
-          }
-          for (const name of names) {
-            fields.push({
-              goName: name.text,
-              typeNode,
-              tag: tagNode ? tagNode.text : null,
-            });
-          }
-        }
-      }
+      const structType = spec.childForFieldName("type") ?? spec.namedChildren.at(-1);
+      if (!nameNode || structType?.type !== "struct_type") continue;
+      const fields = goStructFields(structType);
       result.push({ name: nameNode.text, file: file.path, node: structType, fields });
     }
   }

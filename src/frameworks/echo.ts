@@ -10,6 +10,9 @@
  *    shared Go payload resolver; unproven payloads keep an honest gap.
  */
 
+import { goSourceFile, resolveGoCall } from "../lang/go/symbols.js";
+import { mergeResponseVariants } from "../core/response-variants.js";
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
 import type {
   Confidence,
   ExtractionResult,
@@ -26,10 +29,12 @@ import {
   ensureGoComponent,
   functionResultTypeNode,
   goTypeToSchema,
+  goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
 } from "../lang/go/schema.js";
+import { literalSchema, scalarLiteral } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   findAll,
@@ -230,9 +235,10 @@ function payloadSchema(
   index: GoModelIndex,
 ): JsonSchema | null {
   if (!arg) return null;
-  if (arg.type === "call_expression") {
-    return resolveGoPayloadValue(arg, body, analysis, index, analysis.vars).schema;
-  }
+  const shared = resolveGoPayloadValue(arg, body, analysis, index, analysis.vars).schema
+    ?? scalarLiteral(arg)
+    ?? literalSchema(arg, index, 0, value => resolveGoPayloadValue(value, body, analysis, index, analysis.vars).schema);
+  if (shared) return shared;
   if (arg.type === "identifier") {
     if (body) {
       const typeNode = resolveLocalType(body, arg.text);
@@ -244,22 +250,12 @@ function payloadSchema(
   if (arg.type === "composite_literal") {
     const typeNode = arg.namedChildren[0];
     if (typeNode && (typeNode.type === "slice_type" || typeNode.type === "array_type")) {
-      const inner = typeNode.namedChildren[0];
-      if (inner) {
-        let t: TsNode | undefined = inner;
-        while (t && t.type === "pointer_type") t = t.namedChildren[0];
-        if (t && t.type === "type_identifier" && index.byName.has(t.text)) {
-          ensureGoComponent(t.text, index);
-          return { type: "array", items: { $ref: `#/components/schemas/${t.text}` } };
-        }
-      }
-      return { type: "array" };
+      return goConstructedTypeToSchema(typeNode, index);
     }
     let t: TsNode | undefined = typeNode;
     while (t && t.type === "pointer_type") t = t.namedChildren[0];
     if (t && t.type === "type_identifier" && index.byName.has(t.text)) {
-      ensureGoComponent(t.text, index);
-      return { $ref: `#/components/schemas/${t.text}` };
+      return goTypeToSchema(t, index);
     }
   }
   return null;
@@ -272,27 +268,57 @@ interface Evidence {
   gaps: Set<GapCode>;
 }
 
+function echoContexts(fn: GoFunction, analysis: GoAnalysis): Set<string> {
+  const file = goSourceFile(fn.node, analysis);
+  const aliases = new Set<string>();
+  for (const spec of file ? findAll(file.root, node => node.type === "import_spec") : []) {
+    const path = spec.childForFieldName("path") ?? spec.namedChildren.find(node => node.type === "interpreted_string_literal");
+    if (path && /"github\.com\/labstack\/echo(?:\/v[34])?"/.test(path.text)) aliases.add(spec.childForFieldName("name")?.text ?? "echo");
+  }
+  const result = new Set<string>();
+  const parameters = fn.node.childForFieldName("parameters");
+  for (const parameter of parameters?.namedChildren ?? []) {
+    const type = parameter.childForFieldName("type");
+    if (!type || ![...aliases].some(alias => type.text === `${alias}.Context`)) continue;
+    for (const name of parameter.namedChildren.filter(node => node.type === "identifier")) result.add(name.text);
+  }
+  return result;
+}
+
 function analyzeEchoHandler(
   fn: GoFunction,
   analysis: GoAnalysis,
   modelIndex: GoModelIndex,
+  inputModel: GoModelIndex,
   declaredParams: string[],
 ): Evidence {
   const parameters: RouteParameter[] = [];
   const gaps = new Set<GapCode>();
   const body = fn.body;
+  const contexts = echoContexts(fn, analysis);
   let requestBody: RouteCandidate["requestBody"];
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
+  const addResponse = (status: string, response: RouteCandidate["responses"][number]) => {
+    const previous = responseStatus.get(status);
+    responseStatus.set(status, previous ? mergeResponseVariants(previous, response) : response);
+  };
 
   if (body) {
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
       const sel = selectorCall(call);
       if (!sel) continue;
       const args = positionalArguments(call);
+      let ancestor = call.parent;
+      while (ancestor && ancestor.id !== body.id && ancestor.type !== "func_literal") ancestor = ancestor.parent;
+      if (ancestor?.type === "func_literal") continue;
+      const isContext = sel.receiver.type === "identifier" && contexts.has(sel.receiver.text);
+      const isHeader = [...contexts].some(name => sel.receiver.text === `${name}.Request().Header`);
+      if (!isContext && !isHeader && !["bind", "Bind"].includes(sel.method)) continue;
+
 
       if (sel.method === "Param") {
         const name = literalString(args[0]);
-        if (name && declaredParams.includes(name) && !parameters.some((p) => p.name === name)) {
+        if (name && declaredParams.includes(name) && !parameters.some((p) => p.name === name && p.in === "path")) {
           parameters.push({ name, in: "path", required: true, schema: { type: "string" }, confidence: "high" });
         }
         continue;
@@ -300,7 +326,7 @@ function analyzeEchoHandler(
 
       if (sel.method === "QueryParam") {
         const name = literalString(args[0]);
-        if (name && !parameters.some((p) => p.name === name)) {
+        if (name && !parameters.some((p) => p.name === name && p.in === "query")) {
           parameters.push({ name, in: "query", required: false, schema: { type: "string" }, confidence: "high" });
         }
         continue;
@@ -309,7 +335,7 @@ function analyzeEchoHandler(
       // c.Request().Header.Get("X")
       if (sel.method === "Get" && call.text.includes(".Request().Header.Get(")) {
         const name = literalString(args[0]);
-        if (name && !parameters.some((p) => p.name === name)) {
+        if (name && !parameters.some((p) => p.name === name && p.in === "header")) {
           parameters.push({ name, in: "header", required: false, schema: { type: "string" }, confidence: "high" });
         }
         continue;
@@ -323,13 +349,14 @@ function analyzeEchoHandler(
         continue;
       }
 
-      if (sel.method === "Bind" && args[0]) {
+      if (sel.method === "Validate") gaps.add("body-schema-unknown");
+      if (isContext && sel.method === "Bind" && args[0]) {
         const typeNode = referencedType(args[0], body);
         if (typeNode) {
           requestBody = {
             required: true,
             confidence: "high",
-            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" }],
+            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, inputModel), confidence: "high" }],
           };
         } else {
           gaps.add("body-schema-unknown");
@@ -351,26 +378,35 @@ function analyzeEchoHandler(
           analysis,
           modelIndex,
         );
-        const methodBinds = typeNode
-          ? analysis.methods.some(
-              (m) =>
-                m.name === sel.method && /\.Bind\(/.test(m.node.text),
-            )
-          : false;
+        const helper = resolveGoCall(call, analysis);
+        const helperContexts = helper ? echoContexts(helper, analysis) : new Set<string>();
+        const receiverNames = new Set(helper?.receiver ? findAll(helper.receiver, node => node.type === "identifier").map(node => node.text) : []);
+        const methodBinds = helper?.body && findAll(helper.body, node => node.type === "call_expression").some(inner => {
+          let parent = inner.parent;
+          while (parent && parent.id !== helper.body!.id && parent.type !== "func_literal") parent = parent.parent;
+          if (parent?.type === "func_literal") return false;
+          const selected = selectorCall(inner);
+          let target = positionalArguments(inner)[0];
+          if (target?.type === "unary_expression") target = target.namedChildren[0];
+          return selected?.method === "Bind" && helperContexts.has(selected.receiver.text) && !!target && receiverNames.has(target.text);
+        });
         if (typeNode && methodBinds) {
+          gaps.add("body-schema-unknown"); // Helper validation can impose additional constraints.
           requestBody = {
             required: true,
             confidence: "high",
-            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" }],
+            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, inputModel), confidence: "high" }],
           };
         }
         continue;
       }
 
       if (sel.method === "JSON") {
-        const status = statusCode(args[0]) ?? "200";
-        const schema = payloadSchema(args[1], body, analysis, modelIndex);
-        responseStatus.set(status, {
+        const status = statusCode(args[0]) ?? "default";
+        const candidate = payloadSchema(args[1], body, analysis, modelIndex);
+        const schema = candidate ?? {};
+        if (status === "default") gaps.add("response-unknown");
+        addResponse(status, {
           statusCode: status,
           description: "",
           confidence: schema ? "high" : "medium",
@@ -378,14 +414,15 @@ function analyzeEchoHandler(
             ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
             : {}),
         });
-        if (!schema) gaps.add("response-schema-unknown");
+        if (!candidate) gaps.add("response-schema-unknown");
         continue;
       }
 
       if (sel.method === "String") {
-        const status = statusCode(args[0]) ?? "200";
-        if (!responseStatus.has(status)) {
-          responseStatus.set(status, {
+        const status = statusCode(args[0]) ?? "default";
+        if (status === "default") gaps.add("response-unknown");
+        {
+          addResponse(status, {
             statusCode: status,
             description: "",
             confidence: "high",
@@ -396,16 +433,17 @@ function analyzeEchoHandler(
       }
 
       if (sel.method === "NoContent") {
-        const status = statusCode(args[0]) ?? "204";
-        if (!responseStatus.has(status)) {
-          responseStatus.set(status, { statusCode: status, description: "", confidence: "high" });
+        const status = statusCode(args[0]) ?? "default";
+        if (status === "default") gaps.add("response-unknown");
+        {
+          addResponse(status, { statusCode: status, description: "", confidence: "high" });
         }
         continue;
       }
 
       if (sel.method === "File" || sel.method === "Attachment") {
-        if (!responseStatus.has("200")) {
-          responseStatus.set("200", {
+        {
+          addResponse("200", {
             statusCode: "200",
             description: "",
             confidence: "high",
@@ -455,6 +493,7 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel: GoModelIndex = {...modelIndex, input: true, components: new Map()};
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
@@ -574,7 +613,7 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
       }
 
       const evidence: Evidence = fn
-        ? analyzeEchoHandler(fn, analysis, modelIndex, site.params)
+        ? analyzeEchoHandler(fn, analysis, modelIndex, inputModel, site.params)
         : {
             parameters: site.params.map((name): RouteParameter => ({
               name,
@@ -606,10 +645,12 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
       });
     }
 
+    const inputs = namespaceComponents(inputModel.components, new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]), "input");
+    for (const route of routes) if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, inputs.names);
     return {
       routes: dedupeRoutes(routes),
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })), ...inputs.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };

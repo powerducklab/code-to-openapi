@@ -1,0 +1,13 @@
+{
+  "assertions": 65,
+  "mismatches": 1,
+  "errors": [
+    {
+      "where": "get /error",
+      "error": "missing response",
+      "status": "500"
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

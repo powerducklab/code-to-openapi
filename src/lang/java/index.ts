@@ -27,6 +27,8 @@ export interface JavaField {
  * Only annotations whose value maps 1:1 to a schema keyword are captured.
  */
 export interface JavaFieldValidation {
+  readonly readOnly?: boolean;
+  readonly writeOnly?: boolean;
   /** `@Email` -> `format: "email"`. */
   readonly format?: "email";
   /** `@Size(min = N)` / `@Length(min = N)` -> `minLength`. */
@@ -119,7 +121,8 @@ function hasRequiredAnnotation(node: TsNode): boolean {
   return modifiersOf(node).some((mod) => {
     if (mod.type !== "annotation" && mod.type !== "marker_annotation") return false;
     const name = mod.namedChildren.find((c) => c.type === "identifier");
-    return name ? REQUIRED_ANNOTATIONS.has(name.text) : false;
+    return name ? REQUIRED_ANNOTATIONS.has(name.text) || (name.text === "Schema" &&
+      (/^(?:Schema\.RequiredMode\.)?REQUIRED$/.test(annotationPairValue(mod, "requiredMode")?.text ?? "") || annotationPairValue(mod, "required")?.text === "true")) : false;
   });
 }
 
@@ -150,14 +153,13 @@ function annotationPositionalValue(annotation: TsNode): TsNode | undefined {
 
 function numericText(node: TsNode | undefined): number | undefined {
   if (!node) return undefined;
-  const n = Number(node.text);
+  const n = Number(node.text.replace(/(?<=\d)[lL]$/, ""));
   return Number.isFinite(n) ? n : undefined;
 }
 
 function stringLiteralText(node: TsNode | undefined): string | undefined {
   if (!node) return undefined;
-  const fragment = node.namedChildren.find((c) => c.type === "string_fragment");
-  return fragment ? fragment.text : node.text.replace(/^"|"$/g, "");
+  try { return JSON.parse(node.text); } catch { return undefined; }
 }
 
 /**
@@ -165,7 +167,7 @@ function stringLiteralText(node: TsNode | undefined): string | undefined {
  * Anything that cannot be mapped 1:1 (custom constraints, groups, messages)
  * is intentionally ignored rather than guessed.
  */
-function extractValidation(node: TsNode): JavaFieldValidation | undefined {
+export function extractValidation(node: TsNode): JavaFieldValidation | undefined {
   let result: JavaFieldValidation | undefined;
   const set = (patch: Partial<JavaFieldValidation>) => {
     result = { ...(result ?? {}), ...patch };
@@ -174,7 +176,11 @@ function extractValidation(node: TsNode): JavaFieldValidation | undefined {
     if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
     const name = mod.namedChildren.find((c) => c.type === "identifier")?.text;
     if (!name) continue;
-    if (name === "Email") {
+    if (name === "Schema" || name === "JsonProperty") {
+      const access = annotationPairValue(mod, name === "Schema" ? "accessMode" : "access")?.text;
+      if (access?.endsWith(".READ_ONLY")) set({ readOnly: true });
+      if (access?.endsWith(".WRITE_ONLY")) set({ writeOnly: true });
+    } else if (name === "Email") {
       set({ format: "email" });
     } else if (name === "Size" || name === "Length") {
       const min = numericText(annotationPairValue(mod, "min"));
@@ -182,10 +188,10 @@ function extractValidation(node: TsNode): JavaFieldValidation | undefined {
       if (min !== undefined) set({ minLength: min });
       if (max !== undefined) set({ maxLength: max });
     } else if (name === "Min") {
-      const value = numericText(annotationPositionalValue(mod));
+      const value = numericText(annotationPositionalValue(mod) ?? annotationPairValue(mod, "value"));
       if (value !== undefined) set({ minimum: value });
     } else if (name === "Max") {
-      const value = numericText(annotationPositionalValue(mod));
+      const value = numericText(annotationPositionalValue(mod) ?? annotationPairValue(mod, "value"));
       if (value !== undefined) set({ maximum: value });
     } else if (name === "Pattern") {
       const regex = stringLiteralText(annotationPairValue(mod, "regexp"));
@@ -355,7 +361,7 @@ function collectClassFields(node: TsNode): JavaField[] {
   const fields: JavaField[] = [];
   for (const field of childrenOfType(body, "field_declaration")) {
     const mods = field.namedChildren.find((c) => c.type === "modifiers");
-    if (mods && /\bstatic\b/.test(mods.text)) continue;
+    if (mods && mods.children.some(c => c.text === "static")) continue;
     const typeNode = typeNodeOf(field);
     if (!typeNode) continue;
     const jsonName = jsonPropertyName(field);
@@ -378,7 +384,17 @@ function collectClassFields(node: TsNode): JavaField[] {
   // through getters. Derive the missing ones following JavaBeans rules.
   const declared = new Set(fields.map((field) => field.name));
   for (const getter of collectGetterFields(body)) {
-    if (declared.has(getter.name)) continue;
+    if (declared.has(getter.name)) {
+      const position = fields.findIndex(field => field.name === getter.name);
+      const field = fields[position]!;
+      fields[position] = { ...field,
+        required: field.required || getter.required,
+        ignored: field.ignored || getter.ignored,
+        ...(getter.jsonName ? { jsonName: getter.jsonName } : {}),
+        ...((field.validation || getter.validation) ? { validation: { ...field.validation, ...getter.validation } } : {}),
+      };
+      continue;
+    }
     declared.add(getter.name);
     fields.push(getter);
   }
@@ -395,7 +411,7 @@ function collectGetterFields(body: TsNode): JavaField[] {
   const fields: JavaField[] = [];
   for (const method of findAll(body, (n) => n.type === "method_declaration")) {
     const mods = method.namedChildren.find((c) => c.type === "modifiers");
-    if (mods && /\bstatic\b/.test(mods.text)) continue;
+    if (mods && mods.children.some(c => c.text === "static")) continue;
     const params = findFirst(method, (n) => n.type === "formal_parameters");
     if (params && childrenOfType(params, "formal_parameter").length > 0) continue;
     const nameNode = method.namedChildren.find((c) => c.type === "identifier");

@@ -1,0 +1,59 @@
+{
+  "commit": "4f5174ca325b37f23edadad7c88d49586816a69c",
+  "scope": "original type declarations only; database handlers not executed",
+  "sourceHashes": {
+    "models/article.go": "fe752cd35c1934f21ad8fb42f80000a6cdfe47d79e576afe8033cd3cc018642a",
+    "models/models.go": "a9160ab321fa4fa417d5505988a87475744b4ec68515736f8ef5e687dfeddccb",
+    "models/tag.go": "60f7539e893a9768f2aa0959ddebfe39bb0c0b7b79ce3a5c823e480ece86bad6",
+    "pkg/app/response.go": "098aa7a6fb031af0bb427f07930ddcc8809836121b57c95c854cce6629b2b2e1"
+  },
+  "values": {
+    "Article": {
+      "content": "",
+      "cover_image_url": "",
+      "created_by": "",
+      "created_on": 0,
+      "deleted_on": 0,
+      "desc": "",
+      "id": 0,
+      "modified_by": "",
+      "modified_on": 0,
+      "state": 0,
+      "tag": {
+        "created_by": "",
+        "created_on": 0,
+        "deleted_on": 0,
+        "id": 0,
+        "modified_by": "",
+        "modified_on": 0,
+        "name": "",
+        "state": 0
+      },
+      "tag_id": 0,
+      "title": ""
+    },
+    "EmptyArticles": [],
+    "Model": {
+      "created_on": 0,
+      "deleted_on": 0,
+      "id": 0,
+      "modified_on": 0
+    },
+    "NilArticles": null,
+    "Response": {
+      "code": 0,
+      "data": null,
+      "msg": ""
+    },
+    "Tag": {
+      "created_by": "",
+      "created_on": 0,
+      "deleted_on": 0,
+      "id": 0,
+      "modified_by": "",
+      "modified_on": 0,
+      "name": "",
+      "state": 0
+    }
+  }
+}

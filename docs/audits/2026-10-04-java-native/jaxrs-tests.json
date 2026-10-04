@@ -1,0 +1,20 @@
+{
+  "commit": "87ba422a85a7f732f567f955f3406cf992b44f83",
+  "totals": {
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "it.template.GreetingResourceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 3.214,
+      "reportSha256": "3d3cab1c2650c81066a6733bb044fd3cf6f7573f23a26e26fb264355392226bd"
+    }
+  ]
+}

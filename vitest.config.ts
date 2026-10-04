@@ -6,6 +6,9 @@ export default defineConfig({
     // 5s default under concurrent load; give each test a generous budget.
     testTimeout: 20000,
     hookTimeout: 30000,
-    pool: "threads",
+    // Each suite loads WASM grammars. Isolate their V8 lifetimes in processes:
+    // Node 23 worker teardown can race WASM background compilation/GC.
+    pool: "forks",
+    maxWorkers: 4,
   },
 });

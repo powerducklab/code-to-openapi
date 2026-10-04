@@ -1,0 +1,1078 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "FastAPI RealWorld independent model-runtime contracts",
+    "version": "1"
+  },
+  "paths": {
+    "/api/users/login": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_UserInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "$ref": "#/components/schemas/input_UserInLogin"
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_UserInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "$ref": "#/components/schemas/input_UserInCreate"
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_UserInResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_UserInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "$ref": "#/components/schemas/input_UserInUpdate"
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ListOfArticlesInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "favorited",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ArticleInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "article": {
+                    "$ref": "#/components/schemas/input_ArticleInCreate"
+                  }
+                },
+                "required": [
+                  "article"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/feed": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ListOfArticlesInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ArticleInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ArticleInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "article": {
+                    "$ref": "#/components/schemas/input_ArticleInUpdate"
+                  }
+                },
+                "required": [
+                  "article"
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "Independent upstream model contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}/favorite": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ArticleInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ArticleInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}/comments": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ListOfCommentsInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      },
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_CommentInResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "comment": {
+                    "$ref": "#/components/schemas/input_CommentInCreate"
+                  }
+                },
+                "required": [
+                  "comment"
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}/comments/{comment_id}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "Independent upstream model contract"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/profiles/{username}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ProfileInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/profiles/{username}/follow": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ProfileInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_ProfileInResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent upstream model contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/output_TagsInList"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "output_UserInResponse": {
+        "title": "UserInResponse",
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/output_UserWithToken"
+          }
+        },
+        "required": [
+          "user"
+        ]
+      },
+      "output_UserWithToken": {
+        "title": "UserWithToken",
+        "type": "object",
+        "properties": {
+          "username": {
+            "title": "Username",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "bio": {
+            "title": "Bio",
+            "default": "",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "bio",
+          "image",
+          "token"
+        ]
+      },
+      "input_UserInLogin": {
+        "title": "UserInLogin",
+        "type": "object",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "input_UserInCreate": {
+        "title": "UserInCreate",
+        "type": "object",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "username"
+        ]
+      },
+      "input_UserInUpdate": {
+        "title": "UserInUpdate",
+        "type": "object",
+        "properties": {
+          "username": {
+            "title": "Username",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "title": "Email",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "email"
+          },
+          "password": {
+            "title": "Password",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bio": {
+            "title": "Bio",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "title": "Image",
+            "minLength": 1,
+            "maxLength": 2083,
+            "format": "uri",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "output_ListOfArticlesInResponse": {
+        "title": "ListOfArticlesInResponse",
+        "type": "object",
+        "properties": {
+          "articles": {
+            "title": "Articles",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/output_ArticleForResponse"
+            }
+          },
+          "articlesCount": {
+            "title": "Articlescount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "articles",
+          "articlesCount"
+        ]
+      },
+      "output_ArticleForResponse": {
+        "title": "ArticleForResponse",
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "title": "Createdat",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "title": "Updatedat",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "title": "Id",
+            "default": 0,
+            "type": "integer"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "tagList": {
+            "title": "Taglist",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "author": {
+            "$ref": "#/components/schemas/output_Profile"
+          },
+          "favorited": {
+            "title": "Favorited",
+            "type": "boolean"
+          },
+          "favoritesCount": {
+            "title": "Favoritescount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "createdAt",
+          "updatedAt",
+          "id",
+          "slug",
+          "title",
+          "description",
+          "body",
+          "tagList",
+          "author",
+          "favorited",
+          "favoritesCount"
+        ]
+      },
+      "output_Profile": {
+        "title": "Profile",
+        "type": "object",
+        "properties": {
+          "username": {
+            "title": "Username",
+            "type": "string"
+          },
+          "bio": {
+            "title": "Bio",
+            "default": "",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "following": {
+            "title": "Following",
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "username",
+          "bio",
+          "image",
+          "following"
+        ]
+      },
+      "output_ArticleInResponse": {
+        "title": "ArticleInResponse",
+        "type": "object",
+        "properties": {
+          "article": {
+            "$ref": "#/components/schemas/output_ArticleForResponse"
+          }
+        },
+        "required": [
+          "article"
+        ]
+      },
+      "input_ArticleInCreate": {
+        "title": "ArticleInCreate",
+        "type": "object",
+        "properties": {
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "tagList": {
+            "title": "Taglist",
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "description",
+          "body"
+        ]
+      },
+      "input_ArticleInUpdate": {
+        "title": "ArticleInUpdate",
+        "type": "object",
+        "properties": {
+          "title": {
+            "title": "Title",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "title": "Description",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "title": "Body",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "output_ListOfCommentsInResponse": {
+        "title": "ListOfCommentsInResponse",
+        "type": "object",
+        "properties": {
+          "comments": {
+            "title": "Comments",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/output_Comment"
+            }
+          }
+        },
+        "required": [
+          "comments"
+        ]
+      },
+      "output_Comment": {
+        "title": "Comment",
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "title": "Createdat",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "title": "Updatedat",
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "title": "Id",
+            "default": 0,
+            "type": "integer"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "author": {
+            "$ref": "#/components/schemas/output_Profile"
+          }
+        },
+        "required": [
+          "createdAt",
+          "updatedAt",
+          "id",
+          "body",
+          "author"
+        ]
+      },
+      "output_CommentInResponse": {
+        "title": "CommentInResponse",
+        "type": "object",
+        "properties": {
+          "comment": {
+            "$ref": "#/components/schemas/output_Comment"
+          }
+        },
+        "required": [
+          "comment"
+        ]
+      },
+      "input_CommentInCreate": {
+        "title": "CommentInCreate",
+        "type": "object",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ]
+      },
+      "output_ProfileInResponse": {
+        "title": "ProfileInResponse",
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/output_Profile"
+          }
+        },
+        "required": [
+          "profile"
+        ]
+      },
+      "output_TagsInList": {
+        "title": "TagsInList",
+        "type": "object",
+        "properties": {
+          "tags": {
+            "title": "Tags",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "tags"
+        ]
+      }
+    }
+  },
+  "x-audit-source": {
+    "repository": "https://github.com/nsidnev/fastapi-realworld-example-app",
+    "commit": "029eb7781c60d5f563ee8990a0cbfb79b244538c",
+    "runtime": "Pydantic v1 compatibility 1.10.21",
+    "modelSource": "Unmodified app/models/**/*.py loaded from pinned source",
+    "routeSource": "Manually transcribed app/api/routes, dependencies and /api setting",
+    "limits": [
+      "Success model contracts only; exception, middleware, authentication and DB correctness not certified",
+      "Pydantic v1 compatibility runtime, not an installed original FastAPI 0.79 server",
+      "No external service contacted; database and application startup not run"
+    ],
+    "serializationSamples": {
+      "profile": {
+        "username": "oracle",
+        "bio": "",
+        "image": null,
+        "following": false
+      },
+      "article": {
+        "createdAt": null,
+        "updatedAt": null,
+        "id": 0,
+        "slug": "oracle",
+        "title": "Test",
+        "description": "Test",
+        "body": "Test",
+        "tagList": [],
+        "author": {
+          "username": "oracle",
+          "bio": "",
+          "image": null,
+          "following": false
+        },
+        "favorited": false,
+        "favoritesCount": 0
+      }
+    }
+  }
+}

@@ -45,6 +45,7 @@ interface MountEdge {
 }
 
 interface MiddlewareRef {
+  routerId?: string;
   node: any;
   file: string;
   scopePath?: string;
@@ -183,7 +184,7 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
     const unscopedOf = (id: string): MiddlewareRef[] => {
       const router = allRouters.get(id);
       if (!router) return [];
-      return models.get(router.file)?.unscopedMiddleware ?? [];
+      return models.get(router.file)?.unscopedMiddleware.filter(mw => mw.routerId === id) ?? [];
     };
     for (const root of roots) {
       walkMounts(root.id, "", unscopedOf(root.id), edges, prefixes, new Set(), unscopedOf);
@@ -218,16 +219,17 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
         let authed = false;
         const scoped = model.scopedMiddleware.filter(
           (mw) =>
-            route.rawPath === mw.scopePath ||
+            mw.routerId === route.routerId && (mw.scopePath === "/" || route.rawPath === mw.scopePath ||
             route.rawPath.startsWith(`${mw.scopePath}/`) ||
-            route.rawPath.startsWith(`${mw.scopePath}?`),
+            route.rawPath.startsWith(`${mw.scopePath}?`)),
         );
         const allMiddleware = [
           ...mount.middleware,
           ...scoped,
           ...route.middleware,
           ...route.handlers.slice(0, -1).map((h) => ({ node: h.node, file: h.file })),
-        ];
+        ].filter((mw: MiddlewareRef) => !mw.routerId || mw.routerId !== route.routerId ||
+          mw.file !== route.file || !finalHandler || mw.node.pos < finalHandler.node.pos);
         for (const mw of allMiddleware) {
           if (isAuthMiddleware(ts, mw.node, mw.file)) authed = true;
           const chains = collectValidatorChains(ts, mw.node, mw.file);
@@ -246,6 +248,29 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
           customResponseMethods,
         );
         const facts = analysisResult.facts;
+        // Inspect proven ordinary middleware bodies for explicit responses. Do not
+        // treat four-argument error handlers as (req,res,next) middleware.
+        for (const middleware of allMiddleware) {
+          const file = analysis.sourceByPath.get(middleware.file) ?? model.source;
+          const resolved = resolveHandler(analysis, file, middleware.node);
+          if (!resolved || resolved.node.parameters?.length !== 3) continue;
+          const middlewareFacts = analyzeHandler(analysis, resolved.file, resolved.node, route.origin, {
+            pathParams, validators: [], customResponseMethods,
+          });
+          for (const response of middlewareFacts.responses) {
+            // Unknown/default fallback inference is not evidence of a middleware response.
+            if (!response.content?.length || response.confidence === "low") continue;
+            const previous = facts.responses.find(r => r.statusCode === response.statusCode);
+            if (!previous) { facts.responses.push(response); continue; }
+            for (const media of response.content) {
+              const existing = previous.content?.find(c => c.mediaType === media.mediaType);
+              if (!existing) { (previous.content ??= []).push(media); continue; }
+              if (existing.schema && media.schema && JSON.stringify(existing.schema) !== JSON.stringify(media.schema)) {
+                existing.schema = {anyOf: [existing.schema, media.schema]};
+              }
+            }
+          }
+        }
 
         const method = route.method === "all" ? "get" : route.method;
         const parameters: RouteParameter[] = facts.parameters.map((p) =>
@@ -601,6 +626,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
       });
     } else {
       const middleware = handlerArgs.map((arg: any) => ({
+        routerId: router.id,
         node: arg,
         file: model.rel,
         scopePath: prefix || undefined,

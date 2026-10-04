@@ -1,6 +1,6 @@
 {
   "name": "@powerduck/code-to-openapi",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "type": "module",
   "description": "Scan a local codebase into OpenAPI 3.2 with a language-neutral AST engine, pluggable language and framework packs, and an optional AI gap resolver.",
   "main": "./dist/index.cjs",
@@ -57,7 +57,8 @@
     "@powerduck/x-to-openapi": "^0.3.3",
     "ignore": "^5.3.0",
     "tree-sitter-wasms": "^0.1.13",
-    "web-tree-sitter": "^0.25.10"
+    "web-tree-sitter": "^0.25.10",
+    "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"

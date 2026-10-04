@@ -196,6 +196,11 @@ export class ResponseCollector {
     }
   }
 
+  /** A null Fetch response body carries neither JSON content nor a schema. */
+  recordEmpty(status: string, confidence: Confidence): void {
+    this.map.set(`${status}:`, { statusCode: status, description: "", confidence });
+  }
+
   /**
    * Records an authoritative schema (for example a framework-level response
    * contract): unlike `record`, an existing inferred schema for the same

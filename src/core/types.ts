@@ -150,6 +150,8 @@ export interface ScanOptions {
   ignore?: readonly string[];
   /** Include files normally excluded (tests, scripts). */
   includeTests?: boolean;
+  /** Explicit generated-source directories inside root, including ignored build directories. Never generates or executes code. */
+  additionalSourceRoots?: readonly string[];
   /** Framework ids to restrict the scan to. */
   frameworks?: readonly string[];
   /** File size cap per source file, bytes. Default 2 MiB. */
@@ -168,6 +170,16 @@ export interface ScanReport {
   routesPartial: number;
   unresolved: number;
   gaps: Array<{ route: string; gaps: GapCode[] }>;
+  /** Number of handlers sent to the AI gap resolver. */
+  aiAttempted: number;
+  /** Number of handlers for which the model closed at least one gap. */
+  aiResolved: number;
+  /** Per-route AI fills, including partial fills still carrying gaps. */
+  aiResolvedRoutes: Array<{
+    method: string;
+    path: string;
+    gapsClosed: number;
+  }>;
   /** Non-fatal problems encountered during analysis (pack failures, etc.). */
   diagnostics: string[];
 }

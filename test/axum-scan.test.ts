@@ -38,20 +38,20 @@ describe("axum golden project", () => {
     const list = doc.paths["/users"].get;
     expect(list.responses["200"].content["application/json"].schema).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/User" },
+      items: { $ref: "#/components/schemas/serialized_User" },
     });
 
     // (StatusCode::CREATED, Json<User>) with Json<CreateUser> body.
     const create = doc.paths["/users"].post;
     expect(create.responses["201"].content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/User",
+      $ref: "#/components/schemas/serialized_User",
     });
     expect(create.requestBody.content["application/json"].schema).toEqual({
       $ref: "#/components/schemas/CreateUser",
     });
     const dto = doc.components.schemas.CreateUser;
     expect(dto.properties.name).toEqual({ type: "string" });
-    expect(dto.properties.age).toEqual({ type: "integer" });
+    expect(dto.properties.age).toEqual({ type: ["integer", "null"], format: "int32" });
     expect(dto.required).toContain("name");
     expect(dto.required).not.toContain("age");
 

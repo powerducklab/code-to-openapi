@@ -59,8 +59,8 @@ describe("laravel edge cases", () => {
     const { result } = await scan();
     const update = op(result.project.operations, "put", "/api/v1/orders/{id}");
     const schema = update.requestBody.content[0].schema;
-    expect(schema.properties.amount).toEqual({ type: "number" });
-    expect(schema.properties.note.type).toBe("string");
+    expect(schema.properties.amount).toEqual({ type: "number", minimum: 0 });
+    expect(schema.properties.note).toEqual({type:["string", "null"], maxLength:200});
     expect(schema.properties.tags.type).toBe("array");
     expect(update.responses[0].content[0].schema).toEqual({
       $ref: "#/components/schemas/Order",

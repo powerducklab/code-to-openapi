@@ -1,0 +1,41 @@
+{
+  "commit": "87ba422a85a7f732f567f955f3406cf992b44f83",
+  "probes": [
+    {
+      "method": "POST",
+      "input": "",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"},null]"
+    },
+    {
+      "method": "POST",
+      "input": "null",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"},null]"
+    },
+    {
+      "method": "POST",
+      "input": "{}",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"},null,{\"fieldA\":null,\"fieldB\":null}]"
+    },
+    {
+      "method": "DELETE",
+      "input": "",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"},{\"fieldA\":null,\"fieldB\":null}]"
+    },
+    {
+      "method": "DELETE",
+      "input": "null",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"},{\"fieldA\":null,\"fieldB\":null}]"
+    },
+    {
+      "method": "DELETE",
+      "input": "{}",
+      "status": 200,
+      "body": "[{\"fieldA\":\"Apple\",\"fieldB\":\"Winter fruit\"},{\"fieldA\":\"Pineapple\",\"fieldB\":\"Tropical fruit\"}]"
+    }
+  ]
+}

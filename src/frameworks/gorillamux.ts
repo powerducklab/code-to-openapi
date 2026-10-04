@@ -1,3 +1,5 @@
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
+import { resolveGoCall } from "../lang/go/symbols.js";
 /**
  * gorilla/mux framework pack (Go).
  *
@@ -28,7 +30,7 @@ import type {
 import type { DiscoveredUnresolved } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
 import { buildGoModelIndex } from "../lang/go/schema.js";
-import { analyzeStdHTTPHandler, selectorCall } from "../lang/go/httphandler.js";
+import { analyzeStdHTTPHandler, selectorCall, convertedParameterSchema } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   findAll,
@@ -90,8 +92,8 @@ function addrToUrl(addr: string): string {
  * Read mux.Vars(r)["name"] style path variables from a handler body. Returns the
  * distinct path-param names referenced, so they can be marked high confidence.
  */
-function readMuxVars(body: TsNode): string[] {
-  const names: string[] = [];
+function readMuxVars(body: TsNode): {name:string; node:TsNode}[] {
+  const names: {name:string; node:TsNode}[] = [];
   // Variables aliasing mux.Vars(r): vars := mux.Vars(r).
   const varAlias = new Set<string>();
   for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
@@ -112,7 +114,7 @@ function readMuxVars(body: TsNode): string[] {
     if (!isVarsCall && !isAlias) continue;
     const index = idx.namedChildren[1];
     const name = index ? literalString(index) : null;
-    if (name && !names.includes(name)) names.push(name);
+    if (name && !names.some(item => item.name === name)) names.push({name,node:idx});
   }
   return names;
 }
@@ -134,6 +136,7 @@ export const gorillamuxPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel = { ...modelIndex, input: true, components: new Map() };
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
@@ -308,20 +311,7 @@ export const gorillamuxPack: FrameworkPack<GoAnalysis> = {
           fn = { name: "<anonymous>", file: site.origin.file, node: handlerNode, body: block, receiver: null };
         }
       } else if (handlerNode) {
-        const name =
-          handlerNode.type === "identifier"
-            ? handlerNode.text
-            : handlerNode.type === "selector_expression"
-              ? (handlerNode.namedChildren[1]?.type === "field_identifier"
-                  ? handlerNode.namedChildren[1].text
-                  : null)
-              : null;
-        if (name) {
-          fn =
-            (analysis.functions.get(name) ?? [])[0] ??
-            analysis.methods.find((m) => m.name === name) ??
-            null;
-        }
+        fn = resolveGoCall(handlerNode, analysis) ?? null;
       }
 
       const evidence: {
@@ -335,6 +325,7 @@ export const gorillamuxPack: FrameworkPack<GoAnalysis> = {
             body: fn.body,
             declaredPathParams: site.params,
             modelIndex,
+            inputModel,
             analysis,
           })
         : {
@@ -353,10 +344,12 @@ export const gorillamuxPack: FrameworkPack<GoAnalysis> = {
 
       // mux.Vars(r)["name"] references confirm path params at high confidence.
       const varNames = fn?.body ? readMuxVars(fn.body) : [];
-      for (const v of varNames) {
-        if (site.params.includes(v) && !evidence.parameters.some((p) => p.name === v && p.in === "path")) {
-          evidence.parameters.unshift({ name: v, in: "path", required: true, schema: { type: "string" }, confidence: "high" });
-        }
+      for (const {name, node} of varNames) {
+        if (!site.params.includes(name)) continue;
+        const schema = convertedParameterSchema(node, analysis);
+        const existing = evidence.parameters.find(p => p.name === name && p.in === "path");
+        if (existing) { existing.schema = schema; existing.confidence = "high"; }
+        else evidence.parameters.unshift({name, in:"path",required:true,schema,confidence:"high"});
       }
 
       // Declared query/header constraints from .Queries()/.Headers().
@@ -392,10 +385,12 @@ export const gorillamuxPack: FrameworkPack<GoAnalysis> = {
       }
     }
 
+    const inputComponents = namespaceComponents(inputModel.components, new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]), "input");
+    for (const route of routes) if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, inputComponents.names);
     return {
       routes: dedupeRoutes(routes),
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })), ...inputComponents.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };

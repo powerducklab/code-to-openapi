@@ -9,6 +9,8 @@
  * machinery without editing spring.ts.
  */
 
+import {mergeResponseVariants} from "../core/response-variants.js";
+
 import type {
   Confidence,
   DiscoveredMediaType,
@@ -35,6 +37,7 @@ import {
   type JavaModelIndex,
 } from "../lang/java/schema.js";
 import {
+  hasOnlyThrowingExit,
   disambiguateOperationIds,
   dedupeRoutes,
   fieldTypesOf,
@@ -71,6 +74,11 @@ const FACTORY_STATUS: Record<string, string> = {
   notAllowed: "405",
   conflict: "409",
   serverError: "500",
+  unprocessableEntity: "422",
+  notModified: "304",
+  seeOther: "303",
+  temporaryRedirect: "307",
+  permanentRedirect: "308",
 };
 
 function emptyResult() {
@@ -159,8 +167,10 @@ function scanController(
     const returnType = declaredReturnType(method);
     const isHttpResponseReturn = returnsHttpResponse(returnType, analysis, rel);
 
-    const responses = isHttpResponseReturn
-      ? collectHttpResponses(method, returnType, model, gaps, rel)
+    const throwing = hasOnlyThrowingExit(method);
+    if (throwing) gaps.push("response-unknown");
+    const responses: DiscoveredResponse[] = throwing ? [{statusCode:"default",description:"Exception response requires handler resolution",confidence:"low"}] : isHttpResponseReturn
+      ? collectHttpResponses(method, returnType, model, gaps, rel, analysis)
       : collectBareResponses(method, returnType, model, gaps, rel, fieldTypes);
 
     const methodName =
@@ -351,6 +361,7 @@ function collectParameters(
 interface BuiltResponse {
   status: string;
   entity?: JsonSchema;
+  bodyless?: boolean;
 }
 
 /** Walk HttpResponse.<factory>(...).body(x).status(c) chains. */
@@ -358,14 +369,18 @@ function collectBuiltResponses(
   method: TsNode,
   model: JavaModelIndex,
   rel: string,
+  analysis: JavaAnalysis,
 ): BuiltResponse[] {
   const localVars = localVarTypes(method);
   const out: BuiltResponse[] = [];
   const returns = findAll(method, (n) => n.type === "return_statement");
   for (const ret of returns) {
+    let owner = ret.parent;
+    while (owner && owner.id !== method.id && !["lambda_expression", "method_declaration", "class_body"].includes(owner.type)) owner = owner.parent;
+    if (owner?.id !== method.id) continue;
     const call = ret.namedChildren.find((n) => n.type === "method_invocation");
     if (!call) continue;
-    const built = walkHttpChain(call, localVars, model, rel);
+    const built = walkHttpChain(call, localVars, model, rel, analysis);
     if (built) out.push(built);
   }
   return out;
@@ -376,35 +391,45 @@ function walkHttpChain(
   localVars: Map<string, TsNode>,
   model: JavaModelIndex,
   rel: string,
+  analysis: JavaAnalysis,
 ): BuiltResponse | null {
-  let status = "200";
+  let status = "default";
+  let bodyless = false;
+  const uriName = (name: string) => name === "java.net.URI" || name === "URI" && analysis.imports.get(rel)?.explicit.get(name) === "java.net.URI" && !model.resolveDef(name, rel);
+  const uriValue = (arg: TsNode | undefined): boolean => {
+    if (!arg) return false;
+    if (arg.type === "identifier") return uriName(localVars.get(arg.text)?.text ?? "");
+    if (arg.type === "object_creation_expression") return uriName(arg.childForFieldName("type")?.text ?? "");
+    return arg.type === "method_invocation" && arg.namedChildren[1]?.text === "create" && uriName(arg.namedChildren[0]?.text ?? "") && !localVars.has(arg.namedChildren[0]?.text ?? "");
+  };
   let entityArg: TsNode | undefined;
   let node: TsNode | undefined = root;
-  let guard = 0;
-  while (node && node.type === "method_invocation" && guard++ < 8) {
-    const mname = node.namedChildren[1]?.text ?? "";
-    const argList = childrenOfType(node, "argument_list")[0];
-    const posArgs = argList ? argList.namedChildren : [];
-    if (mname === "ok") {
-      status = "200";
-      if (posArgs.length) entityArg = posArgs[0];
-    } else if (mname === "body") {
-      if (posArgs.length) entityArg = posArgs[0];
-    } else if (mname === "status") {
-      const parsed = parseStatusArg(posArgs[0]);
-      if (parsed) status = parsed;
-    } else if (FACTORY_STATUS[mname]) {
-      status = FACTORY_STATUS[mname]!;
-      // ok(entity) / accepted(entity) carry the entity positionally;
-      // created(uri) carries a Location URI, not the entity.
-      if (posArgs.length && (mname === "ok" || mname === "accepted")) {
-        entityArg = posArgs[0];
-      }
-    }
+  const chain: TsNode[] = [];
+  while (node?.type === "method_invocation" && chain.length < 16) {
+    chain.unshift(node);
     node = node.namedChildren[0];
   }
+  if (!node || !/^(?:io\.micronaut\.http\.)?HttpResponse$/.test(node.text) || localVars.has(node.text)) return null;
+  for (const step of chain) {
+    const mname = step.namedChildren[1]?.text ?? "";
+    const posArgs = childrenOfType(step, "argument_list")[0]?.namedChildren ?? [];
+    if (mname === "body") {
+      entityArg = posArgs[0];
+      bodyless = !entityArg || entityArg.type === "null_literal";
+    } else if (mname === "status") {
+      status = parseStatusArg(posArgs[0]) ?? "default";
+      // A static status factory starts without a body; an instance status
+      // update preserves the entity chosen earlier in the chain.
+      if (step === chain[0]) bodyless = true;
+    } else if (FACTORY_STATUS[mname]) {
+      status = FACTORY_STATUS[mname]!;
+      const bodyFactory = ["ok", "created", "badRequest", "notFound", "serverError"].includes(mname);
+      entityArg = bodyFactory && !(mname === "created" && posArgs.length === 1 && uriValue(posArgs[0])) ? posArgs[0] : undefined;
+      bodyless = !entityArg || entityArg.type === "null_literal";
+    }
+  }
   const entity = entityArg ? entityArgToSchema(entityArg, localVars, model, rel) : undefined;
-  return { status, ...(entity ? { entity } : {}) };
+  return { status, bodyless, ...(entity ? { entity } : {}) };
 }
 
 function parseStatusArg(arg: TsNode | undefined): string | null {
@@ -469,24 +494,27 @@ function collectHttpResponses(
   model: JavaModelIndex,
   gaps: GapCode[],
   rel: string,
+  analysis: JavaAnalysis,
 ): DiscoveredResponse[] {
   // HttpResponse<T>: the generic argument T is the entity type when the handler
   // does not pin one via .body(). Prefer explicit builder chains; fall back to T.
-  const built = collectBuiltResponses(method, model, rel);
+  const built = collectBuiltResponses(method, model, rel, analysis);
   if (built.length) {
     const byStatus = new Map<string, DiscoveredResponse>();
     for (const b of built) {
-      if (byStatus.has(b.status)) continue;
-      byStatus.set(b.status, {
+      if (b.status === "default") gaps.push("response-unknown");
+      const existing = byStatus.get(b.status);
+      const response: DiscoveredResponse = {
         statusCode: b.status,
         description: "",
         confidence: "high",
         ...(b.entity
           ? { content: [{ mediaType: "application/json", schema: b.entity }] }
-          : b.status.startsWith("204") || b.status.startsWith("304")
+          : b.bodyless || b.status.startsWith("204") || b.status.startsWith("304")
             ? {}
             : { content: [{ mediaType: "application/json", schema: {} }] }),
-      });
+      };
+      byStatus.set(b.status, existing ? mergeResponseVariants(existing, response) : response);
     }
     return [...byStatus.values()];
   }

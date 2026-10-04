@@ -29,7 +29,39 @@ describe("buildGapMessages", () => {
   });
 
   it("has a stable prompt version tag", () => {
-    expect(GAP_PROMPT_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(GAP_PROMPT_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}[a-z]?$/);
+  });
+
+  it("embeds the component catalog in the user payload", () => {
+    const messages = buildGapMessages({
+      ...baseRequest,
+      componentCatalog: [{ name: "Order", properties: ["id", "status"] }],
+    });
+    expect(messages[1]!.content).toContain("existingComponents");
+    expect(messages[1]!.content).toContain("Order");
+    expect(messages[0]!.content).toMatch(/EXACT listed name/i);
+  });
+
+  it("tailors the system prompt to the detected framework", () => {
+    const fastify = buildGapMessages({
+      ...baseRequest,
+      known: { pathParameters: [], framework: "fastify", language: "typescript" },
+    });
+    expect(fastify[0]!.content).toMatch(/Fastify/);
+    expect(fastify[0]!.content).toMatch(/reply\.code/);
+
+    const gin = buildGapMessages({
+      ...baseRequest,
+      known: { pathParameters: [], framework: "gin", language: "go" },
+    });
+    expect(gin[0]!.content).toMatch(/Gin/);
+    expect(gin[0]!.content).toMatch(/ShouldBindJSON/);
+
+    const unknown = buildGapMessages({
+      ...baseRequest,
+      known: { pathParameters: [], framework: "weird", language: "python" },
+    });
+    expect(unknown[0]!.content).toMatch(/Python/);
   });
 });
 
@@ -100,6 +132,38 @@ describe("parseGapResolution", () => {
       confidence: "definitely",
     });
     expect(resolution?.confidence).toBe("medium");
+  });
+
+  it("accepts $ref only for whitelisted component names", () => {
+    const raw = {
+      responseSchemas: {
+        "200": {
+          type: "object",
+          properties: {
+            members: {
+              type: "array",
+              items: { $ref: "#/components/schemas/OrganizationMembership" },
+            },
+            fabricated: { $ref: "#/components/schemas/DoesNotExist" },
+          },
+        },
+      },
+    };
+    const allowed = new Set(["OrganizationMembership"]);
+    const resolution = parseGapResolution(raw, allowed);
+    const schema = resolution?.responseSchemas?.["200"] as any;
+    expect(schema.properties.members.items).toEqual({
+      $ref: "#/components/schemas/OrganizationMembership",
+    });
+    // The fabricated reference has no remaining structural signal and is dropped.
+    expect(schema.properties.fabricated).toBeUndefined();
+  });
+
+  it("rejects every $ref when no catalog is provided", () => {
+    const resolution = parseGapResolution({
+      bodySchema: { $ref: "#/components/schemas/Account" },
+    });
+    expect(resolution).toBeNull();
   });
 });
 

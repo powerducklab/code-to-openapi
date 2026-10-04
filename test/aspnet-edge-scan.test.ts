@@ -29,7 +29,7 @@ describe("asp.net controllers edge cases", () => {
     );
     expect(list.responses[0].content[0].schema).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/Product" },
+      items: { $ref: "#/components/schemas/serialized_Product" },
     });
 
     const create = op(ops, "post", "/api/Products");
@@ -63,7 +63,7 @@ describe("asp.net controllers edge cases", () => {
     const events = op(ops, "get", "/api/Products/events");
     expect(events.extensions?.["x-protocol"]).toBe("sse");
     expect(events.responses[0].content[0].itemSchema).toEqual({
-      $ref: "#/components/schemas/Product",
+      $ref: "#/components/schemas/serialized_Product",
     });
   });
 });

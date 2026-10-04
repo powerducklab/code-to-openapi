@@ -13,6 +13,7 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { localReturnSchema, localObjectFields } from "../lang/typescript/localFlow.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 
 const VERBS = new Set([
@@ -258,6 +259,7 @@ export const nestPack: FrameworkPack<TsAnalysis> = {
                     schemaOfTypeNode,
                     schemaOfValue,
                     gaps,
+                    localReturnSchema(analysis, member, schemaOfValue),
                   );
               const methodName = member.name?.getText(source) ?? "";
               const className = node.name?.text ?? "";
@@ -422,6 +424,7 @@ function collectParameters(
           } else if (schema?.properties || schema?.$ref) {
             expandObject(schema, "query", false);
           } else {
+            for (const name of localObjectFields(analysis, method, param)) addParam("query", name, {type: "string"}, "medium", false);
             gaps.add("query-unknown");
           }
           break;
@@ -528,12 +531,13 @@ function collectResponses(
   schemaOfTypeNode: (node: any, hint?: string) => JsonSchema | undefined,
   schemaOfValue: (node: any, hint?: string) => JsonSchema | undefined,
   gaps: GapCode[],
+  implementationSchema?: JsonSchema,
 ): DiscoveredResponse[] {
   const responses: DiscoveredResponse[] = [];
   const status = defaultStatus(verb, httpCode);
 
-  let schema: JsonSchema | undefined;
-  if (method.type) {
+  let schema: JsonSchema | undefined = implementationSchema;
+  if (!schema && method.type) {
     const { node } = unwrapTypeReference(ts, method.type);
     schema = schemaOfTypeNode(node);
   }
@@ -543,10 +547,11 @@ function collectResponses(
   if (!schema) {
     const returnSchemas: JsonSchema[] = [];
     const visit = (n: any) => {
+      if (n !== method.body && ts.isFunctionLike(n)) return;
       if (
         ts.isReturnStatement(n) &&
         n.expression &&
-        !ts.isStringLiteral(n.expression)
+        n.expression
       ) {
         const observed = schemaOfValue(n.expression);
         if (observed) returnSchemas.push(observed);
@@ -562,7 +567,7 @@ function collectResponses(
       statusCode: status,
       description: "",
       confidence: "high",
-      content: [{ mediaType: "application/json", schema }],
+      content: [{ mediaType: ["string", "number", "integer", "boolean"].includes(String(schema.type)) ? "text/html" : "application/json", schema }],
     });
   } else {
     // No type information at all: explicit gap for the AI resolver.

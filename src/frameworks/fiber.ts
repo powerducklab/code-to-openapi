@@ -14,6 +14,8 @@
  * claims Express (JavaScript) projects or any other Go framework.
  */
 
+import { mergeResponseVariants } from "../core/response-variants.js";
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
 import type {
   Confidence,
   ExtractionResult,
@@ -24,13 +26,16 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { DiscoveredUnresolved, JsonSchema } from "@powerduck/x-to-openapi";
+import { jsonTag } from "../lang/go/index.js";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
 import {
   buildGoModelIndex,
   ensureGoComponent,
   goTypeToSchema,
+  goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
+  localGoTypeToSchema as fiberTypeSchema,
   type GoModelIndex,
 } from "../lang/go/schema.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
@@ -57,6 +62,12 @@ const STATUS_CONSTANTS: Record<string, string> = {
   StatusUnprocessableEntity: "422",
   StatusTooManyRequests: "429",
   StatusInternalServerError: "500",
+  StatusNotImplemented: "501",
+  StatusBadGateway: "502",
+  StatusServiceUnavailable: "503",
+  StatusGatewayTimeout: "504",
+  StatusHTTPVersionNotSupported: "505",
+  StatusInsufficientStorage: "507",
 };
 
 function selectorCall(node: TsNode): { receiver: TsNode; method: string } | null {
@@ -154,40 +165,62 @@ function payloadSchema(
   body: TsNode | null,
   analysis: GoAnalysis,
   index: GoModelIndex,
+  depth = 0,
 ): JsonSchema | null {
-  if (!arg) return null;
+  if (!arg || depth > 8) return null;
+  if (arg.type === "unary_expression") return payloadSchema(arg.namedChildren[0], body, analysis, index, depth + 1);
+  if (arg.text === "nil") return { type: "null" };
   if (arg.type === "call_expression") {
     return resolveGoPayloadValue(arg, body, analysis, index, analysis.vars).schema;
   }
   if (arg.type === "identifier") {
     if (body) {
-      const typeNode = resolveLocalType(body, arg.text);
-      if (typeNode) return goTypeToSchema(typeNode, index);
+      const typeNode = referencedType(arg, body);
+      if (typeNode) return fiberTypeSchema(typeNode, analysis, index);
     }
     return null;
   }
   if (arg.type === "composite_literal") {
     const typeNode = arg.namedChildren[0];
     if (typeNode && (typeNode.type === "slice_type" || typeNode.type === "array_type")) {
-      const inner = typeNode.namedChildren[0];
-      if (inner) {
-        let t: TsNode | undefined = inner;
-        while (t && t.type === "pointer_type") t = t.namedChildren[0];
-        if (t && t.type === "type_identifier" && index.byName.has(t.text)) {
-          ensureGoComponent(t.text, index);
-          return { type: "array", items: { $ref: `#/components/schemas/${t.text}` } };
-        }
-      }
-      return { type: "array" };
+      return goConstructedTypeToSchema(typeNode, index);
     }
     let t: TsNode | undefined = typeNode;
     while (t && t.type === "pointer_type") t = t.namedChildren[0];
-    if (t && t.type === "type_identifier" && index.byName.has(t.text)) {
-      ensureGoComponent(t.text, index);
-      return { $ref: `#/components/schemas/${t.text}` };
+    if (t && (t.type === "qualified_type" || t.type === "type_identifier" && index.byName.has(t.text))) {
+      const reference = goTypeToSchema(t, index);
+      const alias = typeof reference.$ref === "string" ? reference.$ref.split('/').at(-1) : undefined;
+      if (!alias) return reference;
+      const definition = index.byName.get(alias)!;
+      const base = index.components.get(alias)!;
+      const properties = { ...(base.properties as Record<string, JsonSchema> ?? {}) };
+      let specialized = false;
+      const literal = arg.namedChildren.find(n => n.type === "literal_value");
+      for (const entry of literal?.namedChildren ?? []) {
+        if (entry.type !== "keyed_element") continue;
+        const name = entry.namedChildren[0]?.namedChildren[0]?.text;
+        const field = definition.fields.find(field => field.goName === name && field.typeNode.type === "interface_type");
+        if (!field) continue;
+        const key = jsonTag(field).name ?? field.goName;
+        const value = entry.namedChildren[1]?.namedChildren[0];
+        const schema = payloadSchema(value, body, analysis, index, depth + 1);
+        if (schema && Object.keys(schema).length) { properties[key] = schema; specialized = true; }
+      }
+      return specialized ? {...base, properties} : reference;
     }
   }
   return null;
+}
+
+function hasOpaqueFields(schema: JsonSchema, index: GoModelIndex, seen = new Set<string>()): boolean {
+  if (!Object.keys(schema).length || schema["x-code-to-openapi-unresolved-embedded"]) return true;
+  if (typeof schema.$ref === "string") {
+    if (seen.has(schema.$ref)) return false;
+    const target = index.components.get(schema.$ref.split("/").pop()!);
+    return !target || hasOpaqueFields(target, index, new Set(seen).add(schema.$ref));
+  }
+  const children = [...Object.values(schema.properties ?? {}), ...(schema.items && !Array.isArray(schema.items) ? [schema.items] : [])];
+  return children.some(child => child && typeof child === "object" && hasOpaqueFields(child as JsonSchema, index, seen));
 }
 
 interface Evidence {
@@ -201,6 +234,7 @@ function analyzeFiberHandler(
   fn: GoFunction,
   analysis: GoAnalysis,
   modelIndex: GoModelIndex,
+  inputModel: GoModelIndex,
   declaredParams: string[],
 ): Evidence {
   const parameters: RouteParameter[] = [];
@@ -208,11 +242,44 @@ function analyzeFiberHandler(
   const body = fn.body;
   let requestBody: RouteCandidate["requestBody"];
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
+  const addResponse = (status: string, response: RouteCandidate["responses"][number]) => {
+    const previous = responseStatus.get(status);
+    responseStatus.set(status, previous ? mergeResponseVariants(previous, response) : response);
+  };
 
+  const parameterList = fn.node.namedChildren.find(n => n.type === "parameter_list");
+  const contextNames = new Set(parameterList ? findAll(parameterList, n => n.type === "parameter_declaration" && /\b\w+\.Ctx\b/.test(n.text))
+    .flatMap(n => n.namedChildren.filter(c => c.type === "identifier").map(c => c.text)) : []);
+  const contextReceiver = (receiver: TsNode): boolean => {
+    let node: TsNode | undefined = receiver;
+    for (let hops = 0; node && hops < 20; hops++) {
+      if (node.type === "identifier") return contextNames.has(node.text);
+      if (node.type !== "call_expression") return false;
+      node = selectorCall(node)?.receiver;
+    }
+    return false;
+  };
+  const responseCode = (receiver: TsNode): string => {
+    let current: TsNode | undefined = receiver;
+    for (let depth = 0; current?.type === "call_expression" && depth < 20; depth++) {
+      const selected = selectorCall(current);
+      if (!selected) break;
+      if (selected.method === "Status") {
+        const status = statusCode(positionalArguments(current)[0]);
+        if (!status) gaps.add("response-unknown");
+        return status ?? "default";
+      }
+      current = selected.receiver;
+    }
+    return "200";
+  };
   if (body) {
     for (const call of findAll(body, (n) => n.type === "call_expression")) {
+      let owner = call.parent;
+      while (owner && owner.id !== body.id && owner.type !== "func_literal") owner = owner.parent;
+      if (owner?.type === "func_literal") continue;
       const sel = selectorCall(call);
-      if (!sel) continue;
+      if (!sel || (contextNames.size && !contextReceiver(sel.receiver))) continue;
       const args = positionalArguments(call);
 
       if (sel.method === "Params") {
@@ -248,13 +315,16 @@ function analyzeFiberHandler(
         continue;
       }
 
-      if (sel.method === "BodyParser" && args[0]) {
+      const bindBody = sel.method === "Body" && sel.receiver.type === "call_expression" && selectorCall(sel.receiver)?.method === "Bind";
+      if ((sel.method === "BodyParser" || bindBody) && args[0]) {
         const typeNode = referencedType(args[0], body);
         if (typeNode) {
+          const schema = fiberTypeSchema(typeNode, analysis, inputModel);
+          if (hasOpaqueFields(schema, inputModel)) gaps.add("body-schema-unknown");
           requestBody = {
             required: true,
             confidence: "high",
-            content: [{ mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" }],
+            content: [{ mediaType: "application/json", schema, confidence: hasOpaqueFields(schema, inputModel) ? "low" : "high" }],
           };
         } else {
           gaps.add("body-schema-unknown");
@@ -264,31 +334,28 @@ function analyzeFiberHandler(
 
       // c.JSON(payload) or c.Status(code).JSON(payload).
       if (sel.method === "JSON") {
-        let status = "200";
-        let payloadArg = args[0];
-        if (sel.receiver.type === "call_expression") {
-          const up = selectorCall(sel.receiver);
-          if (up && up.method === "Status") {
-            status = statusCode(positionalArguments(sel.receiver)[0]) ?? "200";
-          }
-        }
+        const status = responseCode(sel.receiver);
+        const payloadArg = args[0];
         const schema = payloadSchema(payloadArg, body, analysis, modelIndex);
-        responseStatus.set(status, {
+        const mergedSchema = schema ?? {};
+        addResponse(status, {
           statusCode: status,
           description: "",
-          confidence: schema ? "high" : "medium",
-          ...(schema
-            ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
+          confidence: schema && !hasOpaqueFields(schema, modelIndex) ? "high" : "low",
+          ...(mergedSchema
+            ? { content: [{ mediaType: "application/json", schema: mergedSchema, confidence: "high" }] }
             : {}),
         });
-        if (!schema) gaps.add("response-schema-unknown");
+        if (!schema || hasOpaqueFields(schema, modelIndex)) gaps.add("response-schema-unknown");
         continue;
       }
 
-      if (sel.method === "SendString") {
-        if (!responseStatus.has("200")) {
-          responseStatus.set("200", {
-            statusCode: "200",
+      if (sel.method === "SendString" || sel.method === "SendStatus") {
+        const status = sel.method === "SendStatus" ? statusCode(args[0]) ?? "default" : responseCode(sel.receiver);
+        if (status === "default") gaps.add("response-unknown");
+        {
+          addResponse(status, {
+            statusCode: status,
             description: "",
             confidence: "high",
             content: [{ mediaType: "text/plain", schema: { type: "string" }, confidence: "high" }],
@@ -298,9 +365,10 @@ function analyzeFiberHandler(
       }
 
       if (sel.method === "SendFile" || sel.method === "Download") {
-        if (!responseStatus.has("200")) {
-          responseStatus.set("200", {
-            statusCode: "200",
+        const status = responseCode(sel.receiver);
+        {
+          addResponse(status, {
+            statusCode: status,
             description: "",
             confidence: "high",
             content: [{ mediaType: "application/octet-stream", schema: { type: "string", format: "binary" }, confidence: "medium" }],
@@ -349,6 +417,7 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel: GoModelIndex = { ...modelIndex, input: true, components: new Map() };
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
@@ -461,7 +530,7 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
       }
 
       const evidence: Evidence = fn
-        ? analyzeFiberHandler(fn, analysis, modelIndex, site.params)
+        ? analyzeFiberHandler(fn, analysis, modelIndex, inputModel, site.params)
         : {
             parameters: site.params.map((name): RouteParameter => ({
               name,
@@ -493,10 +562,12 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
       });
     }
 
+    const inputComponents = namespaceComponents(inputModel.components, new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]), "input");
+    for (const route of routes) if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, inputComponents.names);
     return {
       routes: dedupeRoutes(routes),
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })), ...inputComponents.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };

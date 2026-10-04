@@ -1,0 +1,182 @@
+{
+  "commit": "4cd8e1b0cd42578e882247d8801f6be5d402f118",
+  "totals": {
+    "tests": 237,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "org.springframework.samples.petclinic.SpringConfigTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 7.132,
+      "reportSha256": "163ed4632dafee577ef1833997621f5dfc4c73de67d6442707e73dd11b0833b7"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.model.ValidatorTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.57,
+      "reportSha256": "0ff4632b8ca526727e5421c72e2578dcaa15d03a080aeb3e5c99dca3c58b36da"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.OwnerRestControllerV1Tests",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.478,
+      "reportSha256": "3dd1bf042ad4835c0a99f0fd9c29eb9c66088a9fe456874878fa65af2ed46f30"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.PetRestControllerV1Tests",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.107,
+      "reportSha256": "299c7d744a864e656e0d3f96725b6026103512e44d1d48d252db7f21ed8e59bc"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.PetTypeRestControllerV1Tests",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.1,
+      "reportSha256": "4d2bd4e04946ec1aa549fa77f98219be61305cd037b601fffbeaa14cd02323d0"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.SpecialtyRestControllerV1Tests",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.086,
+      "reportSha256": "1f2cb73f4b334058c20988c69ac27f2434debfc802b0cf0714220ef0aaaaa5f7"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.UserRestControllerV1Tests",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.584,
+      "reportSha256": "e5797016df5c11cc342e869088d6eb3e9988b198ab41119d8d4ecec15a916202"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.V2RestControllersTests",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.025,
+      "reportSha256": "92366ab6bd7fe8ce10f8d5e422b455f3e685c87f0e2e3c846caea4c36ca1b74c"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.VetRestControllerV1Tests",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.113,
+      "reportSha256": "a0f88facf508d472883eebfe4a456ba32b888872340f3f64d04bc35954cd37d0"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.rest.controller.VisitRestControllerV1Tests",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.09,
+      "reportSha256": "383aa044eebfc86ff3d596ad28acf8d21940d5ffeb2ddba84aadb3ad634d27c0"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.clinicService.ClinicServiceH2JdbcTests",
+      "tests": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.129,
+      "reportSha256": "e4ba7133b70efdd5acb06ce1f84a24c7c5e7cdd306ac317de0bb2a2134e8c28c"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.clinicService.ClinicServiceHsqlJdbcTests",
+      "tests": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 1.019,
+      "reportSha256": "79601f109dcc10048a4250f4d7503758349b9d262b54ee1c2d291d4ea487d044"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.clinicService.ClinicServiceJpaTests",
+      "tests": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.94,
+      "reportSha256": "d513dec52266fb8a8f36f769fffbd01d30bc7b8ed4291eb665a63e4b39c02064"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.clinicService.ClinicServiceSpringDataJpaTests",
+      "tests": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.835,
+      "reportSha256": "3434959cbaa50ba54c2f9915a3cb66cac24e90619fe168bdcbc1d7b6948cd2a4"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.userService.UserServiceH2JdbcTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.007,
+      "reportSha256": "92f9b7d3166b190391be15e9557a1ad2b67c2848d01cd5cb7728a927851906ad"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.userService.UserServiceHsqlJdbcTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.484,
+      "reportSha256": "6836e23c818cc852bb2496fe4b11c0987b0f506160669e1d899cf9253d75acfa"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.userService.UserServiceJpaTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.008,
+      "reportSha256": "5a4fed1c18a06a4fa6fd43be37679b1c592cb39f67ced4bea9f01e8ecd745e9d"
+    },
+    {
+      "name": "org.springframework.samples.petclinic.service.userService.UserServiceSpringDataJpaTests",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.013,
+      "reportSha256": "009db5f8bccecba4cb4384e40ec4ba80b425bdeb31c65b18a758570ed4b6ff27"
+    },
+    {
+      "name": "org.springframework.validation.PetAgeValidatorTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 0.149,
+      "reportSha256": "00644bab5947ea0942674fe7e993cc1dcbabf463d47fd317a67e0e8977504400"
+    }
+  ]
+}

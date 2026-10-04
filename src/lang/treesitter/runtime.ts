@@ -37,6 +37,8 @@ const GRAMMAR_WASM: Record<GrammarName, string> = {
 };
 
 export interface TsNode {
+  readonly id: number;
+  readonly startIndex: number;
   type: string;
   text: string;
   namedChildCount: number;

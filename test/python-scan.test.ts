@@ -50,7 +50,8 @@ describe("FastAPI (Python) golden project", () => {
     const q = byName(list.parameters, "q");
     expect(q.in).toBe("query");
     expect(q.schema.type).toBe("string");
-    expect(q.schema.nullable).toBe(true);
+    expect(q.required).not.toBe(true);
+    expect(q.schema).toEqual({ type: "string", maxLength: 50 });
 
     const limit = byName(list.parameters, "limit");
     expect(limit.in).toBe("query");
@@ -100,7 +101,7 @@ describe("FastAPI (Python) golden project", () => {
       items: { type: "string" },
     });
     expect(schemas.Item.required).toContain("id");
-    expect(schemas.Item.required).not.toContain("color");
+    expect(schemas.Item.required).toContain("color");
 
     // Security scheme and uvicorn server.
     expect(doc.components.securitySchemes.oauth2_scheme.type).toBe("oauth2");

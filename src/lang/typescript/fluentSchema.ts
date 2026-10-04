@@ -82,7 +82,15 @@ function literalValue(ts: any, node: AnyNode, depth = 0): unknown {
 
 function chainHasRequired(ts: any, node: AnyNode): boolean {
   const chain = callChain(ts, node);
-  return Boolean(chain?.steps.some((s) => s.name === "required"));
+  if (!chain) return false;
+  // On an object builder, required() after prop() targets that property,
+  // not the object itself. required([names]) always targets child properties.
+  let hasProperty = false;
+  return chain.steps.some(step => {
+    if (step.name === "prop") hasProperty = true;
+    return step.name === "required" && !hasProperty &&
+      !(step.args[0] && ts.isArrayLiteralExpression(step.args[0]));
+  });
 }
 
 export interface FluentContext {
@@ -358,7 +366,10 @@ function buildObject(ts: any, schema: JsonSchema, steps: ChainStep[], depth: num
     }
     if (step.name === "required") {
       // fluent-json-schema marks the most recently declared property.
-      if (lastProp && !required.includes(lastProp)) required.push(lastProp);
+      const names = literalValue(ts, step.args[0]);
+      if (Array.isArray(names)) {
+        for (const name of names) if (typeof name === "string" && !required.includes(name)) required.push(name);
+      } else if (lastProp && !required.includes(lastProp)) required.push(lastProp);
       continue;
     }
     if (step.name === "additionalProperties") {

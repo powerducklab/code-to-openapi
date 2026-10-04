@@ -39,6 +39,8 @@ import {
   positionalArguments,
 } from "../lang/treesitter/ast.js";
 
+import {pythonBindingResolver} from "../lang/python/symbols.js";
+
 type JsonSchemaLocal = Record<string, unknown>;
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
@@ -90,6 +92,8 @@ interface SerializerIndex {
   classNames: Set<string>;
   componentsByName: Map<string, JsonSchemaLocal>;
   analysis: PythonAnalysis;
+  dynamicConstraints: Set<string>;
+  bindings: ReturnType<typeof pythonBindingResolver>;
 }
 
 function callName(node: TsNode | null): string | null {
@@ -147,11 +151,38 @@ function isSerializerBase(base: TsNode, index: SerializerIndex): boolean {
 
 // Map one DRF field call (`serializers.CharField(...)`, `AuthorSerializer(many=True)`,
 // `serializers.ListField(child=...)`, `SerializerMethodField()`) to a JSON Schema.
+function decimalFieldSchema(call: TsNode, index: SerializerIndex): JsonSchemaLocal {
+  const explicit = keywordArgument(call, "coerce_to_string");
+  if (explicit && explicit.type !== "none") {
+    if (explicit.type === "true") return {type: "string"};
+    if (explicit.type === "false") return {type: "number"};
+    return {description: "Dynamic decimal serialization configuration"};
+  }
+  const settings = [...index.analysis.files.values()].flatMap(file => findAll(file.root, node => node.type === "assignment" && node.namedChildren[0]?.text === "REST_FRAMEWORK"));
+  if (!settings.length) return {type: "string"};
+  const types = new Set<string>();
+  for (const setting of settings) {
+    const dictionary = setting.namedChildren.at(-1);
+    if (dictionary?.type !== "dictionary") return {description: "Dynamic decimal serialization configuration"};
+    const pairs = childrenOfType(dictionary, "pair");
+    if (dictionary.namedChildren.some(child => child.type !== "pair")) return {description: "Dynamic decimal serialization configuration"};
+    const value = pairs.find(pair => literalString(pair.namedChildren[0] ?? null) === "COERCE_DECIMAL_TO_STRING")?.namedChildren[1];
+    if (value && !["true", "false"].includes(value.type)) return {description: "Dynamic decimal serialization configuration"};
+    types.add(value?.type === "false" ? "number" : "string");
+  }
+  return types.size === 1 ? {type: [...types][0]} : {description: "Conflicting decimal serialization configurations"};
+}
+
 function drfFieldSchema(call: TsNode, index: SerializerIndex, seen: Set<string>): JsonSchemaLocal {
   const name = callName(call.namedChildren[0] ?? null);
   if (!name) return {};
 
   if (name === "SerializerMethodField") return {};
+  if (name === "DecimalField") return decimalFieldSchema(call, index);
+  if (["HyperlinkedIdentityField", "HyperlinkedRelatedField"].includes(name)) {
+    const schema = {type: "string", format: "uri"};
+    return keywordArgument(call, "many")?.type === "true" ? {type: "array", items: schema} : schema;
+  }
 
   if (name === "ListField" || name === "ListSerializer") {
     const child = keywordArgument(call, "child") ?? positionalArguments(call)[0] ?? null;
@@ -172,14 +203,66 @@ function drfFieldSchema(call: TsNode, index: SerializerIndex, seen: Set<string>)
   return {};
 }
 
+function serializerMeta(cls: PyClass): Map<string, TsNode> {
+  const meta = findAll(cls.node, n => n.type === "class_definition" && n.namedChildren[0]?.text === "Meta")[0];
+  return new Map((meta ? findAll(meta, n => n.type === "assignment") : []).map(n => [n.namedChildren[0]?.text ?? "", n.namedChildren.at(-1)!]));
+}
+
+function serializerModel(cls: PyClass, index: SerializerIndex): PyClass | undefined {
+  const model = serializerMeta(cls).get("model");
+  if (!model) return undefined;
+  const binding = index.bindings.resolve(cls.file, model.text);
+  if (!binding) return undefined;
+  return index.analysis.classes.find(candidate => candidate.file === binding.file && candidate.name === binding.name);
+}
+
+function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<string, JsonSchemaLocal> {
+  const meta = serializerMeta(cls);
+  const model = serializerModel(cls, index);
+  const result: Record<string, JsonSchemaLocal> = {};
+  const names = meta.get("fields") ? listElements(meta.get("fields")!).map(n => literalString(n)).filter((n): n is string => !!n) : [];
+  const readOnly = new Set(meta.get("read_only_fields") ? listElements(meta.get("read_only_fields")!).map(n => literalString(n)) : []);
+  for (const name of names) {
+    if (name === "url" && cls.bases.some(b => baseTail(b) === "HyperlinkedModelSerializer")) {result[name] = {type: "string", format: "uri", readOnly: true}; continue;}
+    const field = model?.fields.find(f => f.name === name);
+    if (!field?.default || field.default.type !== "call") {
+      result[name] = name === "id" && model ? {type: "integer", readOnly: true} : {};
+      continue;
+    }
+    const call = field.default;
+    const kind = callName(call.namedChildren[0] ?? null) ?? "";
+    const schema = kind === "DecimalField" ? decimalFieldSchema(call, index) : {...(FIELD_SCHEMAS[kind] ?? (kind === "TextField" ? {type: "string"} : {}))};
+    const length = literalInteger(keywordArgument(call, "max_length"));
+    if (length !== null) schema.maxLength = length;
+    if (schema.type === "string" && keywordArgument(call, "blank")?.type !== "true") schema.minLength = 1;
+    if (readOnly.has(name) || keywordArgument(call, "primary_key")?.type === "true" || keywordArgument(call, "auto_now_add")?.type === "true" || keywordArgument(call, "auto_now")?.type === "true") schema.readOnly = true;
+    if (keywordArgument(call, "null")?.type === "true" && typeof schema.type === "string") schema.type = [schema.type, "null"];
+    const choices = keywordArgument(call, "choices");
+    if (choices && ["list", "tuple"].includes(choices.type)) {
+      const values = listElements(choices).map(n => literalString(listElements(n)[0] ?? null));
+      if (values.length && values.every(v => v !== null)) schema.enum = values;
+      else index.dynamicConstraints.add(cls.name);
+    } else if (choices) index.dynamicConstraints.add(cls.name);
+    if (kind === "DecimalField" && !schema.type) index.dynamicConstraints.add(cls.name);
+    result[name] = schema;
+  }
+  return result;
+}
+
 function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<string>): JsonSchemaLocal {
   const existing = index.componentsByName.get(cls.name);
   if (existing) return existing;
   if (seen.has(cls.name)) return { type: "object", properties: {} };
   seen.add(cls.name);
 
-  const properties: Record<string, JsonSchemaLocal> = {};
+  const properties: Record<string, JsonSchemaLocal> = modelSerializerFields(cls, index);
   const required: string[] = [];
+  const meta = serializerMeta(cls);
+  const model = serializerModel(cls, index);
+  for (const [name, schema] of Object.entries(properties)) {
+    const value = model?.fields.find(f => f.name === name)?.default;
+    if (schema.readOnly || (value?.type === "call" && !keywordArgument(value, "default") && keywordArgument(value, "blank")?.type !== "true" && keywordArgument(value, "null")?.type !== "true")) required.push(name);
+  }
 
   for (const base of cls.bases) {
     const tail = baseTail(base);
@@ -196,7 +279,17 @@ function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<s
     const call = field.default;
     if (!call || call.type !== "call") continue;
     const schema = drfFieldSchema(call, index, seen);
+    if (callName(call.namedChildren[0] ?? null) === "DecimalField" && !schema.type) index.dynamicConstraints.add(cls.name);
+    if (keywordArgument(call, "read_only")?.type === "true" || ["ReadOnlyField", "SerializerMethodField", "HyperlinkedIdentityField"].includes(callName(call.namedChildren[0] ?? null) ?? "")) schema.readOnly = true;
+    if (keywordArgument(call, "write_only")?.type === "true") schema.writeOnly = true;
+    for (const [argument, key] of [["min_length", "minLength"], ["max_length", "maxLength"], ["min_value", "minimum"], ["max_value", "maximum"]]) {
+      const value = literalInteger(keywordArgument(call, argument!));
+      if (value !== null && (!(key === "minimum" || key === "maximum") || schema.type === "number" || schema.type === "integer")) schema[key!] = value;
+    }
+    if (schema.type === "string" && !schema.readOnly && !schema.minLength && keywordArgument(call, "allow_blank")?.type !== "true") schema.minLength = 1;
+    if (keywordArgument(call, "allow_null")?.type === "true" && typeof schema.type === "string") schema.type = [schema.type, "null"];
     properties[field.name] = schema;
+    const previous = required.indexOf(field.name); if (previous >= 0) required.splice(previous, 1);
     // `required=False` / a default value make the field optional.
     if (keywordArgument(call, "required")?.type === "false") continue;
     if (field.default && field.default.type === "call" && keywordArgument(call, "required")?.type !== "true") {
@@ -222,6 +315,8 @@ function buildSerializerIndex(analysis: PythonAnalysis): SerializerIndex {
   const index: SerializerIndex = {
     classNames: new Set(),
     componentsByName: new Map(),
+    dynamicConstraints: new Set(),
+    bindings: pythonBindingResolver(analysis),
     analysis,
   };
   let changed = true;
@@ -442,7 +537,7 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
             dynamicSerializer,
             serializers,
             file: reg.file,
-            paginated: viewsetHasPagination(reg.viewset),
+            paginated: viewsetHasPagination(reg.viewset, analysis),
           }),
         );
       }
@@ -628,11 +723,21 @@ function viewsetOverridesGetSerializer(cls: PyClass): boolean {
   return !!findMethod(cls, "get_serializer_class");
 }
 
-function viewsetHasPagination(cls: PyClass): boolean {
+function viewsetHasPagination(cls: PyClass, analysis: PythonAnalysis): boolean {
   const f = cls.fields.find((x) => x.name === "pagination_class");
   // `pagination_class = None` disables pagination; anything else (a class) opts in.
-  if (!f) return false;
-  return f.default?.type !== "none";
+  if (f) return f.default?.type !== "none";
+  const defaults = [...analysis.files.values()].flatMap(file => findAll(file.root, n => n.type === "assignment" && n.namedChildren[0]?.text === "REST_FRAMEWORK"));
+  for (const assignment of defaults) {
+    const value = assignment.namedChildren.at(-1);
+    if (value?.type !== "dictionary") continue;
+    for (const pair of childrenOfType(value, "pair")) {
+      if (literalString(pair.namedChildren[0] ?? null) === "DEFAULT_PAGINATION_CLASS") {
+        return literalString(pair.namedChildren[1] ?? null) === "rest_framework.pagination.PageNumberPagination";
+      }
+    }
+  }
+  return false;
 }
 
 // Compute the set of router actions a viewset exposes.
@@ -644,6 +749,7 @@ function viewsetActions(cls: PyClass, analysis: PythonAnalysis): string[] {
     for (const base of c.bases) {
       const tail = baseTail(base);
       if (MIXIN_ACTIONS[tail]) for (const a of MIXIN_ACTIONS[tail]) actions.add(a);
+      if (tail === "ReadOnlyModelViewSet") { actions.add("list"); actions.add("retrieve"); }
       if (tail === "ModelViewSet") {
         for (const a of Object.keys(VIEWSET_ACTIONS)) actions.add(a);
       }
@@ -681,14 +787,18 @@ interface CommonRouteInput {
   serializers: SerializerIndex;
 }
 
-function pathParams(path: string): RouteParameter[] {
+function pathParams(path: string, schema?: JsonSchemaLocal): RouteParameter[] {
   const params: RouteParameter[] = [];
   for (const match of path.matchAll(/\{([^}]+)\}/g)) {
     params.push({
       name: match[1]!,
       in: "path",
       required: true,
-      schema: { type: "string" },
+      schema: (() => {
+        const props = schema?.properties as Record<string, JsonSchemaLocal> | undefined;
+        const field = props?.[match[1] === "pk" ? "id" : match[1]!];
+        return field?.type ? {type: field.type, ...(field.format ? {format: field.format} : {})} : {type: "string"};
+      })(),
       confidence: "high",
     });
   }
@@ -709,7 +819,11 @@ function buildViewsetRoute(
   } & CommonRouteInput,
 ): RouteCandidate {
   const gaps = new Set<GapCode>();
-  const parameters = pathParams(input.path);
+  if (input.serializerName && input.serializers.dynamicConstraints.has(input.serializerName)) {
+    gaps.add("response-schema-unknown");
+    if (["create", "update", "partial_update"].includes(input.action)) gaps.add("body-schema-unknown");
+  }
+  const parameters = pathParams(input.path, input.serializerName ? input.serializers.componentsByName.get(input.serializerName) : undefined);
   const origin: SourceLocation = {
     file: input.file,
     line: input.viewset.node.startPosition.row + 1,
@@ -725,10 +839,23 @@ function buildViewsetRoute(
 
   if (input.action === "create" || input.action === "update" || input.action === "partial_update") {
     if (ref) {
+      let requestRef = ref;
+      if (input.action === "partial_update" && input.serializerName) {
+        const original = input.serializers.componentsByName.get(input.serializerName);
+        if (original) {
+          const name = `partial_${input.serializerName}`;
+          const partial = {...original}; delete partial.required;
+          input.serializers.componentsByName.set(name, partial);
+          requestRef = {$ref: `#/components/schemas/${name}`};
+        }
+      }
+      const parserField = input.viewset.fields.find(f => f.name === "parser_classes")?.default;
+      const parserNames = parserField ? listElements(parserField).map(n => callName(n)) : ["JSONParser", "FormParser", "MultiPartParser"];
+      const media: Record<string, string> = {JSONParser: "application/json", FormParser: "application/x-www-form-urlencoded", MultiPartParser: "multipart/form-data"};
       requestBody = {
-        required: true,
+        required: input.action !== "partial_update",
         confidence: "high",
-        content: [{ mediaType: "application/json", schema: ref }],
+        content: parserNames.filter((n): n is string => !!n && !!media[n]).map(n => ({mediaType: media[n]!, schema: requestRef})),
       };
     } else {
       requestBody = {
@@ -750,11 +877,13 @@ function buildViewsetRoute(
         type: "object",
         properties: {
           count: { type: "integer" },
-          next: { type: "string", nullable: true },
-          previous: { type: "string", nullable: true },
+          next: { type: ["string", "null"], format: "uri" },
+          previous: { type: ["string", "null"], format: "uri" },
           results: { type: "array", items },
         },
+        required: ["count", "results"],
       };
+      parameters.push({name: "page", in: "query", required: false, schema: {type: "integer"}, confidence: "high"});
     } else {
       schema = { type: "array", items };
     }
@@ -818,15 +947,20 @@ function buildActionRoute(
   } & CommonRouteInput,
 ): RouteCandidate {
   const gaps = new Set<GapCode>();
-  const parameters = pathParams(input.path);
+  const parameters = pathParams(input.path, input.serializerName ? input.serializers.componentsByName.get(input.serializerName) : undefined);
   const origin: SourceLocation = {
     file: input.file,
     line: input.fn.node.startPosition.row + 1,
     symbol: `${input.fn.name}`,
   };
 
+  const rendererNodes = input.fn.decorators.flatMap(d => {
+    const call = d.namedChildren[0];
+    return call?.type === "call" ? listElements(keywordArgument(call, "renderer_classes") ?? call).map(n => callName(n)) : [];
+  });
+  const html = rendererNodes.includes("StaticHTMLRenderer");
   // @action bodies/responses: no static serializer shape proven from the method.
-  gaps.add("response-schema-unknown");
+  if (!html) gaps.add("response-schema-unknown");
   if (input.method === "post" || input.method === "put" || input.method === "patch") {
     gaps.add("body-schema-unknown");
   }
@@ -835,7 +969,7 @@ function buildActionRoute(
       statusCode: "200",
       description: "",
       confidence: "medium",
-      content: [{ mediaType: "application/json", schema: {} }],
+      content: [{ mediaType: html ? "text/html" : "application/json", schema: html ? {type: "string"} : {} }],
     },
   ];
 

@@ -7,9 +7,9 @@
  */
 
 import type { JsonSchema } from "../../core/types.js";
-import type { CsField, CsTypeDef, CSharpAnalysis } from "./index.js";
+import {extractTypeDef, type CsField, type CsTypeDef, type CSharpAnalysis} from "./index.js";
 import type { TsNode } from "../treesitter/runtime.js";
-import { childrenOfType } from "../treesitter/ast.js";
+import { childrenOfType, findAll } from "../treesitter/ast.js";
 
 const INTEGER_TYPES = new Set(["int", "long", "short", "byte", "uint", "ulong", "ushort", "sbyte"]);
 const NUMBER_TYPES = new Set(["float", "double", "decimal"]);
@@ -43,10 +43,54 @@ const WRAPPER_TYPES = new Set([
 export interface CsModelIndex {
   readonly byName: Map<string, CsTypeDef>;
   readonly components: Map<string, JsonSchema>;
+  readonly qualified?: Map<string, CsTypeDef>;
+  readonly serialization?:boolean;
+  readonly componentNames?:Map<string,string>;
+  readonly enumSerializationUncertain?:boolean;
 }
 
 export function buildCsModelIndex(analysis: CSharpAnalysis): CsModelIndex {
-  return { byName: analysis.types, components: new Map() };
+  const definitions=analysis.declarations??[...analysis.files.values()].flatMap(file=>findAll(file.root,n=>['class_declaration','struct_declaration','record_declaration','enum_declaration'].includes(n.type))).map(extractTypeDef).filter((d):d is CsTypeDef=>!!d);
+  const counts=new Map<string,number>();for(const d of definitions)counts.set(d.name,(counts.get(d.name)??0)+1);
+  const byName=new Map<string,CsTypeDef>(),qualified=new Map<string,CsTypeDef>();
+  for(const original of definitions){const full=csScope(original.node,true).join('.');const def={...original,name:(counts.get(original.name)??0)>1?full:original.name};byName.set(def.name,def);qualified.set(full,def);}
+  const enumSerializationUncertain = [...analysis.files.values()].some(file => findAll(file.root, n =>
+    (n.type === 'object_creation_expression' && /(?:JsonStringEnumConverter|StringEnumConverter)/.test(n.childForFieldName('type')?.text ?? '')) ||
+    (n.type === 'invocation_expression' && /\bAddNewtonsoftJson\b/.test(n.namedChildren[0]?.text ?? ''))).length > 0);
+  return { byName, qualified, components: new Map(), enumSerializationUncertain };
+}
+
+const outputIndexes=new WeakMap<CsModelIndex,CsModelIndex>();
+export function csSerializationIndex(index:CsModelIndex):CsModelIndex{
+ const cached=outputIndexes.get(index);if(cached)return cached;
+ const names=new Map<string,string>(),reserved=new Set(index.byName.keys());
+ for(const name of index.byName.keys()){let candidate='serialized_'+name;while(reserved.has(candidate))candidate='_'+candidate;reserved.add(candidate);names.set(name,candidate);}
+ const output={...index,serialization:true,componentNames:names};outputIndexes.set(index,output);return output;
+}
+
+function csScope(node:TsNode,includeSelf=false):string[]{
+ const types:string[]=[];let namespace='';let current:TsNode|null=includeSelf?node:node.parent;
+ while(current){
+  if(['class_declaration','record_declaration','struct_declaration'].includes(current.type)){const name=current.childForFieldName('name')?.text;if(name)types.unshift(name);}
+  if(['namespace_declaration','file_scoped_namespace_declaration'].includes(current.type)){const name=current.childForFieldName('name')?.text;if(name)namespace=name+(namespace?'.'+namespace:'');}
+  if(!current.parent&&!namespace){const declaration=current.namedChildren.find(n=>n.type==='file_scoped_namespace_declaration');namespace=declaration?.childForFieldName('name')?.text??'';}
+  current=current.parent;
+ }
+ return [...(namespace?namespace.split('.'):[]),...types];
+}
+export function scopedName(node:TsNode,index:CsModelIndex):string|null{
+ const name=node.type==='qualified_name'?node.text:genericName(node);if(!name)return null;
+ if(index.qualified){
+  const scope=csScope(node);
+  for(let i=scope.length;i>=0;i--){const found=index.qualified.get([...scope.slice(0,i),name].join('.'));if(found&&(node.type!=='generic_name'||found.typeParameters.length===typeArguments(node).length))return found.name;}
+  let root=node;while(root.parent)root=root.parent;
+  const matches=new Set<string>();
+  for(const directive of root.namedChildren.filter(n=>n.type==='using_directive')){
+   const match=/^using\s+([\w.]+)\s*;/.exec(directive.text);const found=match&&index.qualified.get(match[1]+'.'+name);if(found&&(node.type!=='generic_name'||found.typeParameters.length===typeArguments(node).length))matches.add(found.name);
+  }
+  if(matches.size===1)return [...matches][0]!;if(matches.size>1)return null;
+ }
+ return index.byName.has(name)?name:null;
 }
 
 function genericName(node: TsNode): string | null {
@@ -71,13 +115,14 @@ export function ensureCsComponent(
   index: CsModelIndex,
   stack: Set<string> = new Set(),
 ): void {
-  if (index.components.has(name)) return;
+  const componentName=index.componentNames?.get(name)??name;
+  if (index.components.has(componentName)) return;
   const def = index.byName.get(name);
   if (!def) return;
   if (stack.has(name)) return;
   stack.add(name);
-  index.components.set(name, {});
-  index.components.set(name, buildTypeSchema(def, index, undefined, 0));
+  index.components.set(componentName, {});
+  index.components.set(componentName, buildTypeSchema(def, index, undefined, 0));
   stack.delete(name);
 }
 
@@ -202,7 +247,7 @@ function typeKey(value: SubstValue, index: CsModelIndex, subst?: Subst): string 
     // Specialize the referenced type first, then use its component name.
     if (index.byName.has(name) && args.length) {
       const specialized = ensureSpecializedCsComponent(resolved, index, subst, 0);
-      return specialized ?? name;
+      return specialized ? index.serialization&&specialized.startsWith('serialized_')?specialized.slice(11):specialized : name;
     }
     return BOXED_PRIMITIVE_NAMES[name] ?? name;
   }
@@ -242,7 +287,7 @@ function ensureSpecializedCsComponent(
   depth: number,
 ): string | null {
   if (depth > 6) return null;
-  const name = genericName(node);
+  const name = scopedName(node,index);
   if (!name) return null;
   const def = index.byName.get(name);
   if (!def || def.typeParameters.length === 0) return null;
@@ -251,7 +296,7 @@ function ensureSpecializedCsComponent(
   const args: SubstValue[] = rawArgs.map((arg) => resolveValue(arg, outerSubst));
 
   const suffix = args.map((arg) => typeKey(arg, index, outerSubst)).join("_");
-  const desired = `${name}_${suffix}`;
+  const desired = `${index.componentNames?.get(name)??name}_${suffix}`;
   // The suffix is deterministic from base name + concrete arguments, so an
   // existing specialization is structurally identical and can be reused.
   if (index.components.has(desired)) return desired;
@@ -300,7 +345,7 @@ function collectChainFields(
       ) {
         continue;
       }
-      const baseName = genericName(candidate);
+      const baseName = scopedName(candidate,index);
       const baseDef = baseName ? index.byName.get(baseName) : undefined;
       if (!baseDef) continue;
       const baseSubst = new Map(subst ?? []);
@@ -343,6 +388,20 @@ function buildTypeSchema(
   depth = 0,
 ): JsonSchema {
   if (def.kind === "enum") {
+    if (index.serialization) {
+      const converter = listAttributes(def.node).find(a => /(?:^|\.)JsonConverter(?:Attribute)?$/.test(a.name));
+      if (converter) {
+        if (/typeof\s*\(\s*(?:System\.Text\.Json\.Serialization\.)?JsonStringEnumConverter(?:<[^>]+>)?\s*\)/.test(converter.node.text)) {
+          const flags = listAttributes(def.node).some(a => /(?:^|\.)Flags(?:Attribute)?$/.test(a.name));
+          return {anyOf:[flags ? {type:'string'} : {type:'string',enum:[...def.enumValues]}, {type:'integer'}]};
+        }
+        return {description:'Custom enum JSON converter requires runtime contract verification'};
+      }
+      if (index.enumSerializationUncertain) return {description:'Global enum serialization configuration requires runtime contract verification'};
+      // System.Text.Json writes enum numbers by default, including unnamed
+      // underlying values and flag combinations. A string enum is incorrect.
+      return {type:'integer'};
+    }
     return def.enumValues.length ? { type: "string", enum: [...def.enumValues] } : { type: "string" };
   }
   const properties: Record<string, JsonSchema> = {};
@@ -354,9 +413,25 @@ function buildTypeSchema(
     depth,
     new Set(),
   )) {
+    if(field.ignoreJson)continue;
     const propertyName = field.jsonName ?? field.name;
     properties[propertyName] = csTypeToSchema(field.typeNode, index, depth + 1, fieldSubst);
-    if (field.required) required.push(propertyName);
+    if (index.serialization && field.conditionalJson) {
+      const value = properties[propertyName]!;
+      if (Array.isArray(value.type)) {
+        const types = value.type.filter(type => type !== 'null');
+        value.type = types.length === 1 ? types[0] : types;
+      }
+      for (const keyword of ['anyOf', 'oneOf'] as const) {
+        if (!Array.isArray(value[keyword])) continue;
+        const branches = value[keyword].filter(branch => !(branch && typeof branch === 'object' && (branch as JsonSchema).type === 'null'));
+        if (branches.length === 1) {
+          const {[keyword]: ignored, ...siblings} = value;
+          properties[propertyName] = {...branches[0] as JsonSchema, ...siblings};
+        } else value[keyword] = branches;
+      }
+    }
+    if(index.serialization?!field.conditionalJson:field.required)required.push(propertyName);
   }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;
@@ -370,6 +445,7 @@ export function csTypeToSchema(
   subst?: Subst,
 ): JsonSchema {
   if (!node || depth > 6) return {};
+  if (node.type === "nullable_type") return withNull(csTypeToSchema(node.namedChildren[0], index, depth + 1, subst));
   const binding = resolveValue(node, subst);
   if (!isNodeValue(binding)) return binding;
   const resolved = binding;
@@ -408,7 +484,7 @@ export function csTypeToSchema(
   }
 
   if (resolved.type === "generic_name") {
-    const name = genericName(resolved);
+    const name = scopedName(resolved,index)??genericName(resolved);
     const args = typeArguments(resolved);
     if (name && COLLECTION_TYPES.has(name)) {
       return {
@@ -424,6 +500,7 @@ export function csTypeToSchema(
           : {}),
       };
     }
+    if (name === "Nullable" && args[0]) return withNull(csTypeToSchema(args[0], index, depth + 1, subst));
     if (name && WRAPPER_TYPES.has(name) && args[0]) {
       return csTypeToSchema(args[0], index, depth + 1, subst);
     }
@@ -433,13 +510,13 @@ export function csTypeToSchema(
         if (specialized) return { $ref: `#/components/schemas/${specialized}` };
       }
       ensureCsComponent(name, index);
-      return { $ref: `#/components/schemas/${name}` };
+      return { $ref: `#/components/schemas/${index.componentNames?.get(name)??name}` };
     }
     return {};
   }
 
   if (resolved.type === "identifier") {
-    const name = resolved.text;
+    const name = scopedName(resolved,index)??resolved.text;
     if (name === "Guid") return { type: "string", format: "uuid" };
     if (STRING_TYPES.has(name)) return { type: "string" };
     if (INTEGER_TYPES.has(name)) return { type: "integer" };
@@ -453,12 +530,14 @@ export function csTypeToSchema(
     }
     if (index.byName.has(name)) {
       ensureCsComponent(name, index);
-      return { $ref: `#/components/schemas/${name}` };
+      return { $ref: `#/components/schemas/${index.componentNames?.get(name)??name}` };
     }
     return {};
   }
 
   if (node.type === "qualified_name") {
+    const local=scopedName(node,index);
+    if(local){ensureCsComponent(local,index);return {$ref:`#/components/schemas/${index.componentNames?.get(local)??local}`};}
     const name = genericName(node);
     if (name && DATE_TIME_TYPES.has(name)) return { type: "string", format: "date-time" };
     if (name && STRING_TYPES.has(name)) return { type: "string" };
@@ -528,4 +607,11 @@ function findStringLiteral(node: TsNode): string | null {
     .replace(/"$/, "")
     .replace(/""/g, '"')
     .replace(/\\"/g, '"');
+}
+
+function withNull(schema: JsonSchema): JsonSchema {
+  if (typeof schema.type === "string") return { ...schema, type: [schema.type, "null"] };
+  if (Array.isArray(schema.type)) return { ...schema, type: [...new Set([...schema.type, "null"])] };
+  if (!Object.keys(schema).length) return schema;
+  return { anyOf: [schema, { type: "null" }] };
 }

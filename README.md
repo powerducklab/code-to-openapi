@@ -349,3 +349,16 @@ Unresolvable constructs (dynamic route expressions, orphan routers) appear in
 MIT © Powerduck limited. See [LICENSE](./LICENSE).
 
 Website: [https://www.powerduck.com/](https://www.powerduck.com/)
+
+### Explicit generated Java sources
+
+Generated Spring API interfaces and DTOs may be excluded by `.gitignore` (for example under `target/`). Generate them with your project's pinned toolchain first, then opt in to those source directories:
+
+```ts
+const result = await scanProject({
+  root: '/workspace/backend',
+  additionalSourceRoots: ['target/generated-sources/openapi/src/main/java'],
+});
+```
+
+The scanner never runs code generators or project build scripts. Additional roots must resolve to subdirectories inside the project; outside symlinks are rejected. Explicit `ignore` patterns and `.powerduckignore` still apply. Missing interface sources remain unresolved rather than fabricated. Spring controller implementations inherit interface mappings, parameter annotations and generated response annotations when the corresponding sources are present. This does not imply support for every generic interface or dynamic mapping.

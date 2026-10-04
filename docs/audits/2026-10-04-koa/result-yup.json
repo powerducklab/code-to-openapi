@@ -1,0 +1,158 @@
+{
+  "assertions": 115,
+  "mismatches": 25,
+  "errors": [
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/image/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/email/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/email/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/email/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/id/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/id/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/id/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/token/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/token/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/token/type",
+      "expected": "string",
+      "actual": null
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

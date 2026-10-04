@@ -1,0 +1,131 @@
+[
+  {
+    "framework": "fiber",
+    "repository": "https://github.com/gofiber/recipes.git",
+    "commit": "47a33121aee2607fcfa49696db0a0d358d844a72",
+    "localRoot": "/tmp/realproj2-fiber-recipes/swagger",
+    "operations": 4,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "fiber"
+      ],
+      "filesScanned": 6,
+      "routesConfirmed": 1,
+      "routesPartial": 3,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /api/v1/books",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/v1/books/{id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/v1/books",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.73
+  },
+  {
+    "framework": "fastendpoints",
+    "repository": "https://github.com/FastEndpoints/FastEndpoints.git",
+    "commit": "0a1e693048bc2e773c882c1d3be4ac849267eec2",
+    "localRoot": "/tmp/realproj2-fastendpoints/Benchmark/FastEndpointsBench",
+    "operations": 10,
+    "report": {
+      "languages": [
+        "csharp"
+      ],
+      "frameworks": [
+        "fastendpoints"
+      ],
+      "filesScanned": 10,
+      "routesConfirmed": 7,
+      "routesPartial": 3,
+      "unresolved": 1,
+      "gaps": [
+        {
+          "route": "post /benchmark/codegen/{id}",
+          "gaps": [
+            "body-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /command-handler-1",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /command-handler-2",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.57
+  },
+  {
+    "framework": "rocket",
+    "repository": "https://github.com/rwf2/Rocket.git",
+    "commit": "3a54d079aef060a8f732bd04ea54b0581a604087",
+    "localRoot": "/tmp/realproj2-rocket/examples/serialization",
+    "operations": 6,
+    "report": {
+      "languages": [
+        "rust"
+      ],
+      "frameworks": [
+        "rocket"
+      ],
+      "filesScanned": 5,
+      "routesConfirmed": 4,
+      "routesPartial": 2,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "post /json/",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /json/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.57
+  }
+]

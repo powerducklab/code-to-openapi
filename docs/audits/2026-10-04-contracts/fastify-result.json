@@ -1,0 +1,13 @@
+{
+  "assertions": 626,
+  "mismatches": 0,
+  "errors": [],
+  "baselineIssues": [
+    {
+      "where": "delete /articles/{slug}/comments/{id}",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    }
+  ],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

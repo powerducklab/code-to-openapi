@@ -19,6 +19,7 @@
  * honest gap; Slim 3 closure handlers share the same shape and are covered.
  */
 
+import { belongsToPhpFunction } from "../lang/php/scope.js";
 import type {
   Confidence,
   DiscoveredMediaType,
@@ -33,8 +34,10 @@ import type {
   RouteParameter,
   ScanContext,
 } from "../core/types.js";
-import type { PhpAnalysis } from "../lang/php/index.js";
-import { phpStringText } from "../lang/php/index.js";
+import type { PhpAnalysis, PhpClass } from "../lang/php/index.js";
+import {mergeResponseVariants} from "../core/response-variants.js";
+import {slimActionResponse} from './slim-action-flow.js';
+import { phpStringText, resolvePhpClass, findPhpMethod } from "../lang/php/index.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import {
@@ -95,36 +98,54 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
       );
       for (const call of calls) {
         const method = call.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase() ?? "";
-        if (!VERBS.has(method)) continue;
+        if (!VERBS.has(method) && method !== "any" && method !== "map") continue;
         const args = call.namedChildren.find((c) => c.type === "arguments");
         const argNodes = args ? childrenOfType(args, "argument") : [];
-        const pathStr = argNodes[0]?.type === "string"
-          ? argNodes[0]
-          : argNodes[0]?.namedChildren.find((c) => c.type === "string");
+        const offset = method === "map" ? 1 : 0;
+        let methods = method === "any" ? ["get", "post", "put", "patch", "delete", "options"] : [method];
+        if (method === "map") {
+          const array = argNodes[0]?.namedChildren[0];
+          const entries = array?.type === "array_creation_expression" ? array.namedChildren.filter(child => child.type === "array_element_initializer") : [];
+          methods = entries.flatMap(entry => {
+            const value = entry.namedChildren.length === 1 ? phpStringText(entry.namedChildren[0]!)?.toLowerCase() : null;
+            return value && VERBS.has(value) ? [value] : [];
+          });
+          if (!entries.length || methods.length !== entries.length) {
+            unresolved.push({reason:"dynamic-methods",message:"Cannot resolve all Slim map HTTP methods",origin:{file:rel,line:call.startPosition.row+1}});
+          }
+        }
+        const pathNode = argNodes[offset]?.namedChildren[0];
+        const pathStr = pathNode?.type === "string" ? pathNode : undefined;
         const rawPath = pathStr ? phpStringText(pathStr) : null;
-        if (rawPath === null) continue;
+        if (rawPath === null) {
+          unresolved.push({reason:"dynamic-path",message:"Cannot resolve Slim route path",origin:{file:rel,line:call.startPosition.row+1}});
+          continue;
+        }
         const prefix = groupPrefixChain(call);
-        const fullPath = joinRoute(prefix, normalizeRoute(rawPath));
+        const fullPath = normalizeRoute(prefix + rawPath);
 
         // Resolve the handler: a closure/arrow function, or an invokable
         // class-string (`ListUsersAction::class`) whose __invoke method we
         // index directly.
-        const closure = findClosureHandler(argNodes[1]);
+        const closure = findClosureHandler(argNodes[offset + 1]);
         let handlerNode = closure;
         if (!handlerNode) {
-          handlerNode = resolveClassStringHandler(argNodes[1], analysis, rel);
+          handlerNode = resolveClassStringHandler(argNodes[offset + 1], analysis, rel);
         }
 
+        for (const verb of new Set(methods)) {
         const candidate = buildRoute({
           analysis,
           model,
           rel,
           call,
-          verb: method,
+          verb,
           path: fullPath,
           closure: handlerNode,
+          actionClass: closure ? undefined : resolveHandlerClass(argNodes[offset + 1], analysis),
         });
         if (candidate) candidates.push(candidate);
+        }
       }
     }
 
@@ -151,7 +172,7 @@ function isAppCall(node: TsNode): boolean {
 function isAppVerbCall(node: TsNode): boolean {
   if (!isAppCall(node)) return false;
   const method = node.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase() ?? "";
-  return VERBS.has(method) || method === "group";
+  return VERBS.has(method) || method === "group" || method === "any" || method === "map";
 }
 
 /** Unwrap a handler argument into a closure (or null for a resolvable class-string). */
@@ -174,19 +195,19 @@ function resolveClassStringHandler(
   analysis: PhpAnalysis,
   rel: string,
 ): TsNode | null {
-  if (!arg) return null;
-  const access = arg.type === "class_constant_access_expression"
-    ? arg
-    : findFirst(arg, (n) => n.type === "class_constant_access_expression");
-  if (!access) return null;
-  const names = childrenOfType(access, "name").filter((n) => n.text !== "class");
-  const rawShort = names[names.length - 1]?.text ?? null;
-  if (!rawShort) return null;
-  const imports = analysis.files.get(rel)?.imports;
-  const declared = imports?.get(rawShort)?.split("\\").pop() ?? rawShort;
-  const cls = analysis.classes.get(declared) ?? analysis.classes.get(rawShort);
-  if (!cls) return null;
-  return cls.methods.get("__invoke") ?? null;
+  const cls = resolveHandlerClass(arg, analysis);
+  return cls ? findPhpMethod(cls, "__invoke", analysis) ?? null : null;
+}
+
+function resolveHandlerClass(arg: TsNode | undefined, analysis: PhpAnalysis): PhpClass | undefined {
+  if (!arg) return undefined;
+  const value = arg.type === "argument" ? arg.namedChildren[0] : arg;
+  const access = value?.type === "class_constant_access_expression" ? value : undefined;
+  if (!access) return undefined;
+  if (access.namedChildren.at(-1)?.text !== "class") return undefined;
+  const className = access.namedChildren[0]?.text;
+  const cls = className ? resolvePhpClass(className, analysis, access) : undefined;
+  return cls;
 }
 
 /**
@@ -212,7 +233,7 @@ function groupPrefixChain(call: TsNode): string {
             const first = gArgs ? childrenOfType(gArgs, "argument")[0] : undefined;
             const str = first?.type === "string" ? first : first?.namedChildren.find((c) => c.type === "string");
             const text = str ? phpStringText(str) : null;
-            if (text) prefixes.unshift(normalizeRoute(text));
+            if (text) prefixes.unshift(text);
             break;
           }
         }
@@ -229,6 +250,7 @@ function groupPrefixChain(call: TsNode): string {
 // ---------------------------------------------------------------------------
 
 interface BuildArgs {
+  actionClass?: PhpClass;
   analysis: PhpAnalysis;
   model: PhpModelIndex;
   rel: string;
@@ -272,6 +294,17 @@ function buildRoute(args: BuildArgs): RouteCandidate | null {
   } else {
     gaps.push("response-unknown");
     responses = [{ statusCode: "200", description: "", confidence: "low" }];
+  }
+
+  if (args.actionClass) {
+    const flow = slimActionResponse(args.actionClass, model);
+    if (!flow && !gaps.includes('response-unknown')) gaps.push('response-unknown');
+    if (flow) {
+      responses = [flow.response];
+      if (!flow.uncertain) {
+        for (let index = gaps.length - 1; index >= 0; index--) if (gaps[index] === 'response-unknown') gaps.splice(index, 1);
+      } else if (!gaps.includes('response-unknown')) gaps.push('response-unknown');
+    }
   }
 
   for (const p of declaredPathParams) {
@@ -384,6 +417,7 @@ function collectResponses(
   const responses: DiscoveredResponse[] = [];
 
   for (const ret of findAll(closure, (n) => n.type === "return_statement")) {
+    if (!belongsToPhpFunction(ret, closure)) continue;
     const expression = ret.namedChildren.find(
       (c) =>
         c.type === "member_call_expression" ||
@@ -434,15 +468,9 @@ function collectResponses(
   const merged = new Map<string, DiscoveredResponse>();
   for (const response of responses) {
     const existing = merged.get(response.statusCode);
-    if (!existing || confidenceRank(response.confidence) > confidenceRank(existing.confidence)) {
-      merged.set(response.statusCode, response);
-    }
+    merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
   }
   return [...merged.values()];
-}
-
-function confidenceRank(confidence: Confidence): number {
-  return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
 }
 
 function interpretResponse(
@@ -460,7 +488,8 @@ function interpretResponse(
 
   // $response->withJson($data, $status)
   if (onResponse && method === "withJson") {
-    const status = integerText(argNodes[1]) ?? "200";
+    const status = argNodes[1] ? integerText(argNodes[1]) ?? "default" : "200";
+    if (status === "default") gaps.push("response-unknown");
     const payload = argNodes[0];
     if (!payload) {
       return {
@@ -482,7 +511,8 @@ function interpretResponse(
 
   // $response->withStatus($code) — an empty body (often 204).
   if (onResponse && method === "withStatus") {
-    const code = integerText(argNodes[0]) ?? "200";
+    const code = integerText(argNodes[0]) ?? "default";
+    if (code === "default") gaps.push("response-unknown");
     return { statusCode: code, description: "", confidence: "high" };
   }
 
@@ -511,16 +541,28 @@ function interpretResponse(
 // ---------------------------------------------------------------------------
 
 function normalizeRoute(raw: string): string {
-  let route = raw.trim();
+  let route = raw;
   if (!route) return "/";
   if (!route.startsWith("/")) route = `/${route}`;
-  route = route.replace(/\{([^}?]+)\?\}/g, "{$1}");
-  return route.replace(/\/+$/, "") || "/";
-}
-
-function joinRoute(base: string, sub: string): string {
-  const joined = `${base}${sub}`.replace(/\/+/g, "/");
-  return joined || "/";
+  // FastRoute placeholders can contain regex quantifiers with nested braces.
+  // Remove the constraint, not part of the placeholder or surrounding path.
+  let output = '';
+  for (let i = 0; i < route.length; i++) {
+    if (route[i] !== '{') { output += route[i]; continue; }
+    const start = i;
+    let depth = 1;
+    while (++i < route.length && depth) {
+      if (route[i] === '\\') { i++; continue; }
+      if (route[i] === '{') depth++;
+      if (route[i] === '}') depth--;
+    }
+    const rawParameter = route.slice(start + 1, i - 1);
+    if (depth) { output += route.slice(start); break; }
+    const name = rawParameter.split(':')[0];
+    output += `{${name}}`;
+    i--;
+  }
+  return output;
 }
 
 function dedupe(routes: RouteCandidate[]): RouteCandidate[] {

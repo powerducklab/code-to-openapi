@@ -1,3 +1,4 @@
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
 /**
  * Go standard library net/http (ServeMux) framework pack.
  *
@@ -134,6 +135,7 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel = { ...modelIndex, input: true, components: new Map() };
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
@@ -272,6 +274,7 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
             body: fn.body,
             declaredPathParams: site.params,
             modelIndex,
+            inputModel,
             analysis,
           })
         : {
@@ -309,10 +312,12 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
       }
     }
 
+    const inputComponents = namespaceComponents(inputModel.components, new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]), "input");
+    for (const route of routes) if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, inputComponents.names);
     return {
       routes: dedupeRoutes(routes),
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })), ...inputComponents.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };

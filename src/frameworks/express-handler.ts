@@ -1,3 +1,4 @@
+import {mergeResponseVariants} from "../core/response-variants.js";
 import { jsonSchema } from "@powerduck/x-to-openapi";
 
 import type {
@@ -10,6 +11,8 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { localReturnSchema, localObjectFields, localImplementation } from "../lang/typescript/localFlow.js";
+import { resolveStaticValue } from "../lang/typescript/staticValue.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { convertZodNode } from "../lang/typescript/zod.js";
 import type { ValidatedField } from "../lang/typescript/validate.js";
@@ -169,7 +172,7 @@ function literalToValue(ts: any, node: any, depth = 0): unknown {
   return undefined;
 }
 
-function schemaFromNode(
+function schemaFromNodeBase(
   analysis: TsAnalysis,
   node: any,
   fallbackLiteral = true,
@@ -189,6 +192,18 @@ function schemaFromNode(
     if (value !== undefined) return { schema: jsonSchema(value), typed: false };
   }
   return { typed: false };
+}
+
+/** Enrich incomplete checker types with actual local serializer shapes. */
+function schemaFromNode(analysis: TsAnalysis, node: any, fallbackLiteral = true): {schema?: JsonSchema; typed:boolean} {
+  const base = schemaFromNodeBase(analysis, node, fallbackLiteral);
+  const unknown = (schema: any, depth = 0): boolean => !schema || !Object.keys(schema).length || depth < 16 && (
+    Object.values(schema.properties ?? {}).some(child => unknown(child, depth + 1)) ||
+    schema.items && unknown(schema.items, depth + 1)
+  );
+  let evidence = false;
+  const observed = localReturnSchema(analysis, node, value => schemaFromNodeBase(analysis, value, fallbackLiteral).schema, true, () => { evidence = true; });
+  return observed && (evidence || unknown(base.schema)) ? {schema: observed, typed: !unknown(observed)} : base;
 }
 
 /** Resolves an identifier to a function-like node across local/imported files. */
@@ -368,6 +383,10 @@ export function resolveHandler(
 ): { node: any; file: any } | null {
   const { ts } = analysis;
   if (!node) return null;
+  const staticHandler = resolveStaticValue(analysis, node);
+  if (staticHandler?.body && analysis.isProjectFile(staticHandler.getSourceFile().fileName) && (ts.isMethodDeclaration(staticHandler) || ts.isFunctionDeclaration(staticHandler) || ts.isArrowFunction(staticHandler) || ts.isFunctionExpression(staticHandler))) {
+    return {node: staticHandler, file: staticHandler.getSourceFile()};
+  }
 
   if (
     ts.isArrowFunction(node) ||
@@ -574,6 +593,7 @@ export function analyzeHandler(
     validators: ValidatedField[];
     bodyReferencedHint?: boolean;
     customResponseMethods?: Map<string, CustomResponseMethod>;
+    reachableNodes?: Set<any>;
   },
 ): HandlerFacts {
   const { ts, checker } = analysis;
@@ -730,11 +750,7 @@ export function analyzeHandler(
     const media: DiscoveredMediaType = { mediaType };
     if (schema && Object.keys(schema).length) media.schema = schema;
     if (existing) {
-      const existingMedia = existing.content?.find((m) => m.mediaType === mediaType);
-      if (existingMedia && !existingMedia.schema && media.schema) {
-        existingMedia.schema = media.schema;
-      }
-      if (confidence === "high") existing.confidence = "high";
+      responses.set(key, mergeResponseVariants(existing, {statusCode:status, description:"", confidence, content:[media]}));
     } else {
       responses.set(key, {
         statusCode: status,
@@ -752,6 +768,8 @@ export function analyzeHandler(
   const localAssignments = new Map<string, any>();
   (function collectLocals(node: any): void {
     if (!node) return;
+    if (context.reachableNodes && !context.reachableNodes.has(node)) return;
+    if (ts.isFunctionLike(node)) return;
     if (ts.isVariableStatement(node)) {
       for (const decl of node.declarationList.declarations) {
         if (ts.isIdentifier(decl.name) && decl.initializer) {
@@ -903,6 +921,7 @@ export function analyzeHandler(
   };
 
   const visit = (node: any) => {
+    if (context.reachableNodes && !context.reachableNodes.has(node)) return;
     // Property access on req / res.
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const root = rootIdentifier(ts, node);
@@ -963,6 +982,17 @@ export function analyzeHandler(
           }
         }
       }
+    }
+
+    // Follow forwarded query objects by resolved parameter symbols, including service helpers.
+    if (ts.isCallExpression(node)) {
+      const target = localImplementation(analysis, node);
+      if (target) node.arguments.forEach((arg: any, index: number) => {
+        if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === reqName && arg.name.text === "query" && target.parameters[index]) {
+          for (const name of localObjectFields(analysis, target, target.parameters[index])) queryFields.push({name, schema: {type: "string"}});
+          gaps.add("query-unknown");
+        }
+      });
     }
 
     // req.get('X') / req.header('X')
@@ -1073,7 +1103,7 @@ export function analyzeHandler(
         const raw = step.args[0]?.getText(file);
         if (raw && HTTP_VERB_LITERAL.test(raw)) {
           status = raw;
-          recordResponse(status, "application/json", undefined, "medium");
+          recordResponse(status, "text/plain", {type:'string'}, "high");
         }
         return;
       }
@@ -1088,7 +1118,14 @@ export function analyzeHandler(
         return;
       }
       if (step.name === "end") {
-        recordResponse("204", "application/json", undefined, "medium");
+        hasResponseSite = true;
+        const payload = step.args[0];
+        if (payload && !ts.isFunctionLike(payload) && payload.getText(file) !== 'undefined') {
+          const inferred = schemaFromNode(analysis, payload);
+          recordResponse(status, explicitType ?? '*/*', inferred.schema, 'medium');
+        } else {
+          responses.set(responseKey(status, ''), {statusCode:status,description:'',confidence:'high'});
+        }
         return;
       }
       if (
@@ -1314,7 +1351,7 @@ export function analyzeHandler(
           // status-specific observed literal.
           const namedWins = success && Boolean(simpleNamed);
           const lossyLiteral =
-            success && response.confidence !== "high" && !schemaHasRef(media.schema);
+            success && !genericResponse.anyOf && !genericResponse.oneOf && response.confidence !== "high" && !schemaHasRef(media.schema);
           if (empty || namedWins || lossyLiteral) {
             media.schema = genericResponse;
             media.confidence = "high";

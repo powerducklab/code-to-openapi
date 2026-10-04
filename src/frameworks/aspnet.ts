@@ -9,6 +9,7 @@
  *    Results.Created / Results.NoContent and [From*] parameter attributes.
  */
 
+import { mergeResponseVariants } from "../core/response-variants.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -35,6 +36,8 @@ import {
   attributeStringArg,
   buildCsModelIndex,
   csTypeToSchema,
+  csSerializationIndex,
+  scopedName,
   ensureCsComponent,
   findAttribute,
   listAttributes,
@@ -143,8 +146,14 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
     const candidates: RouteCandidate[] = [];
     const model = buildCsModelIndex(analysis);
 
+    const convention=controllerPrefix(analysis);
     for (const [rel, file] of analysis.files) {
+      const start=candidates.length;
       extractControllers(file.root, rel, model, candidates);
+      if(convention)for(const route of candidates.slice(start)){
+        route.path=('/'+convention.prefix+'/'+route.path).replace(/\/+/g,'/');route.fullPath=route.path;
+        if(convention.dynamic)route.gaps=[...new Set([...(route.gaps??[]),'path-dynamic' as const])];
+      }
       extractMinimalApis(file.root, rel, model, candidates);
     }
 
@@ -160,6 +169,34 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
     return { routes, unresolved, components, securitySchemes, servers };
   },
 };
+
+/** Recognize a registered, source-proven controller route-prefix convention. */
+function controllerPrefix(analysis:CSharpAnalysis):{prefix:string;dynamic:boolean}|undefined{
+ const conventions=new Set<string>();
+ for(const file of analysis.files.values())for(const declaration of findAll(file.root,n=>n.type==='class_declaration')){
+  const bases=declaration.namedChildren.find(n=>n.type==='base_list');
+  if(!bases?.text.includes('IApplicationModelConvention'))continue;
+  const text=declaration.text;
+  if(!/new\s*\(\s*new\s+RouteAttribute\(prefix\)\)/.test(text)&&!/new\s+AttributeRouteModel\(\s*new\s+RouteAttribute\(prefix\)\)/.test(text))continue;
+  if(!/AttributeRouteModel\.CombineAttributeRouteModel\(\s*_prefix\s*,\s*selector\.AttributeRouteModel\s*\)/.test(text))continue;
+  if(!/application\.Controllers\.SelectMany\(\s*\w+\s*=>\s*\w+\.Selectors\s*\)/.test(text))continue;
+  const name=declaration.childForFieldName('name')?.text;if(name)conventions.add(name);
+ }
+ const found:Array<{prefix:string;dynamic:boolean}>=[];
+ for(const file of analysis.files.values())for(const call of findAll(file.root,n=>n.type==='invocation_expression')){
+  const callee=call.namedChildren.find(n=>n.type==='member_access_expression');if(!callee?.text.endsWith('.Conventions.Add'))continue;
+  const creation=findFirst(call,n=>n.type==='object_creation_expression');
+  const name=creation?.childForFieldName('type')?.text??creation?.namedChildren.find(n=>n.type==='identifier')?.text;
+  if(!creation||!name||!conventions.has(name))continue;
+  const args=creation.namedChildren.find(n=>n.type==='argument_list');const argument=args?.namedChildren[0];
+  const value=argument?.namedChildren[0];if(!value)continue;
+  if(value.type==='string_literal')found.push({prefix:value.text.slice(1,-1),dynamic:false});
+  else if(value.type==='binary_expression'&&value.children.some(c=>c.text==='??')){
+   const right=value.namedChildren.at(-1);if(right?.type==='string_literal')found.push({prefix:right.text.slice(1,-1),dynamic:true});
+  }
+ }
+ return found.length===1?found[0]:undefined;
+}
 
 // Two actions may synthesize the same operationId (e.g. two "Get" actions on
 // the same controller). Keep the first occurrence and suffix the rest.
@@ -326,7 +363,7 @@ function extractControllers(
       );
 
       const gaps: GapCode[] = [];
-      const responses = collectControllerResponses(method, verb, returnType, model, gaps);
+      const responses = collectControllerResponses(method, verb, returnType, csSerializationIndex(model), gaps);
       const isSse = responses.some((r) =>
         r.content?.some((media) => media.mediaType === "text/event-stream"),
       );
@@ -367,6 +404,28 @@ function collectControllerResponses(
 
   if (explicit.length) return mergeResponses(explicit);
 
+  // MVC's NoContent() remains 204 when wrapped in Task/ValueTask<IActionResult>.
+  // Only inspect returns belonging to this method, never nested lambdas/helpers.
+  const controller = enclosingNode(method, 'class_declaration');
+  const ownedReturns = findAll(method, n => n.type === 'return_statement').filter(n => {
+    let parent = n.parent;
+    while (parent && parent.id !== method.id) {
+      if (['lambda_expression', 'anonymous_method_expression', 'local_function_statement'].includes(parent.type)) return false;
+      parent = parent.parent;
+    }
+    return parent?.id === method.id;
+  });
+  const returnedExpressions = ownedReturns.map(n => n.namedChildren[0]);
+  const expressionBody = method.namedChildren.find(n => n.type === 'arrow_expression_clause');
+  if (expressionBody) returnedExpressions.push(expressionBody.namedChildren[0]);
+  const mvcBase = controller?.namedChildren.find(n => n.type === 'base_list')?.namedChildren.some(n => /^(?:Microsoft\.AspNetCore\.Mvc\.)?Controller(?:Base)?$/.test(n.text));
+  const overridden = controller && findAll(controller, n => n.type === 'method_declaration').some(n => n.childForFieldName('name')?.text === 'NoContent');
+  if (mvcBase && !overridden && returnedExpressions.length && returnedExpressions.every(n =>
+    n?.type === 'invocation_expression' && ['NoContent', 'base.NoContent', 'this.NoContent'].includes(n.namedChildren[0]?.text ?? '') &&
+    n.namedChildren.find(c => c.type === 'argument_list')?.namedChildren.length === 0)) {
+    return [{statusCode:'204',description:'',confidence:'high'}];
+  }
+
   const producesSse = listAttributes(method).some(
     (a) => a.name === "Produces" && /text\/event-stream/i.test(a.node.text),
   );
@@ -389,6 +448,23 @@ function collectControllerResponses(
     ];
   }
 
+  // A source-proven mediator request carries its declared response via IRequest<T>.
+  const mediatorCalls=findAll(method,n=>n.type==='invocation_expression'&&/\bmediator\.Send$/.test(n.namedChildren.find(c=>c.type==='member_access_expression')?.text??''));
+  const owner=enclosingNode(method,'class_declaration');
+  if(mediatorCalls.length===1&&/\bIMediator\s+mediator\b/.test(owner?.text??'')){
+    const call=mediatorCalls[0]!;const arg=call.namedChildren.find(n=>n.type==='argument_list')?.namedChildren[0]?.namedChildren[0];
+    let requestType:TsNode|undefined;
+    if(arg?.type==='identifier')requestType=childrenOfType(method,'parameter_list')[0]?.namedChildren.find(p=>p.type==='parameter'&&p.namedChildren.at(-1)?.text===arg.text)?.childForFieldName('type')??undefined;
+    else if(arg?.type==='object_creation_expression')requestType=arg.childForFieldName('type')??undefined;
+    const requestName=requestType?scopedName(requestType,model):undefined;const def=requestName?model.byName.get(requestName):undefined;
+    const requestInterface=def?.baseList?.namedChildren.find(n=>n.type==='generic_name'&&n.namedChildren[0]?.text==='IRequest');
+    const reply=requestInterface?.namedChildren.find(n=>n.type==='type_argument_list')?.namedChildren[0];
+    if(reply){
+      const observed=csTypeToSchema(reply,model);
+      const statuses=findAll(method,n=>n.type==='member_access_expression').map(n=>/^StatusCodes\.Status(\d{3})\w+$/.exec(n.text)?.[1]).filter((x):x is string=>!!x);
+      if(new Set(statuses).size<=1&&Object.keys(observed).length)return [{statusCode:statuses[0]??'200',description:'',confidence:'medium',content:[{mediaType:'application/json',schema:observed}]}];
+    }
+  }
   const schema = returnType ? csTypeToSchema(returnType, model) : {};
   if (producesSse && schema) {
     return [
@@ -530,6 +606,10 @@ function mergeResponses(responses: DiscoveredResponse[]): DiscoveredResponse[] {
       const existingHasSchema = existing.content.some((m) => m.schema || m.itemSchema);
       const incomingHasSchema = response.content.some((m) => m.schema || m.itemSchema);
       if (incomingHasSchema && !existingHasSchema) existing.content = response.content;
+      else if (incomingHasSchema && existingHasSchema) {
+        byStatus.set(response.statusCode, mergeResponseVariants(existing, response));
+        continue;
+      }
     }
     existing.confidence =
       existing.confidence === "high" || response.confidence === "high" ? "high" : "medium";
@@ -645,7 +725,7 @@ function extractMinimalApis(
     );
 
     const gaps: GapCode[] = [];
-    const responses = inferMinimalResponses(handlerSource, model, gaps);
+    const responses = inferMinimalResponses(handlerSource, csSerializationIndex(model), gaps);
     const withName = findChainedString(invocation, "WithName");
     const isSse = responses.some((r) =>
       r.content?.some((media) => media.mediaType === "text/event-stream"),
@@ -870,7 +950,7 @@ function inferMinimalResponses(
   return merged;
 }
 
-function inferExpressionSchema(
+export function inferExpressionSchema(
   node: TsNode,
   model: CsModelIndex,
   lambda: TsNode,
@@ -1010,32 +1090,52 @@ function collectParameters(
     const name = nameNode?.text;
     if (!typeNode || !name) continue;
 
-    // File uploads bind as multipart/form-data request bodies.
-    if (/^(?:IFormFile|IFormFileCollection|IFormCollection)$/.test(typeNode.text.replace(/\?.*$/, ""))) {
-      const collection = typeNode.text.includes("Collection") || typeNode.text.includes("IFormCollection");
+    // This binds arbitrary form fields, not an injected service or a file list.
+    if (typeNode.text.replace(/\?.*$/, "") === "IFormCollection") {
+      const previous = requestBody?.content.find(content => content.mediaType === "multipart/form-data")?.schema;
       requestBody = {
-        required: !param.namedChildren.some((c) => c.type === "equals_value_clause"),
-        content: [
-          {
-            mediaType: "multipart/form-data",
-            schema: collection
-              ? {
-                  type: "object",
-                  properties: { files: { type: "array", items: { type: "string", format: "binary" } } },
-                }
-              : {
-                  type: "object",
-                  properties: { [name]: { type: "string", format: "binary" } },
-                  required: [name],
-                },
+        required: Boolean(requestBody?.required),
+        content: [{ mediaType: "multipart/form-data", schema: {
+          ...previous, type: "object", additionalProperties: {},
+        }}],
+        confidence: "medium",
+      };
+      continue;
+    }
+
+    // File parameters share one multipart object; never overwrite earlier fields.
+    if (/^(?:IFormFile|IFormFileCollection)$/.test(typeNode.text.replace(/\?.*$/, ""))) {
+      const collection = typeNode.text.replace(/\?.*$/, "") === "IFormFileCollection";
+      const fromForm = findAttribute(param, new Set(["FromForm"]));
+      const fieldName = (fromForm && attributeStringArg(fromForm)) || name;
+      const required = !collection && typeNode.type !== "nullable_type" &&
+        !param.namedChildren.some((c) => c.type === "equals_value_clause");
+      const previous = requestBody?.content.find(content => content.mediaType === "multipart/form-data")?.schema;
+      const properties = previous?.properties as Record<string, JsonSchema> | undefined;
+      const requiredFields = new Set(Array.isArray(previous?.required) ? previous.required as string[] : []);
+      if (required) requiredFields.add(fieldName);
+      requestBody = {
+        required: Boolean(requestBody?.required || required),
+        content: [{
+          mediaType: "multipart/form-data",
+          schema: {
+            ...previous,
+            type: "object",
+            properties: {
+              ...properties,
+              [fieldName]: collection
+                ? { type: "array", items: { type: "string", format: "binary" } }
+                : { type: "string", format: "binary" },
+            },
+            ...(requiredFields.size ? { required: [...requiredFields] } : {}),
           },
-        ],
+        }],
         confidence: "high",
       };
       continue;
     }
 
-    if (isInjectedService(typeNode)) continue;
+    if (isInjectedService(typeNode) || findAttribute(param, new Set(['FromServices', 'FromKeyedServices']))) continue;
 
     const fromRoute = findAttribute(param, new Set(["FromRoute"]));
     const fromQuery = findAttribute(param, new Set(["FromQuery"]));
@@ -1100,8 +1200,13 @@ function collectParameters(
       continue;
     }
 
-    // [ApiController] inference: complex types bind from body (one only),
-    // simple types from route/query by name.
+    // MVC binds simple parameters from route/query even without [ApiController].
+    // Only implicit complex-body binding depends on that attribute.
+    if (!isComplexType(typeNode, model)) {
+      if (pathParams.has(name)) addParam('path', name, schema, 'medium', true);
+      else addParam('query', name, schema, 'medium', !optional);
+      continue;
+    }
     if (apiController) {
       const isComplex = isComplexType(typeNode, model);
       if (isComplex && !requestBody) {

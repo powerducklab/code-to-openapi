@@ -1,0 +1,38 @@
+{
+  "framework": "Echo 4.1.16",
+  "passed": 4,
+  "probes": [
+    {
+      "body": {
+        "count": 0,
+        "name": ""
+      },
+      "input": "{}",
+      "status": 200
+    },
+    {
+      "body": {
+        "count": 0,
+        "name": "x"
+      },
+      "input": "{\"name\":\"x\"}",
+      "status": 200
+    },
+    {
+      "body": {
+        "count": 0,
+        "name": ""
+      },
+      "input": "{\"name\":null}",
+      "status": 200
+    },
+    {
+      "body": {
+        "count": 0,
+        "name": "ok"
+      },
+      "input": "{\"name\":\"ok\"}",
+      "status": 200
+    }
+  ]
+}

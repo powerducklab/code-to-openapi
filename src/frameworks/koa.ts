@@ -23,6 +23,10 @@ import type {
   ScanContext,
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { resolveStaticValue } from "../lang/typescript/staticValue.js";
+import { koaSchemaRegistry, koaYupBody } from "../lang/typescript/koaYup.js";
+import { localReturnSchema } from "../lang/typescript/localFlow.js";
+import type {JsonSchema} from "../core/types.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { resolveHandler } from "./express-handler.js";
 import {
@@ -37,13 +41,14 @@ import {
   tagForPath,
 } from "../lang/typescript/httpRoute.js";
 
-const VERBS = new Set(["get", "post", "put", "patch", "delete", "options"]);
+const VERBS = new Set(["get", "post", "put", "patch", "delete", "del", "options", "head"]);
 
 interface RouterModel {
   id: string;
   file: string;
   varName: string;
   prefix: string;
+  initializer: any;
 }
 
 interface RouteReg {
@@ -107,16 +112,60 @@ export const koaPack: FrameworkPack<TsAnalysis> = {
       routes.push(...model.routes);
     }
 
+    const byInitializer = new Map([...routers.values()].map(router => [router.initializer, router]));
+    const routerOf = (node: any): RouterModel | undefined => {
+      const value = resolveStaticValue(analysis, node);
+      if (!value) return;
+      if (analysis.ts.isCallExpression(value) && analysis.ts.isPropertyAccessExpression(value.expression) && ["routes", "allowedMethods"].includes(value.expression.name.text)) {
+        return byInitializer.get(resolveStaticValue(analysis, value.expression.expression));
+      }
+      return byInitializer.get(value);
+    };
+    const edges: Array<{parent:string; child:string; prefix:string}> = [];
+    for (const model of models.values()) {
+      const visit = (node: any) => {
+        const {ts}=analysis;
+        if(ts.isCallExpression(node)&&ts.isPropertyAccessExpression(node.expression)&&node.expression.name.text==='use'){
+          const parent=routerOf(node.expression.expression);
+          if(parent){
+            const prefix=ts.isStringLiteralLike(node.arguments[0])?node.arguments[0].text:'';
+            for(const arg of node.arguments){const child=routerOf(arg);if(child)edges.push({parent:parent.id,child:child.id,prefix});}
+          }
+        }
+        ts.forEachChild(node,visit);
+      };model.source.forEachChild(visit);
+    }
+    const incoming=new Set(edges.filter(e=>e.child!==e.parent).map(e=>e.child));
+    const outgoing=new Map<string,typeof edges>();
+    for(const edge of edges)outgoing.set(edge.parent,[...(outgoing.get(edge.parent)??[]),edge]);
+    const prefixes=new Map<string,string[]>(), visited=new Set<string>();
+    const unresolved:ExtractionResult['unresolved']=[];
+    const walk=(root:string)=>{
+      const stack=[{id:root,prefix:routers.get(root)?.prefix??'',ancestors:new Set<string>()}];
+      while(stack.length){
+        const {id,prefix,ancestors}=stack.pop()!;
+        if(ancestors.has(id)){unresolved.push({reason:'path-dynamic',message:'Cyclic Koa router mount requires review',origin:{file:routers.get(id)?.file??''}});continue;}
+        const key=id+'\0'+prefix;if(visited.has(key))continue;
+        if(visited.size>=10000){unresolved.push({reason:'path-dynamic',message:'Koa mount expansion exceeded 10000 paths',origin:{file:routers.get(id)?.file??''}});return;}
+        visited.add(key);prefixes.set(id,[...(prefixes.get(id)??[]),prefix]);
+        const next=new Set(ancestors).add(id);
+        for(const edge of outgoing.get(id)??[])stack.push({id:edge.child,prefix:joinPath(prefix,edge.prefix,routers.get(edge.child)?.prefix??''),ancestors:next});
+      }
+    };
+    for(const id of routers.keys())if(!incoming.has(id))walk(id);
+    for(const id of routers.keys())if(!prefixes.has(id))walk(id);
+
+    const yupRegistry = koaSchemaRegistry(analysis);
     const candidates: RouteCandidate[] = [];
     const seenOp = new Map<string, RouteCandidate>();
 
     for (const route of routes) {
-      const router = routers.get(route.routerId);
-      const prefix = router?.prefix ?? "";
+     for (const prefix of prefixes.get(route.routerId) ?? [""]) {
       const normalized = normalizeColonPath(route.rawPath);
       const fullPath = joinPath(prefix, normalized.path);
       const facts = analyzeKoaHandler(analysis, route.file, route.handlerNode, {
         pathParams: new Set(normalized.params),
+        yupRegistry,
       });
 
       const confidence = !facts.gaps.length
@@ -142,11 +191,12 @@ export const koaPack: FrameworkPack<TsAnalysis> = {
       };
       const key = `${candidate.method} ${candidate.fullPath}`;
       if (!seenOp.has(key)) seenOp.set(key, candidate);
+     }
     }
 
     return {
       routes: [...seenOp.values()],
-      unresolved: [],
+      unresolved,
       components: collectComponents(analysis),
       securitySchemes: [],
       servers: [],
@@ -229,6 +279,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
         file: rel,
         varName: node.name.text,
         prefix,
+        initializer: node.initializer,
       });
     }
 
@@ -279,7 +330,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
   model.routes.push({
     routerId: router.id,
     file: model.rel,
-    method,
+    method: method === "del" ? "delete" : method,
     rawPath: pathArg.text,
     handlerNode,
     origin: locationAt(ts, model.source, node, model.rel),
@@ -288,6 +339,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
 
 interface HandlerOpts {
   pathParams: Set<string>;
+  yupRegistry?: Map<string, any>;
 }
 
 interface HandlerResult {
@@ -323,10 +375,43 @@ function analyzeKoaHandler(
   }
 
   const { node: handler, file: handlerFile } = resolved;
+  const yup = koaYupBody(analysis, handler, opts.yupRegistry ?? new Map());
+  bodyReferenced ||= yup.bodyReferenced;
+  if(yup.schema)bodySchema={schema:yup.schema,confidence:'medium'};
+  if(yup.warnings.size)gaps.add('body-schema-unknown');
   const ctxName = handler.parameters?.[0]?.name?.getText?.(handlerFile) ?? "ctx";
   let pendingStatus = "200";
+  const values=new Map<any,JsonSchema>();
+  const inferValue=(node:any):JsonSchema|undefined=>{
+    if(ts.isAwaitExpression(node))return inferValue(node.expression);
+    return yup.validatedValues.get(node)??localReturnSchema(analysis,node,value=>schemaFromNode(analysis,value).schema,true,undefined,values);
+  };
 
   const visit = (node: any) => {
+    if(node!==handler.body&&ts.isFunctionLike(node))return;
+    if(ts.isBinaryExpression(node)&&node.operatorToken.kind===ts.SyntaxKind.EqualsToken&&ts.isIdentifier(node.left)){
+      const symbol=analysis.checker.getSymbolAtLocation(node.left);
+      if(node.parent?.parent===handler.body){const value=inferValue(node.right);if(value)values.set(symbol,value);else values.delete(symbol);}
+      else values.delete(symbol);
+    }
+    // Track writes to validated values; never retain a stale schema after mutation.
+    const writeTarget=ts.isBinaryExpression(node)&&node.operatorToken.kind>=ts.SyntaxKind.FirstAssignment&&node.operatorToken.kind<=ts.SyntaxKind.LastAssignment?node.left:ts.isDeleteExpression(node)?node.expression:undefined;
+    if(writeTarget&&(ts.isPropertyAccessExpression(writeTarget)||ts.isElementAccessExpression(writeTarget))){
+      let root=writeTarget.expression;while(ts.isPropertyAccessExpression(root)||ts.isElementAccessExpression(root))root=root.expression;
+      const symbol=ts.isIdentifier(root)?analysis.checker.getSymbolAtLocation(root):undefined;
+      const previous=values.get(symbol);
+      if(previous){
+        const direct=writeTarget.expression===root&&node.parent?.parent===handler.body;
+        const key=ts.isPropertyAccessExpression(writeTarget)?writeTarget.name.text:writeTarget.argumentExpression&&ts.isStringLiteralLike(writeTarget.argumentExpression)?writeTarget.argumentExpression.text:undefined;
+        if(direct&&key&&previous.type==='object'&&previous.properties){
+          const properties={...(previous.properties as Record<string,JsonSchema>)};
+          const required=new Set(previous.required as string[]??[]);
+          if(ts.isDeleteExpression(node)){delete properties[key];required.delete(key);}
+          else {properties[key]=node.operatorToken.kind===ts.SyntaxKind.EqualsToken?inferValue(node.right)??{}:{};required.add(key);}
+          values.set(symbol,{...previous,properties,required:[...required]});
+        }else {values.set(symbol,{description:'Conditional or nested mutation requires response review'});gaps.add('response-unknown');}
+      }
+    }
     // const body: UserInput = ctx.request.body
     if (
       ts.isVariableDeclaration(node) &&
@@ -358,8 +443,9 @@ function analyzeKoaHandler(
           pendingStatus = node.right.text;
         } else if (chain.names[0] === "body") {
           hasResponseSite = true;
-          const { schema, typed } = schemaFromNode(analysis, node.right);
-          responses.record(pendingStatus, "application/json", schema, typed ? "high" : "medium");
+          const { schema: declared, typed } = schemaFromNode(analysis, node.right);
+          const schema=values.size?inferValue(node.right)??declared:declared;
+          responses.record(pendingStatus, "application/json", schema, values.size ? "medium" : typed ? "high" : "medium");
           pendingStatus = "200";
         }
       }

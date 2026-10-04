@@ -1,0 +1,1538 @@
+[
+  {
+    "framework": "express",
+    "repository": "https://github.com/gothinkster/node-express-realworld-example-app",
+    "commit": "30b68e1e881462b2f4164ea09ab4c4f5699c7b0b",
+    "localRoot": "/tmp/realproj2-express-rw",
+    "operations": 20,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "express"
+      ],
+      "filesScanned": 28,
+      "routesConfirmed": 6,
+      "routesPartial": 14,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /api/articles",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles/feed",
+          "gaps": [
+            "query-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/articles",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles/{slug}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /api/articles/{slug}",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles/{slug}/comments",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/articles/{slug}/comments",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/users",
+          "gaps": [
+            "body-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/users/login",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/user",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /api/user",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.71
+  },
+  {
+    "framework": "nest",
+    "repository": "https://github.com/lujakob/nestjs-realworld-example-app.git",
+    "commit": "c1c2cc4e448b279ff083272df1ac50d20c3304fa",
+    "localRoot": "/tmp/realproj-nest-realworld",
+    "operations": 21,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "express",
+        "nest"
+      ],
+      "filesScanned": 35,
+      "routesConfirmed": 17,
+      "routesPartial": 4,
+      "unresolved": 1,
+      "gaps": [
+        {
+          "route": "get /api/articles",
+          "gaps": [
+            "query-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles/feed",
+          "gaps": [
+            "query-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/articles/{slug}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/users/{slug}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.22
+  },
+  {
+    "framework": "hono",
+    "repository": "https://github.com/bedstack/hono-prisma-realworld-example.git",
+    "commit": "4dc311ebdaeaa1cbffbb5608fae7d33f5baa9208",
+    "localRoot": "/tmp/realproj2-hono-rw",
+    "operations": 7,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "hono"
+      ],
+      "filesScanned": 34,
+      "routesConfirmed": 7,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.28
+  },
+  {
+    "framework": "koa",
+    "repository": "https://github.com/gothinkster/koa-knex-realworld-example.git",
+    "commit": "602e234139c453825eb3939cf24bdf00fc164e0e",
+    "localRoot": "/tmp/realproj2-koa-rw",
+    "operations": 15,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "koa"
+      ],
+      "filesScanned": 37,
+      "routesConfirmed": 0,
+      "routesPartial": 15,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /articles",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /articles",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/feed",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/{slug}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "put /articles/{slug}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /articles/{slug}/favorite",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/{slug}/comments",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /articles/{slug}/comments",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /profiles/{username}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /profiles/{username}/follow",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /tags",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /users/login",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /users",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /user",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "put /user",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.69
+  },
+  {
+    "framework": "elysia",
+    "repository": "https://github.com/bedstack/elysia-drizzle-realworld-example.git",
+    "commit": "f642e24f8703cf61c66890dda4979fc55f442a4e",
+    "localRoot": "/tmp/realproj2-elysia-rw",
+    "operations": 20,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "elysia"
+      ],
+      "filesScanned": 114,
+      "routesConfirmed": 19,
+      "routesPartial": 1,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.54
+  },
+  {
+    "framework": "fastapi",
+    "repository": "https://github.com/nsidnev/fastapi-realworld-example-app",
+    "commit": "029eb7781c60d5f563ee8990a0cbfb79b244538c",
+    "localRoot": "/tmp/realproj-fastapi-realworld",
+    "operations": 19,
+    "report": {
+      "languages": [
+        "python"
+      ],
+      "frameworks": [
+        "fastapi"
+      ],
+      "filesScanned": 73,
+      "routesConfirmed": 12,
+      "routesPartial": 7,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "post /articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /articles",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /users",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /profiles/{username}/follow",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /profiles/{username}/follow",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /user",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.74
+  },
+  {
+    "framework": "flask",
+    "repository": "https://github.com/miguelgrinberg/microblog-api",
+    "commit": "e250d7115b47010ff0e7051d5868485fff4e32fb",
+    "localRoot": "/tmp/realproj-microblog",
+    "operations": 28,
+    "report": {
+      "languages": [
+        "python"
+      ],
+      "frameworks": [
+        "flask"
+      ],
+      "filesScanned": 21,
+      "routesConfirmed": 28,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.87
+  },
+  {
+    "framework": "djangorestframework",
+    "repository": "https://github.com/gothinkster/django-realworld-example-app.git",
+    "commit": "29c9d42831fa0cfc5a4aa7561f674396eacf20a2",
+    "localRoot": "/tmp/realproj2-drf-realworld",
+    "operations": 19,
+    "report": {
+      "languages": [
+        "python"
+      ],
+      "frameworks": [
+        "drf"
+      ],
+      "filesScanned": 44,
+      "routesConfirmed": 19,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.71
+  },
+  {
+    "framework": "gin",
+    "repository": "https://github.com/eddycjy/go-gin-example",
+    "commit": "4f5174ca325b37f23edadad7c88d49586816a69c",
+    "localRoot": "/tmp/realproj-gin",
+    "operations": 15,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "gin"
+      ],
+      "filesScanned": 36,
+      "routesConfirmed": 14,
+      "routesPartial": 1,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /swagger/{any}",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.85
+  },
+  {
+    "framework": "nethttp",
+    "repository": "https://github.com/leeprovoost/go-rest-api-template.git",
+    "commit": "4f2d17f700be3b355ff88986ca37c70ad2145cef",
+    "localRoot": "/tmp/realproj2-nethttp-template",
+    "operations": 12,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "nethttp"
+      ],
+      "filesScanned": 11,
+      "routesConfirmed": 4,
+      "routesPartial": 8,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /users",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /users/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /users",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /users/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /users/{uid}/passports",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /passports/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /users/{uid}/passports",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /passports/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.74
+  },
+  {
+    "framework": "gorillamux",
+    "repository": "https://github.com/kelvins/GoApiTutorial.git",
+    "commit": "2b3959605b2a87d732ecb00da7779b86362c614f",
+    "localRoot": "/tmp/realproj2-gorillamux-tutorial",
+    "operations": 5,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "gorillamux"
+      ],
+      "filesScanned": 3,
+      "routesConfirmed": 0,
+      "routesPartial": 5,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /users",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "post /user",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /user/{id}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "put /user/{id}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "delete /user/{id}",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.7
+  },
+  {
+    "framework": "echo",
+    "repository": "https://github.com/mprambadi/golang-echo-realworld-example-app.git",
+    "commit": "a854f29388a4fd400656a8aa15ae7017a285e5ee",
+    "localRoot": "/tmp/realproj2-echo-realworld",
+    "operations": 26,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "echo"
+      ],
+      "filesScanned": 25,
+      "routesConfirmed": 18,
+      "routesPartial": 8,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /api/todos",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/todos/{id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles/feed",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/articles/{slug}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/articles/{slug}/comments/{id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/articles",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/tags",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /swagger/{wildcard}",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.72
+  },
+  {
+    "framework": "fiber",
+    "repository": "https://github.com/gofiber/recipes.git",
+    "commit": "47a33121aee2607fcfa49696db0a0d358d844a72",
+    "localRoot": "/tmp/realproj2-fiber-recipes/swagger",
+    "operations": 4,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "fiber"
+      ],
+      "filesScanned": 6,
+      "routesConfirmed": 1,
+      "routesPartial": 3,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /api/v1/books",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/v1/books/{id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/v1/books",
+          "gaps": [
+            "body-schema-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.8
+  },
+  {
+    "framework": "spring",
+    "repository": "https://github.com/spring-petclinic/spring-petclinic-rest.git",
+    "commit": "4cd8e1b0cd42578e882247d8801f6be5d402f118",
+    "localRoot": "/tmp/realproj-petclinic",
+    "additionalSourceRoots": [
+      "target/generated-sources/openapi/src/main/java"
+    ],
+    "operations": 37,
+    "report": {
+      "languages": [
+        "java"
+      ],
+      "frameworks": [
+        "spring"
+      ],
+      "filesScanned": 115,
+      "routesConfirmed": 36,
+      "routesPartial": 1,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "put /api/owners/{ownerId}/pets/{petId}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.94
+  },
+  {
+    "framework": "jaxrs",
+    "repository": "https://github.com/francescodedomenico/quarkus-api-crud-postgres.git",
+    "commit": "87ba422a85a7f732f567f955f3406cf992b44f83",
+    "localRoot": "/tmp/realproj2-jaxrs-quarkus-crud",
+    "operations": 5,
+    "report": {
+      "languages": [
+        "java"
+      ],
+      "frameworks": [
+        "jaxrs"
+      ],
+      "filesScanned": 7,
+      "routesConfirmed": 5,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.65
+  },
+  {
+    "framework": "aspnet",
+    "repository": "https://github.com/gothinkster/aspnetcore-realworld-example-app.git",
+    "commit": "a397d1197b22edeffa4d2563fa5f4f7f11d0b254",
+    "localRoot": "/tmp/realproj2-aspnet-rw",
+    "operations": 19,
+    "report": {
+      "languages": [
+        "csharp"
+      ],
+      "frameworks": [
+        "aspnet"
+      ],
+      "filesScanned": 65,
+      "routesConfirmed": 14,
+      "routesPartial": 5,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "post /articles",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /articles/{slug}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /articles/{slug}/comments",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /articles/{slug}/comments/{id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /users",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.87
+  },
+  {
+    "framework": "fastendpoints",
+    "repository": "https://github.com/FastEndpoints/FastEndpoints.git",
+    "commit": "0a1e693048bc2e773c882c1d3be4ac849267eec2",
+    "localRoot": "/tmp/realproj2-fastendpoints/Benchmark/FastEndpointsBench",
+    "operations": 10,
+    "report": {
+      "languages": [
+        "csharp"
+      ],
+      "frameworks": [
+        "fastendpoints"
+      ],
+      "filesScanned": 10,
+      "routesConfirmed": 10,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.7
+  },
+  {
+    "framework": "axum",
+    "repository": "https://github.com/launchbadge/realworld-axum-sqlx.git",
+    "commit": "f1b25654773228297e35c292f357d33b7121a101",
+    "localRoot": "/tmp/realproj2-axum-app-realworld",
+    "operations": 19,
+    "report": {
+      "languages": [
+        "rust"
+      ],
+      "frameworks": [
+        "axum"
+      ],
+      "filesScanned": 12,
+      "routesConfirmed": 17,
+      "routesPartial": 2,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "delete /api/articles/{slug}/comments/{comment_id}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/articles/{slug}",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.84
+  },
+  {
+    "framework": "actix",
+    "repository": "https://github.com/actix/examples.git",
+    "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6",
+    "localRoot": "/tmp/realproj2-actix-examples/json/json",
+    "operations": 4,
+    "report": {
+      "languages": [
+        "python",
+        "rust"
+      ],
+      "frameworks": [
+        "actix"
+      ],
+      "filesScanned": 2,
+      "routesConfirmed": 4,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.73
+  },
+  {
+    "framework": "rocket",
+    "repository": "https://github.com/rwf2/Rocket.git",
+    "commit": "3a54d079aef060a8f732bd04ea54b0581a604087",
+    "localRoot": "/tmp/realproj2-rocket/examples/serialization",
+    "operations": 6,
+    "report": {
+      "languages": [
+        "rust"
+      ],
+      "frameworks": [
+        "rocket"
+      ],
+      "filesScanned": 5,
+      "routesConfirmed": 4,
+      "routesPartial": 2,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "post /json/",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "put /json/{id}",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.66
+  },
+  {
+    "framework": "laravel",
+    "repository": "https://github.com/koel/koel.git",
+    "commit": "46e816c20f8edf90d72f6820bd34339a75d2633e",
+    "localRoot": "/tmp/realproj-koel",
+    "operations": 167,
+    "report": {
+      "languages": [
+        "typescript",
+        "php"
+      ],
+      "frameworks": [
+        "laravel"
+      ],
+      "filesScanned": 1306,
+      "routesConfirmed": 98,
+      "routesPartial": 69,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "post /api/me",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/one-time-token",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/broadcasting/auth",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/data",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /api/songs",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/me/equalizer-presets",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/me/two-factor",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/lastfm/authorization-url",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/youtube/search/song/{song}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/albums/{album}/information",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/artists/{artist}/information",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /api/songs/privatize",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/playlists/{playlist}/collaborators",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/podcasts/{podcast}/subscriptions",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/ai/prompt",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/os/s3/song",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/demo/credits",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /manifest.json",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /manifest-remote.json",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /download/songs",
+          "gaps": [
+            "response-unknown",
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 3.4
+  },
+  {
+    "framework": "symfony",
+    "repository": "https://github.com/symfony/demo.git",
+    "commit": "8d2e2ef75c3e18df173d8bf2379a14abb58c4c31",
+    "localRoot": "/tmp/realproj2-symfony-demo",
+    "operations": 16,
+    "report": {
+      "languages": [
+        "typescript",
+        "php"
+      ],
+      "frameworks": [
+        "symfony"
+      ],
+      "filesScanned": 48,
+      "routesConfirmed": 16,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.73
+  },
+  {
+    "framework": "slim",
+    "repository": "https://github.com/slimphp/Slim-Skeleton.git",
+    "commit": "0ef01549870b3234a3a9f602904a39c3ed73f44c",
+    "localRoot": "/tmp/realproj2-slim-skeleton",
+    "operations": 4,
+    "report": {
+      "languages": [
+        "php"
+      ],
+      "frameworks": [
+        "slim"
+      ],
+      "filesScanned": 24,
+      "routesConfirmed": 0,
+      "routesPartial": 4,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "options /{routes:.*}",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /users/",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /users/{id}",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.72
+  },
+  {
+    "framework": "fastify",
+    "repository": "https://github.com/avanelli/fastify-realworld-example-app.git",
+    "commit": "bdb8ce4e130916a76970d8df1bf1a3291d0f5227",
+    "localRoot": "/tmp/pd-fastify-realworld",
+    "operations": 20,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "fastify"
+      ],
+      "filesScanned": 29,
+      "routesConfirmed": 10,
+      "routesPartial": 10,
+      "unresolved": 6,
+      "gaps": [
+        {
+          "route": "get /articles",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/feed",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/{slug}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /articles",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /articles/{slug}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /articles/{slug}/favorite",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /articles/{slug}/comments",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /articles/{slug}/comments",
+          "gaps": [
+            "response-unknown"
+          ]
+        },
+        {
+          "route": "get /tags",
+          "gaps": [
+            "response-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.75
+  },
+  {
+    "framework": "chi",
+    "repository": "https://github.com/Woun1zoN/go-notes-api.git",
+    "commit": "60c127f3d16828dc1ec2650d5ebd9bf58a7f4504",
+    "localRoot": "/tmp/realproj2-chi-notes",
+    "operations": 5,
+    "report": {
+      "languages": [
+        "go"
+      ],
+      "frameworks": [
+        "chi"
+      ],
+      "filesScanned": 11,
+      "routesConfirmed": 1,
+      "routesPartial": 4,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /notes",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /notes/{ID}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /notes",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "patch /notes/{ID}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.64
+  },
+  {
+    "framework": "micronaut",
+    "repository": "https://github.com/naspredam/rest-micronaut-reactive-java-users.git",
+    "commit": "fef2c31e27c8e82355bceb0125b4af1366d43150",
+    "localRoot": "/tmp/realproj2-micronaut-users",
+    "operations": 4,
+    "report": {
+      "languages": [
+        "java"
+      ],
+      "frameworks": [
+        "micronaut"
+      ],
+      "filesScanned": 4,
+      "routesConfirmed": 4,
+      "routesPartial": 0,
+      "unresolved": 0,
+      "gaps": [],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 0.69
+  },
+  {
+    "framework": "starlette",
+    "repository": "https://github.com/gtfisher/starlette-example-crud.git",
+    "commit": "d948b7b7b076a92438f64e8f49f32dcc108bc10c",
+    "localRoot": "/tmp/pd-starlette-crud",
+    "operations": 9,
+    "report": {
+      "languages": [
+        "typescript",
+        "python"
+      ],
+      "frameworks": [
+        "starlette"
+      ],
+      "filesScanned": 4,
+      "routesConfirmed": 0,
+      "routesPartial": 9,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "get /",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /msg",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /dt",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/contact",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/contact/{item_id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "put /api/contact/{item_id}",
+          "gaps": [
+            "response-schema-unknown",
+            "body-schema-unknown"
+          ]
+        },
+        {
+          "route": "delete /api/contact/{item_id}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/contact",
+          "gaps": [
+            "response-schema-unknown",
+            "body-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /error",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.73
+  },
+  {
+    "framework": "nextjs",
+    "repository": "https://github.com/shadcn-ui/taxonomy.git",
+    "commit": "298a8857c7128a0d121e7f699dfd729f23b3966d",
+    "localRoot": "/tmp/realproj2-nextjs-tx",
+    "operations": 8,
+    "report": {
+      "languages": [
+        "typescript"
+      ],
+      "frameworks": [
+        "nextjs"
+      ],
+      "filesScanned": 131,
+      "routesConfirmed": 1,
+      "routesPartial": 7,
+      "unresolved": 0,
+      "gaps": [
+        {
+          "route": "delete /api/posts/{postId}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "patch /api/posts/{postId}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/posts",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/posts",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "patch /api/users/{userId}",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "get /api/users/stripe",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        },
+        {
+          "route": "post /api/webhooks/stripe",
+          "gaps": [
+            "response-schema-unknown"
+          ]
+        }
+      ],
+      "diagnostics": []
+    },
+    "valid": true,
+    "ok": true,
+    "assessment": "Needs source-contract comparison; schema validity is not completeness",
+    "seconds": 1.7
+  }
+]

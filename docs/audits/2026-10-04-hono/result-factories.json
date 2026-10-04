@@ -1,0 +1,26 @@
+{
+  "assertions": 250,
+  "mismatches": 3,
+  "errors": [
+    {
+      "where": "post /users/login",
+      "error": "request body required mismatch",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users",
+      "error": "request body required mismatch",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /user",
+      "error": "request body required mismatch",
+      "expected": false,
+      "actual": true
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

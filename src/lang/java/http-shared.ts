@@ -1,13 +1,4 @@
-/**
- * Shared HTTP-route helpers for the JVM framework packs (JAX-RS, Micronaut).
- *
- * Spring's own equivalents live in src/frameworks/spring.ts, which is read-only
- * for this shard. The small pieces of 0.8.0 machinery that packs legitimately
- * share — bean field type discovery, service return-type following, generic
- * envelope rejection, path normalization and operation-id de-duplication — are
- * factored here so JAX-RS and Micronaut can reuse them without editing Spring.
- * Nothing here changes behaviour for the Spring pack itself.
- */
+/** Shared Java HTTP-route, type and control-flow helpers. */
 
 import type { JsonSchema } from "@powerduck/x-to-openapi";
 import type { RouteCandidate } from "../../core/types.js";
@@ -292,4 +283,20 @@ function schemaFromServiceCall(
   if (!returnType || returnType.type === "void_type") return undefined;
   const schema = javaTypeToSchema(returnType, model, 0, undefined, serviceDef.file);
   return isConcreteSchema(schema) ? schema : undefined;
+}
+
+/** Prove the narrow case of a terminal throw with no reachable-method return.
+ * Nested functions are separate control-flow scopes; conditional returns keep
+ * the outcome uncertain. Exception status still requires mapper resolution. */
+export function hasOnlyThrowingExit(method: TsNode): boolean {
+  const body = method.childForFieldName("body");
+  if (body?.namedChildren.at(-1)?.type !== "throw_statement") return false;
+  return !findAll(body, node => node.type === "return_statement").some(statement => {
+    let owner = statement.parent;
+    while (owner && owner.id !== body.id) {
+      if (["lambda_expression", "method_declaration", "constructor_declaration", "class_body"].includes(owner.type)) return false;
+      owner = owner.parent;
+    }
+    return owner?.id === body.id;
+  });
 }

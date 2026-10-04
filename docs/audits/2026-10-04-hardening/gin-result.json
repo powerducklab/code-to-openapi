@@ -1,0 +1,555 @@
+{
+  "assertions": 264,
+  "mismatches": 93,
+  "errors": [
+    {
+      "where": "get /api/v1/articles",
+      "error": "missing request media",
+      "media": "application/json"
+    },
+    {
+      "where": "get /api/v1/articles request application/json",
+      "field": "/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/articles response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/articles response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/articles response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles",
+      "error": "missing request media",
+      "media": "application/json"
+    },
+    {
+      "where": "post /api/v1/articles request application/json",
+      "field": "/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/articles response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/articles response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/articles response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/articles response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "put /api/v1/articles/{id}",
+      "error": "missing request media",
+      "media": "application/json"
+    },
+    {
+      "where": "put /api/v1/articles/{id} request application/json",
+      "field": "/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/v1/articles/{id} response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags query:state",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "get /api/v1/tags response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/tags response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /api/v1/tags response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/v1/tags response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags",
+      "error": "request body required mismatch",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags",
+      "error": "missing request media",
+      "media": "application/json"
+    },
+    {
+      "where": "post /api/v1/tags request application/json",
+      "field": "/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/tags response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/tags response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/v1/tags response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /api/v1/tags/export",
+      "error": "missing operation"
+    },
+    {
+      "where": "post /api/v1/tags/import",
+      "error": "missing operation"
+    },
+    {
+      "where": "put /api/v1/tags/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "put /api/v1/tags/{id}",
+      "error": "request body required mismatch",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "put /api/v1/tags/{id}",
+      "error": "missing request media",
+      "media": "application/json"
+    },
+    {
+      "where": "put /api/v1/tags/{id} request application/json",
+      "field": "/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 200 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/code/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/data/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/data/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/v1/tags/{id} response 500 application/json",
+      "field": "/properties/msg/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /auth",
+      "error": "missing operation"
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

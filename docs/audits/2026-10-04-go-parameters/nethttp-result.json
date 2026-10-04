@@ -1,0 +1,458 @@
+{
+  "assertions": 442,
+  "mismatches": 75,
+  "errors": [
+    {
+      "where": "get /healthcheck response 200 application/json",
+      "field": "/properties/appName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /healthcheck response 200 application/json",
+      "field": "/properties/version/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users query:offset",
+      "field": "/minimum",
+      "expected": 0,
+      "actual": null
+    },
+    {
+      "where": "get /users query:limit",
+      "field": "/minimum",
+      "expected": 1,
+      "actual": null
+    },
+    {
+      "where": "get /users query:limit",
+      "field": "/maximum",
+      "expected": 100,
+      "actual": null
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/users/items/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/users/items/properties/firstName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/users/items/properties/lastName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/users/items/properties/dateOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/users/items/properties/locationOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/count/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /users response 200 application/json",
+      "field": "/properties/total/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /users response 201 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 201 application/json",
+      "field": "/properties/firstName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 201 application/json",
+      "field": "/properties/lastName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 201 application/json",
+      "field": "/properties/dateOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 201 application/json",
+      "field": "/properties/locationOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 422 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users response 422 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 200 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 200 application/json",
+      "field": "/properties/firstName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 200 application/json",
+      "field": "/properties/lastName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 200 application/json",
+      "field": "/properties/dateOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 200 application/json",
+      "field": "/properties/locationOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 404 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{id} response 404 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} path:id",
+      "field": "/type",
+      "expected": "integer",
+      "actual": "string"
+    },
+    {
+      "where": "put /users/{id} response 200 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 200 application/json",
+      "field": "/properties/firstName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 200 application/json",
+      "field": "/properties/lastName/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 200 application/json",
+      "field": "/properties/dateOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 200 application/json",
+      "field": "/properties/locationOfBirth/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 422 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /users/{id} response 422 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/passports/items/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/passports/items/properties/dateOfIssue/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/passports/items/properties/dateOfExpiry/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/passports/items/properties/authority/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/passports/items/properties/userId/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 200 application/json",
+      "field": "/properties/count/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /users/{uid}/passports response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /users/{uid}/passports response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 201 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 201 application/json",
+      "field": "/properties/dateOfIssue/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 201 application/json",
+      "field": "/properties/dateOfExpiry/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 201 application/json",
+      "field": "/properties/authority/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 201 application/json",
+      "field": "/properties/userId/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 409 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 409 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 422 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /users/{uid}/passports response 422 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 200 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 200 application/json",
+      "field": "/properties/dateOfIssue/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 200 application/json",
+      "field": "/properties/dateOfExpiry/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 200 application/json",
+      "field": "/properties/authority/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 200 application/json",
+      "field": "/properties/userId/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 404 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "get /passports/{id} response 404 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 200 application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 200 application/json",
+      "field": "/properties/dateOfIssue/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 200 application/json",
+      "field": "/properties/dateOfExpiry/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 200 application/json",
+      "field": "/properties/authority/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 200 application/json",
+      "field": "/properties/userId/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 400 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 400 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 422 application/json",
+      "field": "/properties/status/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "put /passports/{id} response 422 application/json",
+      "field": "/properties/message/required",
+      "expected": false,
+      "actual": true
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

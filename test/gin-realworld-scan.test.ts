@@ -30,7 +30,7 @@ describe("gin real-world envelopes and binding", () => {
     expect(product.properties.id).toEqual({ type: "string" });
     expect(product.properties.created_at).toEqual({ type: "string" });
     expect(product.properties.Base).toBeUndefined();
-    expect(product.properties.tags).toEqual({ type: "array", items: { type: "string" } });
+    expect(product.properties.tags).toEqual({ type: ["array", "null"], items: { type: "string" } });
     expect(product.properties.category).toEqual({ $ref: "#/components/schemas/Category" });
   });
 
@@ -48,7 +48,7 @@ describe("gin real-world envelopes and binding", () => {
     expect(pageEnvelope.properties.data).toEqual({ $ref: "#/components/schemas/PageResult" });
     const page = doc.components.schemas.PageResult;
     expect(page.properties.items).toEqual({
-      type: "array",
+      type: ["array", "null"],
       items: { $ref: "#/components/schemas/Product" },
     });
   });
@@ -65,6 +65,6 @@ describe("gin real-world envelopes and binding", () => {
     expect(uri).toMatchObject({ name: "id", in: "path", required: true });
 
     const body = doc.paths["/api/products"].post.requestBody.content["application/json"].schema;
-    expect(body).toEqual({ $ref: "#/components/schemas/CreateProductBody" });
+    expect(body).toEqual({ $ref: "#/components/schemas/input_CreateProductBody" });
   });
 });

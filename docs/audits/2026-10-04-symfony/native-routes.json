@@ -1,0 +1,264 @@
+[
+    {
+        "name": "admin_index",
+        "path": "/{_locale}/admin/post/",
+        "methods": [
+            "GET"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\Admin\\BlogController::index",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "admin_post_index",
+        "path": "/{_locale}/admin/post/",
+        "methods": [
+            "GET"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\Admin\\BlogController::index",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "admin_post_new",
+        "path": "/{_locale}/admin/post/new",
+        "methods": [
+            "GET",
+            "POST"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\Admin\\BlogController::new",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "admin_post_show",
+        "path": "/{_locale}/admin/post/{id}",
+        "methods": [
+            "GET"
+        ],
+        "requirements": {
+            "id": "[1-9][0-9]*"
+        },
+        "defaults": {
+            "_route_mapping": {
+                "id": "post"
+            },
+            "_controller": "App\\Controller\\Admin\\BlogController::show",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "id"
+        ]
+    },
+    {
+        "name": "admin_post_edit",
+        "path": "/{_locale}/admin/post/{id}/edit",
+        "methods": [
+            "GET",
+            "POST"
+        ],
+        "requirements": {
+            "id": "[1-9][0-9]*"
+        },
+        "defaults": {
+            "_route_mapping": {
+                "id": "post"
+            },
+            "_controller": "App\\Controller\\Admin\\BlogController::edit",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "id"
+        ]
+    },
+    {
+        "name": "admin_post_delete",
+        "path": "/{_locale}/admin/post/{id}/delete",
+        "methods": [
+            "POST"
+        ],
+        "requirements": {
+            "id": "[1-9][0-9]*"
+        },
+        "defaults": {
+            "_route_mapping": {
+                "id": "post"
+            },
+            "_controller": "App\\Controller\\Admin\\BlogController::delete",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "id"
+        ]
+    },
+    {
+        "name": "blog_index",
+        "path": "/{_locale}/blog/",
+        "methods": [
+            "GET"
+        ],
+        "requirements": [],
+        "defaults": {
+            "page": "1",
+            "_format": "html",
+            "_controller": "App\\Controller\\BlogController::index",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "blog_rss",
+        "path": "/{_locale}/blog/rss.xml",
+        "methods": [
+            "GET"
+        ],
+        "requirements": [],
+        "defaults": {
+            "page": "1",
+            "_format": "xml",
+            "_controller": "App\\Controller\\BlogController::index",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "blog_index_paginated",
+        "path": "/{_locale}/blog/page/{page}",
+        "methods": [
+            "GET"
+        ],
+        "requirements": {
+            "page": "[1-9][0-9]*"
+        },
+        "defaults": {
+            "_format": "html",
+            "_controller": "App\\Controller\\BlogController::index",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "page"
+        ]
+    },
+    {
+        "name": "blog_post",
+        "path": "/{_locale}/blog/posts/{slug}",
+        "methods": [
+            "GET"
+        ],
+        "requirements": {
+            "slug": "[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*"
+        },
+        "defaults": {
+            "_route_mapping": {
+                "slug": "post"
+            },
+            "_controller": "App\\Controller\\BlogController::postShow",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "slug"
+        ]
+    },
+    {
+        "name": "comment_new",
+        "path": "/{_locale}/blog/comment/{postSlug}/new",
+        "methods": [
+            "POST"
+        ],
+        "requirements": {
+            "postSlug": "[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*"
+        },
+        "defaults": {
+            "_controller": "App\\Controller\\BlogController::commentNew",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale",
+            "postSlug"
+        ]
+    },
+    {
+        "name": "blog_search",
+        "path": "/{_locale}/blog/search",
+        "methods": [
+            "GET"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\BlogController::search",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "security_login",
+        "path": "/{_locale}/login",
+        "methods": [],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\SecurityController::login",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "user_edit",
+        "path": "/{_locale}/profile/edit",
+        "methods": [
+            "GET",
+            "POST"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\UserController::edit",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    },
+    {
+        "name": "user_change_password",
+        "path": "/{_locale}/profile/change-password",
+        "methods": [
+            "GET",
+            "POST"
+        ],
+        "requirements": [],
+        "defaults": {
+            "_controller": "App\\Controller\\UserController::changePassword",
+            "_locale": "en"
+        },
+        "variables": [
+            "_locale"
+        ]
+    }
+]

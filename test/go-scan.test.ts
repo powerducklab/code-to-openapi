@@ -43,7 +43,7 @@ describe("Gin (Go) golden project", () => {
     expect(byName(list.parameters, "q").schema).toEqual({ type: "string" });
     expect(list.responses["200"].content["application/json"].schema).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/Item" },
+      items: { anyOf: [{ $ref: "#/components/schemas/Item" }, {type:"null"}] },
     });
     expect(list.responses["400"]).toBeDefined();
 
@@ -51,7 +51,7 @@ describe("Gin (Go) golden project", () => {
     const create = doc.paths["/api/v1/items"].post;
     expect(create.requestBody.required).toBe(true);
     expect(create.requestBody.content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/Item",
+      $ref: "#/components/schemas/input_Item",
     });
     expect(create.responses["201"].content["application/json"].schema).toEqual({
       $ref: "#/components/schemas/Item",
@@ -97,7 +97,7 @@ describe("Gin (Go) golden project", () => {
       format: "date-time",
     });
     expect(schemas.Item.properties.tags).toEqual({
-      type: "array",
+      type: ["array", "null"],
       items: { type: "string" },
     });
     expect(schemas.Item.properties.category).toEqual({
@@ -156,7 +156,7 @@ describe("Chi (Go) golden project", () => {
     // Decoder body and 201 from scoped WriteHeader.
     const create = doc.paths["/api/v1/users"].post;
     expect(create.requestBody.content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/User",
+      $ref: "#/components/schemas/input_User",
     });
     expect(create.responses["201"].content["application/json"].schema).toEqual({
       $ref: "#/components/schemas/User",

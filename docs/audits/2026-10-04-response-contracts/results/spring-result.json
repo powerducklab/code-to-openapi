@@ -1,0 +1,570 @@
+{
+  "assertions": 5616,
+  "mismatches": 94,
+  "errors": [
+    {
+      "where": "get /api/oops",
+      "error": "missing operation"
+    },
+    {
+      "where": "get /api/owners response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/v2/owners response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/v2/owners response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/owners/{ownerId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/owners/{ownerId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/owners/{ownerId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId}/pets/{petId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId}/pets/{petId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/owners/{ownerId}/pets/{petId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId}/pets/{petId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId}/pets/{petId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/owners/{ownerId}/pets/{petId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets/{petId}/visits response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets/{petId}/visits response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/owners/{ownerId}/pets/{petId}/visits response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pettypes response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/pettypes response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/pettypes response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/pettypes response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pettypes/{petTypeId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pettypes/{petTypeId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pettypes/{petTypeId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pettypes/{petTypeId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pettypes/{petTypeId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pettypes/{petTypeId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pettypes/{petTypeId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pettypes/{petTypeId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pettypes/{petTypeId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pets response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/v2/pets response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/v2/pets response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pets/{petId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pets/{petId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/pets/{petId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pets/{petId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pets/{petId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/pets/{petId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pets/{petId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pets/{petId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/pets/{petId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/visits response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/visits response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/visits response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/visits response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/visits/{visitId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/visits/{visitId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/visits/{visitId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/visits/{visitId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/visits/{visitId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/visits/{visitId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/visits/{visitId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/visits/{visitId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/visits/{visitId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/specialties response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/specialties response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/specialties response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/specialties response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/specialties/{specialtyId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/specialties/{specialtyId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/specialties/{specialtyId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/specialties/{specialtyId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/specialties/{specialtyId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/specialties/{specialtyId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/specialties/{specialtyId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/specialties/{specialtyId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/specialties/{specialtyId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/vets response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/vets response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/vets response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/vets response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/vets/{vetId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/vets/{vetId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/vets/{vetId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/vets/{vetId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/vets/{vetId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/vets/{vetId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/vets/{vetId} response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/vets/{vetId} response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/vets/{vetId} response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 400 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 404 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/users response 500 application/json",
+      "field": "/properties/status/exclusiveMaximum",
+      "expected": true,
+      "actual": null
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

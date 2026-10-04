@@ -1,0 +1,36 @@
+{
+  "assertions": 7,
+  "mismatches": 7,
+  "errors": [
+    {
+      "where": "post /users/login",
+      "error": "missing operation"
+    },
+    {
+      "where": "post /users",
+      "error": "missing operation"
+    },
+    {
+      "where": "get /user",
+      "error": "missing operation"
+    },
+    {
+      "where": "put /user",
+      "error": "missing operation"
+    },
+    {
+      "where": "get /profiles/{username}",
+      "error": "missing operation"
+    },
+    {
+      "where": "post /profiles/{username}/follow",
+      "error": "missing operation"
+    },
+    {
+      "where": "delete /profiles/{username}/follow",
+      "error": "missing operation"
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

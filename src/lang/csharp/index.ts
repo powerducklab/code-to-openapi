@@ -18,6 +18,8 @@ export interface CsField {
   required: boolean;
   /** Explicit JSON name from [JsonPropertyName] / [JsonProperty]. */
   jsonName?: string;
+  ignoreJson?:boolean;
+  conditionalJson?:boolean;
 }
 
 export type CsTypeKind = "class" | "record" | "enum";
@@ -42,10 +44,11 @@ export interface CsFile {
 
 export interface CSharpAnalysis {
   files: Map<string, CsFile>;
+  declarations?: CsTypeDef[];
   types: Map<string, CsTypeDef>;
 }
 
-const TYPE_DECL_TYPES = new Set(["class_declaration", "record_declaration", "enum_declaration"]);
+const TYPE_DECL_TYPES = new Set(["class_declaration", "struct_declaration", "record_declaration", "enum_declaration"]);
 
 function hasStaticModifier(node: TsNode): boolean {
   return node.namedChildren.some(
@@ -77,6 +80,17 @@ function jsonPropertyName(node: TsNode): string | undefined {
   return undefined;
 }
 
+function jsonVisibility(node:TsNode):{ignoreJson?:boolean;conditionalJson?:boolean}{
+ for(const list of childrenOfType(node,'attribute_list'))for(const attr of childrenOfType(list,'attribute')){
+  const name=attr.namedChildren.find(n=>n.type==='identifier')?.text;
+  if(name!=='JsonIgnore'&&name!=='JsonIgnoreAttribute')continue;
+  if(/WhenWritingNull|WhenWritingDefault/.test(attr.text))return {conditionalJson:true};
+  if(/Never/.test(attr.text))return {};
+  if(!attr.text.includes('(')||/Always/.test(attr.text))return {ignoreJson:true};
+ }
+ return {};
+}
+
 function isOptionalMember(typeNode: TsNode, node: TsNode): boolean {
   if (typeNode.type === "nullable_type") return true;
   if (findFirst(node, (c) => c.type === "equals_value_clause")) return true;
@@ -96,7 +110,7 @@ function isOptionalMember(typeNode: TsNode, node: TsNode): boolean {
   return hasInitializer;
 }
 
-function extractTypeDef(node: TsNode): CsTypeDef | null {
+export function extractTypeDef(node: TsNode): CsTypeDef | null {
   const nameNode = node.namedChildren.find((c) => c.type === "identifier");
   if (!nameNode) return null;
   const name = nameNode.text;
@@ -133,12 +147,13 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
           typeNode,
           required: hasRequiredAttribute(param) || !isOptionalMember(typeNode, param),
           jsonName: jsonPropertyName(param),
+          ...jsonVisibility(param),
         });
       }
     }
   }
 
-  if (node.type === "class_declaration" || node.type === "record_declaration") {
+  if (node.type === "class_declaration" || node.type === "struct_declaration" || node.type === "record_declaration") {
     const body = childrenOfType(node, "declaration_list")[0];
     if (body) {
       for (const prop of childrenOfType(body, "property_declaration")) {
@@ -178,6 +193,7 @@ function extractTypeDef(node: TsNode): CsTypeDef | null {
           typeNode,
           required: hasRequiredAttribute(prop) || !isOptionalMember(typeNode, prop),
           jsonName: jsonPropertyName(prop),
+          ...jsonVisibility(prop),
         });
       }
     }
@@ -212,8 +228,25 @@ export const createCSharpAnalysis: LanguagePack<CSharpAnalysis>["analyze"] = asy
   const index: FileIndex = ctx.index;
   const files = new Map<string, CsFile>();
   const types = new Map<string, CsTypeDef>();
+  const declarations:CsTypeDef[]=[];
 
-  const parser = async (source: string) => parseSource("c_sharp", source);
+  const parser = async (source: string) => {
+    let normalized = source;
+    let root = await parseSource("c_sharp", normalized);
+    // Older WASM grammars can consume the next declaration as the body of
+    // a modern semicolon-only class. Repair only an AST-recognized class's
+    // error boundary, never matching comments/string contents with regex.
+    // Replacing an empty body preserves line numbers and class semantics.
+    for (let pass = 0; pass < 4; pass++) {
+      const offsets = findAll(root, n => n.type === "ERROR" && n.text.startsWith(";") && n.parent?.type === "class_declaration" &&
+        ["compilation_unit", "file_scoped_namespace_declaration", "declaration_list"].includes(n.parent.parent?.type ?? ""))
+        .map(n => n.startIndex).filter(offset => normalized[offset] === ";");
+      if (!offsets.length || offsets.length > 128) break;
+      for (const offset of [...new Set(offsets)].sort((a,b) => b-a)) normalized = normalized.slice(0, offset) + "{}" + normalized.slice(offset + 1);
+      root = await parseSource("c_sharp", normalized);
+    }
+    return root;
+  };
   for (const file of index.files) {
     if (file.language !== "csharp") continue;
     let root: TsNode;
@@ -226,12 +259,20 @@ export const createCSharpAnalysis: LanguagePack<CSharpAnalysis>["analyze"] = asy
 
     for (const decl of findAll(root, (n) => TYPE_DECL_TYPES.has(n.type))) {
       const def = extractTypeDef(decl);
-      if (def && !types.has(def.name)) types.set(def.name, def);
+      if(def){
+        const error=decl.namedChildren.find(n=>n.type==='ERROR'&&/^<[^;{}]+>$/.test(n.text));
+        if(def.kind==='record'&&def.baseList&&error){
+          const base=def.baseList.text+error.text;
+          const recovered=await parseSource('c_sharp',`class __Recovered ${base} {}`);
+          def.baseList=recovered.namedChildren[0]?.namedChildren.find(n=>n.type==='base_list')??def.baseList;
+        }
+        declarations.push(def);if(!types.has(def.name))types.set(def.name,def);
+      }
     }
   }
 
   if (!files.size) return null;
-  return { files, types };
+  return { files, types, declarations };
 };
 
 /** Reads a sibling source file for deeper inspection when needed. */

@@ -20,7 +20,7 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { PythonAnalysis, PyClass, PyFunction } from "../lang/python/index.js";
-import { isLooseLiteralSchema, literalToSchema } from "../lang/python/schema.js";
+import { annotationToSchema, buildModelIndex, genericParts, isLooseLiteralSchema, literalToSchema, type ModelIndex } from "../lang/python/schema.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   childrenOfType,
@@ -92,10 +92,12 @@ interface MarshmallowIndex {
   componentsByName: Map<string, JsonSchemaLocal>;
   /** Variable bound to a schema instance (`post_schema = PostSchema()`) -> class name. */
   instanceToClass: Map<string, string>;
+  partialInstances: Set<string>;
   /** All known marshmallow Schema subclass names. */
   classNames: Set<string>;
   /** Full analysis, used to resolve parent classes. */
   analysis: PythonAnalysis;
+  models: ModelIndex;
 }
 
 // Base class tails that identify a marshmallow Schema (including the
@@ -120,11 +122,16 @@ function marshFieldSchema(
   if (!name) return {};
   switch (name) {
     case "String":
+      return { type: "string" };
+    case "URLFor":
+      return { type: "string", format: "url" };
     case "Url":
     case "URL":
+      return { type: "string", format: "uri" };
     case "Email":
+      return { type: "string", format: "email" };
     case "UUID":
-      return { type: "string" };
+      return { type: "string", format: "uuid" };
     case "Integer":
       return { type: "integer" };
     case "Boolean":
@@ -145,7 +152,7 @@ function marshFieldSchema(
       if (innerName && index.classNames.has(innerName)) {
         const ref: JsonSchemaLocal = { $ref: `#/components/schemas/${innerName}` };
         const many = keywordArgument(call, "many");
-        return many ? { type: "array", items: ref } : ref;
+        return many?.type === "true" ? { type: "array", items: ref } : ref;
       }
       return {};
     }
@@ -158,6 +165,36 @@ function marshFieldSchema(
       // auto_field, Raw, unknown field types: leave shape unspecified.
       return {};
   }
+}
+
+// SQLAlchemy's Mapped annotation is evidence for auto_field, not arbitrary
+// model property names. Ambiguous model bindings remain unknown.
+function marshAutoField(cls: PyClass, name: string, index: MarshmallowIndex): JsonSchemaLocal {
+  const meta = findAll(cls.node, n => n.type === "class_definition" && n.namedChildren[0]?.text === "Meta")[0];
+  const model = meta && findAll(meta, n => n.type === "assignment" && n.namedChildren[0]?.text === "model")[0]?.namedChildren.at(-1);
+  if (!model || model.type !== "identifier") return {};
+  const imported = index.analysis.files.get(cls.file)?.imports.get(model.text);
+  const candidates = index.analysis.classes.filter(c => c.name === (imported?.importedName ?? model.text));
+  const target = candidates.find(c => c.file === cls.file) ?? (candidates.length === 1 ? candidates[0] : undefined);
+  const field = target?.fields.find(f => f.name === name);
+  if (!field?.annotation) return {};
+  let annotation = field.annotation;
+  if (annotation.type === "type") annotation = annotation.namedChildren[0] ?? annotation;
+  const generic = genericParts(annotation);
+  if (generic?.name.split('.').pop() !== "Mapped" || generic.args.length !== 1) return {};
+  const schema = annotationToSchema(generic.args[0]!, index.models) ?? {};
+  const column = field.default;
+  if (column?.type === "call" && callName(column.namedChildren[0] ?? null) === "mapped_column") {
+    const sqlType = positionalArguments(column)[0];
+    if (sqlType?.type === "call" && callName(sqlType.namedChildren[0] ?? null) === "String") {
+      const length = literalInteger(positionalArguments(sqlType)[0] ?? null);
+      if (length !== null) schema.maxLength = length;
+    }
+    const nullable = keywordArgument(column, "nullable");
+    if (nullable?.type === "true" && typeof schema.type === "string") schema.type = [schema.type, "null"];
+    if (nullable?.type === "false" && Array.isArray(schema.type)) schema.type = schema.type.filter(t => t !== "null");
+  }
+  return schema;
 }
 
 function buildMarshClassSchema(
@@ -189,8 +226,36 @@ function buildMarshClassSchema(
   for (const field of cls.fields) {
     const call = field.default;
     if (!call || call.type !== "call") continue;
-    properties[field.name] = marshFieldSchema(call, index, seen);
-    if (keywordArgument(call, "required")?.type === "true") required.push(field.name);
+    const key = literalString(keywordArgument(call, "data_key")) ?? field.name;
+    const fieldSchema = callName(call.namedChildren[0] ?? null) === "auto_field"
+      ? marshAutoField(cls, literalString(positionalArguments(call)[0] ?? null) ?? field.name, index)
+      : marshFieldSchema(call, index, seen);
+    if (keywordArgument(call, "dump_only")?.type === "true") fieldSchema.readOnly = true;
+    if (keywordArgument(call, "load_only")?.type === "true") fieldSchema.writeOnly = true;
+    const validator = keywordArgument(call, "validate");
+    for (const check of validator?.type === "list" ? validator.namedChildren : validator ? [validator] : []) {
+      if (check.type !== "call") continue;
+      const kind = callName(check.namedChildren[0] ?? null);
+      const min = literalInteger(keywordArgument(check, "min"));
+      const max = literalInteger(keywordArgument(check, "max"));
+      if (kind === "Length") {
+        const exact = literalInteger(keywordArgument(check, "equal"));
+        const array = fieldSchema.type === "array";
+        if (min !== null || exact !== null) fieldSchema[array ? "minItems" : "minLength"] = exact ?? min;
+        if (max !== null || exact !== null) fieldSchema[array ? "maxItems" : "maxLength"] = exact ?? max;
+      } else if (kind === "Range") {
+        if (min !== null) fieldSchema.minimum = min;
+        if (max !== null) fieldSchema.maximum = max;
+      }
+    }
+    properties[key] = fieldSchema;
+    if (keywordArgument(call, "allow_none")?.type === "true") {
+      if (typeof fieldSchema.type === "string") fieldSchema.type = [fieldSchema.type, "null"];
+      else if (fieldSchema.$ref) properties[key] = {anyOf: [fieldSchema, {type: "null"}]};
+    }
+    const inherited = required.indexOf(key);
+    if (inherited >= 0) required.splice(inherited, 1);
+    if (keywordArgument(call, "required")?.type === "true") required.push(key);
   }
 
   const schema: JsonSchemaLocal = {
@@ -210,8 +275,10 @@ function buildMarshmallowIndex(analysis: PythonAnalysis): MarshmallowIndex {
   const index: MarshmallowIndex = {
     componentsByName: new Map(),
     instanceToClass: new Map(),
+    partialInstances: new Set(),
     classNames: new Set(),
     analysis,
+    models: buildModelIndex(analysis),
   };
 
   let changed = true;
@@ -239,6 +306,7 @@ function buildMarshmallowIndex(analysis: PythonAnalysis): MarshmallowIndex {
       const ctor = callName(value.namedChildren[0] ?? null);
       if (ctor && index.classNames.has(ctor)) {
         index.instanceToClass.set(target.text, ctor);
+        if (keywordArgument(value, "partial")?.type === "true") index.partialInstances.add(target.text);
       }
     }
   }
@@ -780,44 +848,61 @@ function buildFlaskRoute(
   }
 
   // Responses.
-  const responses = buildFlaskResponses(fn, gaps, method);
+  const apifairy = scanApifairyDecorators(fn, marsh);
+  const responses = buildFlaskResponses(fn, gaps, method, Number(apifairy.success?.statusCode ?? 200));
 
   // APIFairy decorators carry explicit marshmallow models that the return-value
   // scan cannot infer; apply them on top of, and reconcile against, the
   // return-statement evidence.
-  const apifairy = scanApifairyDecorators(fn, marsh);
   if (apifairy.requestClass) {
+    let requestClass = apifairy.requestClass;
+    if (apifairy.requestPartial) {
+      const original = marsh.componentsByName.get(requestClass);
+      if (original) {
+        requestClass = `partial_${requestClass}`;
+        const partial = {...original};
+        delete partial.required;
+        marsh.componentsByName.set(requestClass, partial);
+      }
+    }
     requestBody = {
       required: true,
       confidence: "high",
       content: [
-        { mediaType: "application/json", schema: { $ref: `#/components/schemas/${apifairy.requestClass}` } },
+        { mediaType: "application/json", schema: { $ref: `#/components/schemas/${requestClass}` } },
       ],
     };
     gaps.delete("body-schema-unknown");
     gaps.delete("body-unknown");
   }
   if (apifairy.success) {
-    const { className, statusCode, paginated } = apifairy.success;
-    const schema: JsonSchemaLocal = paginated
+    const { className, statusCode, paginated, wrapper } = apifairy.success;
+    const schema: JsonSchemaLocal = wrapper ?? (paginated
       ? {
           type: "object",
           properties: {
             data: { type: "array", items: { $ref: `#/components/schemas/${className}` } },
           },
         }
-      : { $ref: `#/components/schemas/${className}` };
+      : { $ref: `#/components/schemas/${className}` });
     const upsert = {
       statusCode,
       description: "",
       confidence: "high" as Confidence,
-      content: [{ mediaType: "application/json", schema }],
+      content: ["204", "304"].includes(statusCode) ? [] : [{ mediaType: "application/json", schema }],
     };
     const idx = responses.findIndex((r) => r.statusCode === statusCode);
     if (idx >= 0) responses[idx] = upsert;
     else responses.push(upsert);
     gaps.delete("response-unknown");
     gaps.delete("response-schema-unknown");
+  }
+  if (apifairy.queryClass) {
+    const query = marsh.componentsByName.get(apifairy.queryClass);
+    for (const [name, schema] of Object.entries((query?.properties ?? {}) as Record<string, JsonSchemaLocal>)) {
+      if (schema.readOnly || parameters.some(p => p.name === name && p.in === "query")) continue;
+      parameters.push({name, in: "query", required: Array.isArray(query?.required) && query.required.includes(name), schema: { ...schema }, confidence: "high"});
+    }
   }
   for (const error of apifairy.errors) {
     if (!responses.some((r) => r.statusCode === error.statusCode)) {
@@ -859,8 +944,10 @@ function buildFlaskRoute(
 }
 
 interface ApifairyEvidence {
-  success: { className: string; statusCode: string; paginated: boolean } | null;
+  success: { className: string; statusCode: string; paginated: boolean; wrapper?: JsonSchemaLocal } | null;
+  queryClass?: string;
   requestClass: string | null;
+  requestPartial?: boolean;
   errors: Array<{ statusCode: string; description: string }>;
 }
 
@@ -881,11 +968,47 @@ function scanApifairyDecorators(fn: PyFunction, marsh: MarshmallowIndex): Apifai
     if (name === "response" || name === "paginated_response") {
       const className = resolveMarshRef(args[0] ?? null, marsh);
       if (!className) continue;
-      const statusNode = args[1] ?? null;
+      const statusNode = keywordArgument(callNode, "status_code") ?? args[1] ?? null;
       const statusCode = statusNode ? String(literalInteger(statusNode) ?? 200) : "200";
       evidence.success = { className, statusCode, paginated: name === "paginated_response" };
+      if (name === "paginated_response") {
+        const definitions = marsh.analysis.functions.filter(f => f.name === name);
+        const implementation = definitions.length === 1 ? definitions[0] : undefined;
+        const paginationArg = keywordArgument(callNode, "pagination_schema") ?? implementation?.params.find(p => p.name === "pagination_schema")?.default;
+        const paginationClass = resolveMarshRef(paginationArg ?? null, marsh);
+        if (implementation?.body && paginationClass) {
+          // Verify the wrapper's source: a query-arguments decorator and a
+          // response schema factory must both bind the pagination parameter.
+          const queries = findAll(implementation.body, n => n.type === "call" && callName(n.namedChildren[0] ?? null) === "arguments" && positionalArguments(n)[0]?.text === "pagination_schema");
+          const responses = findAll(implementation.body, n => n.type === "call" && callName(n.namedChildren[0] ?? null) === "response");
+          const factoryCall = responses.map(n => positionalArguments(n)[0]).find(n => n?.type === "call" && keywordArgument(n, "pagination_schema")?.text === "pagination_schema");
+          const factories = factoryCall ? marsh.analysis.functions.filter(f => f.name === callName(factoryCall.namedChildren[0] ?? null)) : [];
+          const factory = factories.length === 1 ? factories[0] : undefined;
+          if (queries.length && factory?.body) {
+            const nestedIds = new Set(findAll(factory.body, n => n.type === "class_definition").map(n => n.id));
+            const nestedClasses = marsh.analysis.classes.filter(c => c.file === factory.file && nestedIds.has(c.node.id) && c.bases.some(b => MARSH_BASE_RE.test(b.text)));
+            const wrapped = nestedClasses.length === 1 ? nestedClasses[0] : undefined;
+            const props: Record<string, JsonSchemaLocal> = {};
+            for (const field of wrapped?.fields ?? []) {
+              const value = field.default;
+              if (value?.type !== "call" || callName(value.namedChildren[0] ?? null) !== "Nested") continue;
+              const binding = positionalArguments(value)[0]?.text;
+              const target = binding === factory.params[0]?.name ? className : binding === "pagination_schema" ? paginationClass : null;
+              if (!target) continue;
+              const ref = {$ref: `#/components/schemas/${target}`};
+              props[field.name] = keywordArgument(value, "many")?.type === "true" ? {type: "array", items: ref} : ref;
+            }
+            if (wrapped && Object.keys(props).length === wrapped.fields.length && Object.keys(props).length > 0) {
+              evidence.success.wrapper = {type: "object", properties: props};
+              evidence.queryClass = paginationClass;
+            }
+          }
+        }
+      }
     } else if (name === "body") {
       evidence.requestClass = resolveMarshRef(args[0] ?? null, marsh);
+      const arg = args[0];
+      evidence.requestPartial = arg?.type === "identifier" ? marsh.partialInstances.has(arg.text) : arg?.type === "call" && keywordArgument(arg, "partial")?.type === "true";
     } else if (name === "other_responses") {
       const mapping = args[0] ?? null;
       if (!mapping || mapping.type !== "dictionary") continue;
@@ -904,6 +1027,7 @@ function buildFlaskResponses(
   fn: PyFunction,
   gaps: Set<string>,
   method: string,
+  defaultStatus = 200,
 ): RouteCandidate["responses"] {
   const responses: RouteCandidate["responses"] = [];
   if (!fn.body) {
@@ -935,14 +1059,14 @@ function buildFlaskResponses(
   for (const returned of returns) {
     if (guardedMethod(returned) && guardedMethod(returned) !== method) continue;
     let value = returned.namedChildren[0] ?? null;
-    let status = 200;
+    let status = defaultStatus;
     // Tuple return: (payload, status) — parenthesized tuples use "tuple",
     // bare comma returns use "expression_list".
     if (value?.type === "tuple" || value?.type === "expression_list") {
       const elements = value.namedChildren;
       value = elements[0] ?? null;
       const statusNode = elements[1];
-      status = statusNode ? literalInteger(statusNode) ?? 200 : 200;
+      status = statusNode ? literalInteger(statusNode) ?? defaultStatus : defaultStatus;
     }
     if (!value) continue;
 

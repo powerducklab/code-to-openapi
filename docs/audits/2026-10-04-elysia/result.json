@@ -1,0 +1,7 @@
+{
+  "assertions": 781,
+  "mismatches": 0,
+  "errors": [],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

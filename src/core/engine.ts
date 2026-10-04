@@ -1,5 +1,6 @@
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import ignoreFactory from "ignore";
+import { readFileSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { extname, join, resolve, relative, isAbsolute } from "node:path";
 
 import {
   type DiscoveredOperation,
@@ -8,7 +9,7 @@ import {
   discoveryToOpenApi,
 } from "@powerduck/x-to-openapi";
 
-import { applyCompletenessGate } from "./completeness.js";
+import { applyCompletenessGate, hasUnknownSchema } from "./completeness.js";
 import { hoistLocalSchemaDefinitions } from "./hoistDefinitions.js";
 import { indexProject } from "./indexer.js";
 import { probeManifest } from "./probe.js";
@@ -16,6 +17,7 @@ import { buildSidecar } from "./sidecar.js";
 import type {
   Confidence,
   DependencyManifest,
+  DiscoveredComponent,
   ExtractionResult,
   FileEntry,
   FileIndex,
@@ -28,6 +30,8 @@ import type {
   ScanReport,
   ScanResult,
 } from "./types.js";
+import type { ComponentCatalogEntry } from "../ai/gapResolver.js";
+import { stripPrototypeHazards } from "./sanitizeSchemas.js";
 import { createTsAnalysis, type TsAnalysis } from "../lang/typescript/index.js";
 import { createPythonAnalysis, type PythonAnalysis } from "../lang/python/index.js";
 import { createGoAnalysis, type GoAnalysis } from "../lang/go/index.js";
@@ -195,28 +199,84 @@ function toOperation(candidate: RouteCandidate): DiscoveredOperation {
   };
 }
 
+/**
+ * Compact catalog of deterministically extracted components, embedded in the
+ * per-route AI prompt so the model can reference an existing model by $ref
+ * instead of re-describing (or fabricating) a schema.
+ */
+function buildComponentCatalog(
+  components: ReadonlyMap<string, JsonSchema>,
+): ComponentCatalogEntry[] {
+  const catalog: ComponentCatalogEntry[] = [];
+  for (const [name, schema] of components) {
+    const rawProperties =
+      schema && typeof schema === "object" && !Array.isArray(schema)
+        ? Object.keys(
+            (schema as { properties?: Record<string, unknown> }).properties ?? {},
+          )
+        : [];
+    // Drop prototype-pollution keys and class constructor noise.
+    const properties = rawProperties
+      .filter(
+        (key) => key !== "constructor" && key !== "__proto__" && key !== "prototype",
+      )
+      .slice(0, 40);
+    catalog.push({
+      name,
+      ...(properties.length ? { properties } : {}),
+    });
+  }
+  return catalog;
+}
+
 /** Fill only unknown leaves. Model output cannot replace proven schema facts. */
-function fillSchemaGaps(known: JsonSchema, proposed: JsonSchema): JsonSchema {
+function fillSchemaGaps(
+  known: JsonSchema,
+  proposed: JsonSchema,
+  components: ReadonlyMap<string, JsonSchema>,
+): JsonSchema {
   if (Object.keys(known).length === 0) return structuredClone(proposed);
+  // When the deterministic leaf is itself incomplete and the model provides
+  // a fully gate-complete replacement (for example a noisy stdlib union of
+  // untyped arrays replaced by an array of an existing component), take the
+  // model subtree wholesale instead of trying to merge incompatible shapes.
+  if (
+    hasUnknownSchema(known, components) &&
+    !hasUnknownSchema(proposed, components)
+  ) {
+    return structuredClone(proposed);
+  }
   const result = structuredClone(known);
   const kp = known.properties as Record<string, JsonSchema> | undefined;
   const pp = proposed.properties as Record<string, JsonSchema> | undefined;
   if (kp && pp) result.properties = Object.fromEntries(Object.entries(kp).map(([name, schema]) =>
-    [name, pp[name] ? fillSchemaGaps(schema, pp[name]!) : schema]));
+    [name, pp[name] ? fillSchemaGaps(schema, pp[name]!, components) : schema]));
   if (known.items && proposed.items && typeof known.items === "object" && typeof proposed.items === "object"
       && !Array.isArray(known.items) && !Array.isArray(proposed.items)) {
-    result.items = fillSchemaGaps(known.items as JsonSchema, proposed.items as JsonSchema);
+    result.items = fillSchemaGaps(known.items as JsonSchema, proposed.items as JsonSchema, components);
   }
   return result;
+}
+
+interface AiGapOutcome {
+  candidate: RouteCandidate;
+  /** Number of gap codes actually closed by the model response. */
+  gapsClosed: number;
+  /** "filled" closes every gap, "partial" some, "empty" none, "failed" errored. */
+  status: "filled" | "partial" | "empty" | "failed";
 }
 
 async function applyAiGaps(
   candidate: RouteCandidate,
   resolver: GapResolver,
-  ctx: ScanContext,
-): Promise<RouteCandidate> {
-  if (!candidate.gaps.length || !candidate.handlerSource) return candidate;
+  components: ReadonlyMap<string, JsonSchema>,
+  componentCatalog: ComponentCatalogEntry[],
+): Promise<AiGapOutcome> {
+  if (!candidate.gaps.length || !candidate.handlerSource) {
+    return { candidate, gapsClosed: 0, status: "empty" };
+  }
 
+  const gapsBefore = candidate.gaps.length;
   const resolution = await resolver.resolve({
     route: { method: candidate.method, path: candidate.fullPath ?? candidate.path },
     origin: candidate.origin,
@@ -229,8 +289,9 @@ async function applyAiGaps(
       framework: candidate.framework ?? "unknown",
       language: candidate.language ?? "unknown",
     },
+    componentCatalog,
   });
-  if (!resolution) return candidate;
+  if (!resolution) return { candidate, gapsClosed: 0, status: "empty" };
 
   const next: RouteCandidate = {
     ...candidate,
@@ -277,7 +338,7 @@ async function applyAiGaps(
   }
   if (resolution.bodySchema && next.requestBody && candidate.gaps.includes("body-schema-unknown")) {
     const media = next.requestBody.content.find(m => m.mediaType === "application/json");
-    if (media) media.schema = fillSchemaGaps(media.schema ?? {}, resolution.bodySchema);
+    if (media) media.schema = fillSchemaGaps(media.schema ?? {}, resolution.bodySchema, components);
   }
   if (resolution.bodySchema && !next.requestBody && candidate.gaps.some(g => g === "body-unknown" || g === "body-schema-unknown")) {
     next.requestBody = {
@@ -322,7 +383,7 @@ async function applyAiGaps(
     if (existing) {
       existing.content = existing.content ?? [];
       const media = existing.content.find((m) => m.mediaType === "application/json");
-      if (media) media.schema = fillSchemaGaps(media.schema ?? {}, schema);
+      if (media) media.schema = fillSchemaGaps(media.schema ?? {}, schema, components);
       else if (!media) existing.content.push({ mediaType: "application/json", schema });
     } else {
       next.responses.push({
@@ -351,16 +412,30 @@ async function applyAiGaps(
     return true;
   });
 
+  // Re-run the same honesty gate the deterministic pipeline uses. A model
+  // response carrying an empty object schema must not count as a closed gap:
+  // the reported status and statistics reflect what survives the gate, not
+  // what the model merely claimed.
+  const gated = applyCompletenessGate(
+    { ...next, fullPath: next.fullPath ?? candidate.fullPath ?? candidate.path },
+    components,
+  );
+
   // The completeness gate only downgrades confidence, so re-rank here once AI
   // evidence has closed gaps. AI enrichment remains distinguishable from
   // deterministic source extraction, regardless of model self-confidence.
-  if (next.gaps.length === 0) {
+  if (gated.gaps.length === 0) {
     // Model self-reported confidence is not deterministic source evidence.
-    next.confidence = resolution.confidence === "low" ? "low" : "medium";
+    gated.confidence = resolution.confidence === "low" ? "low" : "medium";
   }
 
-  ctx.onProgress?.("ai-gap", `${candidate.method} ${candidate.fullPath}`);
-  return next;
+  const gapsClosed = Math.max(0, gapsBefore - gated.gaps.length);
+  return {
+    candidate: gated,
+    gapsClosed,
+    status:
+      gapsClosed === 0 ? "empty" : gapsClosed === gapsBefore ? "filled" : "partial",
+  };
 }
 
 function projectMeta(root: string): { title: string; version: string } {
@@ -411,13 +486,35 @@ function projectMeta(root: string): { title: string; version: string } {
  * fills explicitly identified gaps when the host provides one.
  */
 export async function scanProject(options: ScanOptions): Promise<ScanResult> {
-  const root = resolve(options.root);
+  const root = realpathSync(resolve(options.root));
   const index: FileIndex = { files: [], byPath: new Map() };
   const indexed = indexProject(root, {
     ignore: options.ignore,
     includeTests: options.includeTests,
     maxFileBytes: options.maxFileBytes,
   });
+  const explicitIgnore = (ignoreFactory as unknown as () => { add(value: string | string[]): unknown; ignores(path: string): boolean })();
+  if (options.ignore) explicitIgnore.add([...options.ignore]);
+  const powerduckIgnore = join(root, ".powerduckignore");
+  if (existsSync(powerduckIgnore)) explicitIgnore.add(readFileSync(powerduckIgnore, "utf8"));
+  for (const sourceRoot of options.additionalSourceRoots ?? []) {
+    const absolute = realpathSync(resolve(root, sourceRoot));
+    const local = relative(root, absolute).split("\\").join("/");
+    if (!local || local === ".." || local.startsWith("../") || isAbsolute(local)) {
+      throw new Error(`Additional source root must be a subdirectory of the project: ${sourceRoot}`);
+    }
+    if (!statSync(absolute).isDirectory()) throw new Error(`Additional source root is not a directory: ${sourceRoot}`);
+    const extra = indexProject(absolute, { includeTests: options.includeTests, maxFileBytes: options.maxFileBytes });
+    for (const file of extra.files) {
+      const path = relative(root, file.absolutePath).split("\\").join("/");
+      if (!explicitIgnore.ignores(path) && !indexed.byPath.has(path)) {
+        const entry = { ...file, path };
+        indexed.files.push(entry);
+        indexed.byPath.set(path, entry);
+      }
+    }
+  }
+  indexed.files.sort((a, b) => a.path.localeCompare(b.path));
   index.files = indexed.files;
   index.byPath = indexed.byPath;
 
@@ -529,40 +626,112 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     }
   }
 
-  let candidates = extractions.flatMap((entry) => entry.result.routes).map(candidate =>
-    applyCompletenessGate({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }));
-  if (options.gapResolver) {
-    // Bound model traffic and preserve static results when a single request fails.
-    const enriched: RouteCandidate[] = [];
-    for (let i = 0; i < candidates.length; i += 4) {
-      enriched.push(...await Promise.all(candidates.slice(i, i + 4).map(async candidate => {
-        try { return await applyAiGaps(candidate, options.gapResolver!, ctx); }
-        catch (error) {
-          diagnostics.push(`AI gap resolution failed for ${candidate.method} ${candidate.fullPath ?? candidate.path}: ${error instanceof Error ? error.message : String(error)}`);
-          return candidate;
-        }
-      })));
-    }
-    candidates = enriched;
-  }
-  candidates = candidates.map((candidate) =>
-    applyCompletenessGate({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }),
-  );
-
-  const operations = candidates.map(toOperation);
-
-  const componentsByName = new Map<string, JsonSchema>();
+  const baseComponents: DiscoveredComponent[] = [];
   for (const extraction of extractions) {
     for (const component of extraction.result.components) {
-      const existing = componentsByName.get(component.name);
-      if (!existing) componentsByName.set(component.name, component.schema);
+      if (!baseComponents.some((item) => item.name === component.name)) {
+        baseComponents.push(component);
+      }
     }
   }
+
+  let candidates: RouteCandidate[] = extractions.flatMap(
+    (entry) => entry.result.routes,
+  ).map(
+    (candidate) => ({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }),
+  );
+
+  // Hoist Fastify-style local definition tables BEFORE the completeness gate:
+  // operation schemas reference the hoisted names from the start, so the gate
+  // never reports a schema as unknown just because its component is still
+  // living inside a local definitions/$defs table.
+  const hoistedBeforeGate = hoistLocalSchemaDefinitions(
+    candidates as unknown as DiscoveredOperation[],
+    baseComponents,
+  );
+  const componentsByName = new Map<string, JsonSchema>(
+    hoistedBeforeGate.map((component) => [component.name, component.schema]),
+  );
+
+  candidates = candidates.map((candidate) =>
+    applyCompletenessGate(
+      { ...candidate, fullPath: candidate.fullPath ?? candidate.path },
+      componentsByName,
+    ));
+
+  // AI enrichment statistics surfaced in the scan report. Model evidence is
+  // never treated as deterministic source truth, so the host UI can show
+  // exactly which routes were completed by the model.
+  let aiAttempted = 0;
+  let aiResolved = 0;
+  const aiResolvedRoutes: ScanReport["aiResolvedRoutes"] = [];
+  const componentCatalog = buildComponentCatalog(componentsByName);
+  if (options.gapResolver) {
+    const targets = candidates
+      .map((candidate, index) => ({ candidate, index }))
+      .filter(({ candidate }) => candidate.gaps.length > 0 && Boolean(candidate.handlerSource));
+    ctx.onProgress?.("ai-start", JSON.stringify({ total: targets.length }));
+    // Bound model traffic with small batches; hosts typically serialize the
+    // resolver calls themselves to respect provider rate limits.
+    for (let batchStart = 0; batchStart < targets.length; batchStart += 4) {
+      const batch = targets.slice(batchStart, batchStart + 4);
+      const outcomes = await Promise.all(
+        batch.map(async ({ candidate, index }) => {
+          aiAttempted += 1;
+          const routeLabel = `${candidate.method} ${candidate.fullPath ?? candidate.path}`;
+          let outcome: AiGapOutcome;
+          try {
+            outcome = await applyAiGaps(candidate, options.gapResolver!, componentsByName, componentCatalog);
+          } catch (error) {
+            diagnostics.push(
+              `AI gap resolution failed for ${routeLabel}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            outcome = { candidate, gapsClosed: 0, status: "failed" };
+          }
+          if (outcome.gapsClosed > 0) {
+            aiResolved += 1;
+            aiResolvedRoutes.push({
+              method: candidate.method,
+              path: candidate.fullPath ?? candidate.path,
+              gapsClosed: outcome.gapsClosed,
+            });
+          }
+          ctx.onProgress?.(
+            "ai-gap",
+            JSON.stringify({
+              index: index + 1,
+              total: targets.length,
+              method: candidate.method,
+              path: candidate.fullPath ?? candidate.path,
+              status: outcome.status,
+              gapsClosed: outcome.gapsClosed,
+            }),
+          );
+          return { index, candidate: outcome.candidate };
+        }),
+      );
+      for (const { index, candidate } of outcomes) {
+        candidates[index] = {
+          ...candidate,
+          fullPath: candidate.fullPath ?? candidate.path,
+        };
+      }
+    }
+  }
+  candidates = candidates.map((candidate) =>
+    applyCompletenessGate({ ...candidate, fullPath: candidate.fullPath ?? candidate.path }, componentsByName),
+  );
+
+  const operations = candidates.map(toOperation).map(stripPrototypeHazards);
+
   // Fastify-style native JSON schemas carry draft-07 `definitions`/`$defs`;
   // hoist them into components.schemas so every local $ref resolves in OAS 3.x.
   const hoistedComponents = hoistLocalSchemaDefinitions(
     operations as DiscoveredOperation[],
-    [...componentsByName.entries()].map(([name, schema]) => ({ name, schema })),
+    [...componentsByName.entries()].map(([name, schema]) => ({
+      name,
+      schema: stripPrototypeHazards(schema) as JsonSchema,
+    })),
   );
   const components = hoistedComponents;
 
@@ -592,6 +761,9 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     gaps: operations
       .filter((o) => o.gaps?.length)
       .map((o) => ({ route: `${o.method} ${o.path}`, gaps: [...(o.gaps ?? [])] })),
+    aiAttempted,
+    aiResolved,
+    aiResolvedRoutes,
     diagnostics,
   };
 
@@ -611,6 +783,8 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     },
   };
 }
+
+const PROTOTYPE_HAZARD_KEYS = new Set(["constructor", "__proto__", "prototype"]);
 
 function dedupeBy<T>(items: T[], key: (item: T) => string): T[] {
   const seen = new Set<string>();

@@ -1,0 +1,662 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Independent upstream contract",
+    "version": "1"
+  },
+  "components": {
+    "schemas": {},
+    "parameters": {}
+  },
+  "paths": {
+    "/users/login": {
+      "post": {
+        "summary": "Authentication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "type": "object",
+                    "properties": {
+                      "email": {
+                        "type": "string",
+                        "format": "email",
+                        "description": "The email of the user",
+                        "example": "jake@jake.jake"
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The password of the user",
+                        "example": "hunter2A"
+                      }
+                    },
+                    "required": [
+                      "email",
+                      "password"
+                    ]
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "email": {
+                          "type": "string",
+                          "format": "email",
+                          "description": "The email of the user",
+                          "example": "jake@jake.jake"
+                        },
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "token": {
+                          "type": "string",
+                          "description": "JWT token",
+                          "example": "eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiJjbWN1dzR3d2IwMDAweDMxeDY1emE2bTVxIiwiZW1haWwiOiJqYWtlQGpha2UuamFrZSIsInVzZXJuYW1lIjoiamFrZSIsImV4cCI6MTc1MjA5ODQ0OCwiYXVkIjoicGhwIiwiaWF0IjoxNzUyMDEyMDQ4fQ.kvUhCyPi8h_x1oqQB1W6abnhKcEgyf-moho6z9IBJlg"
+                        }
+                      },
+                      "required": [
+                        "email",
+                        "username",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed request body"
+          }
+        }
+      }
+    },
+    "/users": {
+      "post": {
+        "summary": "Registration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "type": "object",
+                    "properties": {
+                      "email": {
+                        "type": "string",
+                        "format": "email",
+                        "description": "The email of the user",
+                        "example": "jake@jake.jake"
+                      },
+                      "username": {
+                        "type": "string",
+                        "minLength": 2,
+                        "description": "The username of the user",
+                        "example": "jake"
+                      },
+                      "bio": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "minLength": 2,
+                        "description": "The bio of the user",
+                        "example": "I work at statefarm"
+                      },
+                      "image": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uri",
+                        "description": "The image of the user",
+                        "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 8,
+                        "maxLength": 100,
+                        "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)[a-zA-Z\\d@$!%*?&]{8,}$",
+                        "description": "Password (min 8 chars, upper/lowercase, number)",
+                        "example": "hunter2A"
+                      }
+                    },
+                    "required": [
+                      "email",
+                      "username",
+                      "password"
+                    ]
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registration successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "email": {
+                          "type": "string",
+                          "format": "email",
+                          "description": "The email of the user",
+                          "example": "jake@jake.jake"
+                        },
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "token": {
+                          "type": "string",
+                          "description": "JWT token",
+                          "example": "eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiJjbWN1dzR3d2IwMDAweDMxeDY1emE2bTVxIiwiZW1haWwiOiJqYWtlQGpha2UuamFrZSIsInVzZXJuYW1lIjoiamFrZSIsImV4cCI6MTc1MjA5ODQ0OCwiYXVkIjoicGhwIiwiaWF0IjoxNzUyMDEyMDQ4fQ.kvUhCyPi8h_x1oqQB1W6abnhKcEgyf-moho6z9IBJlg"
+                        }
+                      },
+                      "required": [
+                        "email",
+                        "username",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed request body"
+          }
+        }
+      }
+    },
+    "/user": {
+      "get": {
+        "summary": "Get Current User",
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "email": {
+                          "type": "string",
+                          "format": "email",
+                          "description": "The email of the user",
+                          "example": "jake@jake.jake"
+                        },
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "token": {
+                          "type": "string",
+                          "description": "JWT token",
+                          "example": "eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiJjbWN1dzR3d2IwMDAweDMxeDY1emE2bTVxIiwiZW1haWwiOiJqYWtlQGpha2UuamFrZSIsInVzZXJuYW1lIjoiamFrZSIsImV4cCI6MTc1MjA5ODQ0OCwiYXVkIjoicGhwIiwiaWF0IjoxNzUyMDEyMDQ4fQ.kvUhCyPi8h_x1oqQB1W6abnhKcEgyf-moho6z9IBJlg"
+                        }
+                      },
+                      "required": [
+                        "email",
+                        "username",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update User",
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user": {
+                    "type": "object",
+                    "properties": {
+                      "email": {
+                        "type": "string",
+                        "format": "email",
+                        "description": "The email of the user",
+                        "example": "jake@jake.jake"
+                      },
+                      "username": {
+                        "type": "string",
+                        "minLength": 2,
+                        "description": "The username of the user",
+                        "example": "jake"
+                      },
+                      "bio": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "minLength": 2,
+                        "description": "The bio of the user",
+                        "example": "I work at statefarm"
+                      },
+                      "image": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uri",
+                        "description": "The image of the user",
+                        "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 8,
+                        "maxLength": 100,
+                        "pattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)[a-zA-Z\\d@$!%*?&]{8,}$",
+                        "description": "Password (min 8 chars, upper/lowercase, number)",
+                        "example": "hunter2A"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "user"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Update user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "email": {
+                          "type": "string",
+                          "format": "email",
+                          "description": "The email of the user",
+                          "example": "jake@jake.jake"
+                        },
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "token": {
+                          "type": "string",
+                          "description": "JWT token",
+                          "example": "eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiJjbWN1dzR3d2IwMDAweDMxeDY1emE2bTVxIiwiZW1haWwiOiJqYWtlQGpha2UuamFrZSIsInVzZXJuYW1lIjoiamFrZSIsImV4cCI6MTc1MjA5ODQ0OCwiYXVkIjoicGhwIiwiaWF0IjoxNzUyMDEyMDQ4fQ.kvUhCyPi8h_x1oqQB1W6abnhKcEgyf-moho6z9IBJlg"
+                        }
+                      },
+                      "required": [
+                        "email",
+                        "username",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "422": {
+            "description": "Malformed request body"
+          }
+        }
+      }
+    },
+    "/profiles/{username}": {
+      "get": {
+        "summary": "Get Profile",
+        "responses": {
+          "200": {
+            "description": "Profile found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "following": {
+                          "type": "boolean",
+                          "description": "Whether the user is following the profile",
+                          "example": true
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      }
+    },
+    "/profiles/{username}/follow": {
+      "post": {
+        "summary": "Follow user",
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Now following user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "following": {
+                          "type": "boolean",
+                          "description": "Whether the user is following the profile",
+                          "example": true
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Unfollow user",
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No longer following user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string",
+                          "minLength": 2,
+                          "description": "The username of the user",
+                          "example": "jake"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "minLength": 2,
+                          "description": "The bio of the user",
+                          "example": "I work at statefarm"
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uri",
+                          "description": "The image of the user",
+                          "example": "https://api.realworld.io/images/smiley-cyrus.jpg"
+                        },
+                        "following": {
+                          "type": "boolean",
+                          "description": "Whether the user is following the profile",
+                          "example": true
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

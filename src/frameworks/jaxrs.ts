@@ -14,6 +14,8 @@
  * SseEventSink. Anything not statically provable becomes an honest gap.
  */
 
+import {mergeResponseVariants} from "../core/response-variants.js";
+
 import type {
   Confidence,
   DiscoveredMediaType,
@@ -41,6 +43,7 @@ import {
   type JavaModelIndex,
 } from "../lang/java/schema.js";
 import {
+  hasOnlyThrowingExit,
   disambiguateOperationIds,
   dedupeRoutes,
   fieldTypesOf,
@@ -278,6 +281,7 @@ function scanResourceClass(
           rel,
           fieldTypes,
           methodProduces,
+          analysis,
         );
 
     const extensions = isSse ? { "x-protocol": "sse" } : undefined;
@@ -387,6 +391,7 @@ function collectParameters(
       ].includes(c.type),
     );
     const hasDefault = anns.some((a) => a.name === "DefaultValue");
+    const explicitlyRequired = !hasDefault && anns.some(a => ["NotNull", "NotBlank", "NotEmpty"].includes(a.name));
 
     const pathParam = anns.find((a) => a.name === "PathParam");
     const queryParam = anns.find((a) => a.name === "QueryParam");
@@ -419,7 +424,7 @@ function collectParameters(
           name,
           typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : undefined,
           "high",
-          !hasDefault,
+          explicitlyRequired,
         );
       }
       continue;
@@ -433,7 +438,7 @@ function collectParameters(
           name,
           typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : undefined,
           "medium",
-          !hasDefault,
+          explicitlyRequired,
         );
       }
       continue;
@@ -448,7 +453,7 @@ function collectParameters(
           explicit ? name : name.toLowerCase(),
           typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
           "high",
-          !hasDefault,
+          explicitlyRequired,
         );
       }
       continue;
@@ -462,7 +467,7 @@ function collectParameters(
           name,
           typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
           "high",
-          !hasDefault,
+          explicitlyRequired,
         );
       }
       continue;
@@ -474,7 +479,7 @@ function collectParameters(
         formFields.push({
           name,
           schema: javaTypeToSchema(typeNode, model, 0, undefined, rel),
-          required: !hasDefault,
+          required: explicitlyRequired,
         });
       }
       continue;
@@ -485,16 +490,16 @@ function collectParameters(
       continue;
     }
 
-    // Unannotated non-scalar parameter = request entity body.
-    if (typeNode && !anns.length) {
+    // Validation annotations do not turn an entity into an injected parameter.
+    if (typeNode && anns.every(a => ["Valid", "NotNull", "NotBlank", "NotEmpty", "Nullable", "Size", "Min", "Max", "Pattern"].includes(a.name))) {
       const simple = typeNameOf(typeNode);
       const resolves = model.resolveDef(simple, rel);
-      if (resolves && !SIMPLE_TYPES.has(simple)) {
+      if (resolves || SIMPLE_TYPES.has(simple)) {
         const schema = javaTypeToSchema(typeNode, model, 0, undefined, rel);
         if (schema && Object.keys(schema).length) {
           requestBody = {
-            required: true,
-            content: [{ mediaType: "application/json", schema }],
+            required: explicitlyRequired,
+            content: [{ mediaType: consumes && (/TEXT_PLAIN/.test(consumes.node.text) || annotationStringArg(consumes.node) === "text/plain") ? "text/plain" : "application/json", schema: explicitlyRequired ? schema : {anyOf: [schema, {type: "null"}]} }],
             confidence: "high",
           };
         } else {
@@ -517,7 +522,7 @@ function collectParameters(
       if (f.required) required.push(f.name);
     }
     requestBody = {
-      required: true,
+      required: required.length > 0,
       content: [
         {
           mediaType,
@@ -605,6 +610,7 @@ function beanFieldBinding(
 
 interface BuiltResponse {
   status: string;
+  mediaType?: string;
   entity?: JsonSchema;
 }
 
@@ -620,40 +626,42 @@ function collectBuiltResponses(
   const localVars = localVarTypes(method);
   const out: BuiltResponse[] = [];
   const buildCalls = findAll(method, (n) => {
-    if (n.type !== "method_invocation") return false;
-    return n.namedChildren[1]?.type === "identifier" && n.namedChildren[1].text === "build";
+    if (n.type !== "method_invocation" || n.namedChildren[1]?.text !== "build") return false;
+    if (n.parent?.type !== "return_statement") return false;
+    let owner = n.parent.parent;
+    while (owner && owner.id !== method.id) {
+      if (["lambda_expression", "method_declaration", "class_body"].includes(owner.type)) return false;
+      owner = owner.parent;
+    }
+    return owner?.id === method.id;
   });
   for (const build of buildCalls) {
     let status = "200";
     let entityArg: TsNode | undefined;
+    let mediaType: string | undefined;
     let node: TsNode | undefined = build.namedChildren[0];
-    let guard = 0;
-    while (node && node.type === "method_invocation" && guard++ < 8) {
-      const mname = node.namedChildren[1]?.text ?? "";
-      const argList = childrenOfType(node, "argument_list")[0];
-      const posArgs = argList ? argList.namedChildren : [];
-      if (mname === "ok") {
-        status = "200";
-        if (posArgs.length) entityArg = posArgs[0];
-      } else if (mname === "status") {
-        const parsed = parseStatusArg(posArgs[0]);
-        if (parsed) status = parsed;
-      } else if (mname === "entity") {
-        if (posArgs.length) entityArg = posArgs[0];
-      } else if (FACTORY_STATUS[mname]) {
-        status = FACTORY_STATUS[mname]!;
-        // ok(entity)/accepted(entity) carry the entity positionally;
-        // created(uri) carries a Location URI, not the entity.
-        if (posArgs.length && (mname === "ok" || mname === "accepted")) {
-          entityArg = posArgs[0];
-        }
-      }
+    const chain: TsNode[] = [];
+    while (node?.type === "method_invocation" && chain.length < 16) {
+      chain.unshift(node);
       node = node.namedChildren[0];
     }
-    const entity = entityArg
-      ? entityArgToSchema(entityArg, localVars, model, rel)
-      : undefined;
-    out.push({ status, ...(entity ? { entity } : {}) });
+    // A discarded builder, arbitrary lookalike, or truncated chain is not
+    // proof of the returned JAX-RS response.
+    if (!node || !/^(?:(?:javax|jakarta)\.ws\.rs\.core\.)?Response$/.test(node.text) || localVars.has(node.text)) continue;
+    for (const step of chain) {
+      const name = step.namedChildren[1]?.text ?? "";
+      const args = childrenOfType(step, "argument_list")[0]?.namedChildren ?? [];
+      if (name === "status") status = parseStatusArg(args[0]) ?? "default";
+      else if (FACTORY_STATUS[name]) {
+        status = FACTORY_STATUS[name]!;
+        if (name === "ok" || name === "accepted") entityArg = args[0];
+      } else if (name === "entity") entityArg = args[0];
+      else if (name === "type") {
+        mediaType = args[0]?.type === "string_literal" ? args[0].text.slice(1,-1) : ({TEXT_PLAIN:"text/plain",APPLICATION_JSON:"application/json",APPLICATION_XML:"application/xml",TEXT_HTML:"text/html",APPLICATION_OCTET_STREAM:"application/octet-stream"} as Record<string,string>)[args[0]?.text.split('.').at(-1) ?? ''];
+      }
+    }
+    const entity = entityArg ? entityArgToSchema(entityArg, localVars, model, rel) : undefined;
+    out.push({status,...(entity?{entity}:{}),...(mediaType?{mediaType}:{})});
   }
   return out;
 }
@@ -720,6 +728,47 @@ function localVarTypes(method: TsNode): Map<string, TsNode> {
   return map;
 }
 
+/** Match registered providers by the thrown class's inheritance chain.
+ * Never infer an HTTP status from a user exception's short class name. */
+function exceptionResponses(statement: TsNode, analysis: JavaAnalysis, model: JavaModelIndex, rel: string): DiscoveredResponse[] | undefined {
+  const created = statement.namedChildren[0];
+  if (created?.type !== "object_creation_expression") return undefined;
+  const type = created.childForFieldName("type");
+  if (!type) return undefined;
+  const lineage: JavaTypeDef[] = [];
+  let thrown = model.resolveDef(type.text, rel);
+  while (thrown && !lineage.includes(thrown) && lineage.length < 32) {
+    lineage.push(thrown);
+    thrown = thrown.superclass ? model.resolveDef(typeNameOf(thrown.superclass), thrown.file) : undefined;
+  }
+  const importedApi = (name: string, file: string, leaf: string): boolean => {
+    if (/^(?:javax|jakarta)\.ws\.rs\.ext\./.test(name)) return name.endsWith(`.${leaf}`);
+    const table = analysis.imports.get(file);
+    const imported = table?.explicit.get(name);
+    if (imported) return imported === `javax.ws.rs.ext.${leaf}` || imported === `jakarta.ws.rs.ext.${leaf}`;
+    return name === leaf && !model.resolveDef(name,file) && !!table?.wildcards.some(pkg => pkg === "javax.ws.rs.ext" || pkg === "jakarta.ws.rs.ext");
+  };
+  const candidates: {definition: JavaTypeDef; distance: number; method: TsNode}[] = [];
+  for (const definition of analysis.typesByFqn.values()) {
+    if (!listAnnotations(definition.node).some(annotation => importedApi(annotation.name,definition.file,"Provider"))) continue;
+    const interfaces = definition.node.namedChildren.find(child => child.type === "super_interfaces");
+    const generic = interfaces && findAll(interfaces, child => child.type === "generic_type").find(child => importedApi(child.namedChildren[0]?.text ?? '',definition.file,"ExceptionMapper"));
+    const handledType = generic?.namedChildren.find(child => child.type === "type_arguments")?.namedChildren[0];
+    const handled = handledType ? model.resolveDef(handledType.text,definition.file) : undefined;
+    const distance = handled ? lineage.indexOf(handled) : -1;
+    if (distance < 0) continue;
+    const classBody = definition.node.namedChildren.find(child => child.type === "class_body");
+    const method = classBody?.namedChildren.find(child => child.type === "method_declaration" && child.childForFieldName("name")?.text === "toResponse");
+    if (method) candidates.push({definition,distance,method});
+  }
+  candidates.sort((a,b)=>a.distance-b.distance);
+  if (!candidates.length || candidates[1]?.distance === candidates[0]!.distance) return undefined;
+  const selected = candidates[0]!;
+  const responses = collectBuiltResponses(selected.method,model,selected.definition.file);
+  if (!responses.length) return undefined;
+  return responses.map(response => ({statusCode:response.status,description:"Registered exception mapper",confidence:"medium",...(response.entity?{content:[{mediaType:response.mediaType ?? "application/json",schema:response.entity}]}:{})}));
+}
+
 function collectResponses(
   method: TsNode,
   returnType: TsNode | null,
@@ -729,12 +778,25 @@ function collectResponses(
   rel: string,
   fieldTypes: Map<string, TsNode>,
   produces: { name: string; node: TsNode } | undefined,
+  analysis: JavaAnalysis,
 ): DiscoveredResponse[] {
-  const mediaType = produces
-    ? /APPLICATION_XML|text\/xml/i.test(produces.node.text)
-      ? "application/xml"
-      : "application/json"
-    : "application/json";
+  const declaredMedia = produces ? annotationStringArg(produces.node) : null;
+  const mediaType = declaredMedia ?? (produces && /TEXT_PLAIN/.test(produces.node.text)
+    ? "text/plain" : produces && /APPLICATION_XML/.test(produces.node.text)
+      ? "application/xml" : produces && /TEXT_XML/.test(produces.node.text)
+        ? "text/xml" : "application/json");
+  const body = method.childForFieldName("body");
+  if (body && hasOnlyThrowingExit(method)) {
+    const mapped = exceptionResponses(body.namedChildren.at(-1)!, analysis, model, rel);
+    if (mapped?.length) {
+      // Mapper branches may depend on fields set by exception constructors;
+      // retain that uncertainty until the branch condition is proven.
+      if (mapped.length > 1 || mapped.some(response => response.statusCode === "default")) gaps.push("response-unknown");
+      return mapped;
+    }
+    gaps.push("response-unknown");
+    return [{statusCode:"default",description:"Exception response requires exception mapper resolution",confidence:"low"}];
+  }
 
   if (returnType && returnType.type === "void_type") {
     return [{ statusCode: "204", description: "", confidence: "high" }];
@@ -745,18 +807,19 @@ function collectResponses(
     if (built.length) {
       const byStatus = new Map<string, DiscoveredResponse>();
       for (const b of built) {
+        if (b.status === "default" && !gaps.includes("response-unknown")) gaps.push("response-unknown");
         const existing = byStatus.get(b.status);
-        if (existing) continue;
-        byStatus.set(b.status, {
+        const response: DiscoveredResponse = {
           statusCode: b.status,
           description: "",
           confidence: "high",
           ...(b.entity
-            ? { content: [{ mediaType, schema: b.entity }] }
+            ? { content: [{ mediaType: b.mediaType ?? mediaType, schema: b.entity }] }
             : b.status.startsWith("204") || b.status.startsWith("304")
               ? {}
               : { content: [{ mediaType, schema: {} }] }),
-        });
+        };
+        byStatus.set(b.status, existing ? mergeResponseVariants(existing, response) : response);
       }
       return [...byStatus.values()];
     }

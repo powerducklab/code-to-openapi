@@ -1,0 +1,74 @@
+{
+  "assertions": 792,
+  "mismatches": 11,
+  "errors": [
+    {
+      "where": "post /api/users request application/json",
+      "field": "/properties/user/properties/email/pattern",
+      "expected": "^[\\w%+.-]+@[\\d.A-Za-z-]+\\.[A-Za-z]{2,}$",
+      "actual": null
+    },
+    {
+      "where": "post /api/users/login request application/json",
+      "field": "/properties/user/properties/email/pattern",
+      "expected": "^[\\w%+.-]+@[\\d.A-Za-z-]+\\.[A-Za-z]{2,}$",
+      "actual": null
+    },
+    {
+      "where": "put /api/user request application/json",
+      "field": "/properties/user/properties/email/pattern",
+      "expected": "^[\\w%+.-]+@[\\d.A-Za-z-]+\\.[A-Za-z]{2,}$",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles",
+      "error": "missing parameter",
+      "name": "author",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles",
+      "error": "missing parameter",
+      "name": "favorited",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles",
+      "error": "missing parameter",
+      "name": "limit",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles",
+      "error": "missing parameter",
+      "name": "offset",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles",
+      "error": "missing parameter",
+      "name": "tag",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles/feed",
+      "error": "missing parameter",
+      "name": "limit",
+      "in": "query"
+    },
+    {
+      "where": "get /api/articles/feed",
+      "error": "missing parameter",
+      "name": "offset",
+      "in": "query"
+    },
+    {
+      "where": "delete /api/articles/{slug}/comments/{id} path:id",
+      "field": "/pattern",
+      "expected": "^(?:(?!^-0\\.?0*$)(?:-?(?:(?:0|[1-9]\\d*)(?:\\.\\d+)?)|\\.\\d+?))$",
+      "actual": null
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

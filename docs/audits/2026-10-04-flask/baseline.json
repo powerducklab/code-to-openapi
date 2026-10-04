@@ -1,0 +1,1502 @@
+{
+  "info": {
+    "description": "Welcome to the documentation for the Microblog API!\n\nThis project is written in Python, with the\n[Flask](https://flask.palletsprojects.com/) web framework. This documentation\nis generated automatically from the\n[project's source code](https://github.com/miguelgrinberg/microblog-api) using\nthe [APIFairy](https://github.com/miguelgrinberg/apifairy) Flask extension.\n\n## Introduction\n\nMicroblog-API is an easy to use web API for creating microblogs. It is an ideal\nproject to use when learning a front end framework, as it provides a fully\nimplemented back end that you can integrate against.\n\nMicroblog API provides all the base features required to implement a\nmicroblogging project:\n\n- User registration, login and logout\n- Password recovery flow with reset emails\n- Post creation and deletion\n- Follow and unfollow users\n- Feed with posts from followed users\n- Pagination\n- Option to disable authentication during development\n\n## Configuration\n\nIf you are running Microblog API yourself while developing your front end,\nthere are a number of environment variables that you can set to configure its\nbehavior. The variables can be defined directly in the environment or in a\n`.env` file in the project directory. The following table lists all the\nenvironment variables that are currently used:\n\n| Environment Variable | Default | Description |\n| - | - | - |\n| `SECRET_KEY` | `top-secret!` | A secret key used when signing tokens. |\n| `DATABASE_URL`  | `sqlite:///db.sqlite` | The database URL, as defined by the [SQLAlchemy](https://docs.sqlalchemy.org/en/14/core/engines.html#database-urls) framework. |\n| `SQL_ECHO` | not defined | Whether to echo SQL statements to the console for debugging purposes. |\n| `DISABLE_AUTH` | not defined | Whether to disable authentication. When running with authentication disabled, the user is assumed to be logged as the user with `id=1`, which must exist in the database. |\n| `ACCESS_TOKEN_MINUTES` | `15` | The number of minutes an access token is valid for. |\n| `REFRESH_TOKEN_DAYS` | `7` | The number of days a refresh token is valid for. |\n| `REFRESH_TOKEN_IN_COOKIE` | `yes` | Whether to return the refresh token in a secure cookie. |\n| `REFRESH_TOKEN_IN_BODY` | `no` | Whether to return the refresh token in the response body. |\n| `RESET_TOKEN_MINUTES` | `15` | The number of minutes a reset token is valid for. |\n| `PASSWORD_RESET_URL` | `http://localhost:3000/reset` | The URL that will be used in password reset links. |\n| `USE_CORS` | `yes` | Whether to allow cross-origin requests. If allowed, CORS support can be configured or customized with options provided by the Flask-CORS extension. |\n| `DOCS_UI` | `elements` | The UI library to use for the documentation. Allowed values are `swagger_ui`, `redoc`, `rapidoc` and `elements`. |\n| `MAIL_SERVER` | `localhost` | The mail server to use for sending emails. |\n| `MAIL_PORT` | `25` | The port to use for sending emails. |\n| `MAIL_USE_TLS` | not defined | Whether to use TLS when sending emails. |\n| `MAIL_USERNAME` | not defined | The username to use for sending emails. |\n| `MAIL_PASSWORD` | not defined | The password to use for sending emails. |\n| `MAIL_DEFAULT_SENDER` | `donotreply@microblog.example.com` | The default sender to use for emails. |\n| `GITHUB_CLIENT_ID` | not defined | The client ID for the GitHub OAuth2 application, used for logging in with a GitHub account. |\n| `GITHUB_CLIENT_SECRET` | not defined | The client secret for the GitHub OAuth2 application, used for logging in with a GitHub account. |\n| `GOOGLE_CLIENT_ID` | not defined | The client ID for the Google OAuth2 application, used for logging in with a Google account. |\n| `GOOGLE_CLIENT_SECRET` | not defined | The client secret for the Google OAuth2 application, used for logging in with a Google account. |\n| `OAUTH2_REDIRECT_URI` | `http://localhost:3000/oauth2/{provider}/callback` | The redirect URI to use for OAuth2 logins. A `{provider}` placeholder can be used to have the provider name inserted dynamically. |\n\n## Authentication\n\nThe authentication flow for this API is based on *access* and *refresh*\ntokens.\n\nTo obtain an access and refresh token pair, the client must send a `POST`\nrequest to the `/api/tokens` endpoint, passing the username and password of\nthe user in a `Authorization` header, according to HTTP Basic Authentication\nscheme. The response includes the access and refresh tokens in the body. For\nadded security in single-page applications, the refresh token is also returned\nin a secure cookie.\n\nMost endpoints in this API are authenticated with the access token, passed\nin the `Authorization` header, using the `Bearer` scheme.\n\nAccess tokens are valid for 15 minutes (by default) from the time they are\nissued. When the access token is expired, the client can renew it using the\nrefresh token. For this, the client must send a `PUT` request to the\n`/api/tokens` endpoint, passing the expired access token in the body of the\nrequest, and the refresh token either in the body, or through the secure cookie\nsent when the tokens were requested. The response to this request will include\na new pair of tokens. Refresh tokens have a default validity period of 7 days,\nand can only be used to renew the access token they were returned with. An\nattempt to use a refresh token more than once is considered a possible attack,\nand will cause all existing tokens for the user to be revoked immediately as a\nmitigation measure.\n\nAll authentication failures are handled with a `401` status code in the\nresponse.\n\n### Password Resets\n\nThis API supports a password reset flow, to help users who forget their\npasswords regain access to their accounts. To issue a password reset request,\nthe client must send a `POST` request to `/api/tokens/reset`, passing the\nuser's email in the body of the request. The user will receive a password reset\nlink by email, based on the password reset URL entered in the configuration\nand a `token` query string paramter set to an email reset token, with a\nvalidity of 15 minutes.\n\nWhen the user clicks on the password reset link, the client application must\ncapture the `token` query string argument and send it in a `PUT` request to\n`/api/tokens/reset`, along with the new password chosen by the user.\n\n## Pagination\n\nAPI endpoints that return collections of resources, such as the users or posts,\nimplement pagination, and the client must use query string arguments to specify\nthe range of items to return.\n\nThe number of items to return is specified by the `limit` argument, which is\noptional. If not specified, the server sets the limit to a reasonable value for\nthe endpoint. If the limit is too large, the server may decide to use a lower\nvalue instead. The following example shows how to request the first 10 users:\n\n    http://localhost:5000/api/users?limit=10\n\nThe `offset` argument is used to specify the zero-based index of the first item\nto return. If not given, the server sets the offset to 0. The following example\nshows how to request the second page of users with a page size of 10:\n\n    http://localhost:5000/api/users?limit=10&offset=10\n\nSometimes paginating with the `offset` argument can be inconvenient, such as\nwith collections where new elements are not always inserted at the end of the\nlist. As an alternative to `offset`, the `after` argument can be used to set\nthe start item to the item after the one specified. This API supports `after`\nfor collections of blog posts, which are sorted by their publication time in\ndescending order, and for collections of users, which are sorted by their\nusername in ascending order. For blog posts, the `after` argument must be set\nto a date and time specification in ISO 8601 format, such as\n`2020-01-01T00:00:00Z`. For users, the `after` argument must be set to a\nstring. Examples:\n\n    http://localhost:5000/api/posts?limit=10&after=2021-01-01T00:00:00\n    http://localhost:5000/api/users/me/followers?limit=10&after=diana\n\nThe response body in a paginated request contains a `data` attribute that is\nset to the list of entities that are in the requested page. A `pagination`\nattribute is also included with `offset`, `limit`, `count` and `total`\nsub-attributes, which should enable the client to present pagination controls\nto the user.\n\n## Errors\n\nAll errors returned by this API use the following JSON structure:\n\n```json\n{\n    \"code\": <numeric error code>,\n    \"message\": <short error message>,\n    \"description\": <longer error description>,\n}\n```\n\nIn the case of schema validation errors, an `errors` property is also returned,\ncontaining a detailed list of validation errors found in the submitted request:\n\n```json\n{\n    \"code\": <error code>,\n    \"message\": <error message>,\n    \"description\": <error description>,\n    \"errors\": [ <error details>, ... ]\n}\n```",
+    "title": "Microblog API",
+    "version": "1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5000/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Tokens"
+    },
+    {
+      "name": "Users"
+    },
+    {
+      "name": "Posts"
+    }
+  ],
+  "paths": {
+    "/api/me": {
+      "get": {
+        "operationId": "users_me",
+        "parameters": [],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve the authenticated user",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "users_put",
+        "parameters": [],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Edit user information",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/feed": {
+      "get": {
+        "operationId": "posts_feed",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Retrieve the user's post feed",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedPost"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/users": {
+      "get": {
+        "operationId": "users_all",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve all users",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUser"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "users_new",
+        "parameters": [],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Register a new user",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/User"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/posts": {
+      "get": {
+        "operationId": "posts_all",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Retrieve all posts",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedPost"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "posts_new",
+        "parameters": [],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Create a new post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Post"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/tokens": {
+      "post": {
+        "operationId": "tokens_new",
+        "parameters": [],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Create new access and refresh tokens",
+        "description": "The refresh token is returned in the body of the request or as a hardened\ncookie, depending on configuration. A cookie should be used when the\nclient is running in an insecure environment such as a web browser, and\ncannot adequately protect the refresh token against unauthorized access.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "description": "Invalid username or password"
+          }
+        },
+        "security": [
+          {
+            "basic_auth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "tokens_refresh",
+        "parameters": [],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Refresh an access token",
+        "description": "The client has the option to pass the refresh token in the body of the\nrequest or in a `refresh_token` cookie. The access token must be passed in\nthe body of the request.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            },
+            "description": "Newly issued access and refresh tokens"
+          },
+          "401": {
+            "description": "Invalid access or refresh token"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Token"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "delete": {
+        "operationId": "tokens_revoke",
+        "parameters": [],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Revoke an access token",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "Token revoked"
+          },
+          "401": {
+            "description": "Invalid access token"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/tokens/reset": {
+      "post": {
+        "operationId": "tokens_reset",
+        "parameters": [],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Request a password reset token",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "Password reset email sent"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "put": {
+        "operationId": "tokens_password_reset",
+        "parameters": [],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Reset a user password",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "Password reset successful"
+          },
+          "400": {
+            "description": "Invalid reset token"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordReset"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/me/following": {
+      "get": {
+        "operationId": "users_my_following",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve the users the logged in user is following",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUser"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/me/followers": {
+      "get": {
+        "operationId": "users_my_followers",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve the followers of the logged in user",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUser"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/users/{id}": {
+      "get": {
+        "operationId": "users_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve a user by id",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/posts/{id}": {
+      "get": {
+        "operationId": "posts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Retrieve a post by id",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "Post not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "posts_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Edit a post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Not allowed to edit this post"
+          },
+          "404": {
+            "description": "Post not found"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "posts_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Delete a post",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Not allowed to delete the post"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/users/{username}": {
+      "get": {
+        "operationId": "users_get_by_username",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "username",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve a user by username",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/users/{id}/posts": {
+      "get": {
+        "operationId": "posts_user_all",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Posts"
+        ],
+        "summary": "Retrieve all posts from a user",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedPost"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/me/following/{id}": {
+      "get": {
+        "operationId": "users_is_followed",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Check if a user is followed",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "User is followed."
+          },
+          "404": {
+            "description": "User is not followed"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "users_follow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Follow a user",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "User followed successfully."
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "409": {
+            "description": "User already followed."
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "users_unfollow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Unfollow a user",
+        "responses": {
+          "204": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "User unfollowed successfully."
+          },
+          "404": {
+            "description": "User not found"
+          },
+          "409": {
+            "description": "User is not followed."
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/tokens/oauth2/{provider}": {
+      "get": {
+        "operationId": "tokens_oauth2_authorize",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Initiate OAuth2 authentication with a third-party provider",
+        "responses": {
+          "302": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Empty"
+                }
+              }
+            },
+            "description": "Redirect to OAuth2 provider's authentication page"
+          },
+          "404": {
+            "description": "Unknown OAuth2 provider"
+          }
+        }
+      },
+      "post": {
+        "operationId": "tokens_oauth2_new",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Create new access and refresh tokens with OAuth2 authentication",
+        "description": "The refresh token is returned in the body of the request or as a hardened\ncookie, depending on configuration. A cookie should be used when the\nclient is running in an insecure environment such as a web browser, and\ncannot adequately protect the refresh token against unauthorized access.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "description": "Invalid code or state"
+          },
+          "404": {
+            "description": "Unknown OAuth2 provider"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuth2"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/users/{id}/following": {
+      "get": {
+        "operationId": "users_following",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve the users this user is following",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUser"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    },
+    "/api/users/{id}/followers": {
+      "get": {
+        "operationId": "users_followers",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "integer"
+            },
+            "required": true
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "required": false
+          }
+        ],
+        "tags": [
+          "Users"
+        ],
+        "summary": "Retrieve the followers of the user",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUser"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        },
+        "security": [
+          {
+            "token_auth": []
+          }
+        ]
+      }
+    }
+  },
+  "openapi": "3.0.3",
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 64
+          },
+          "email": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 3
+          },
+          "has_password": {
+            "type": "boolean",
+            "readOnly": true
+          },
+          "avatar_url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "about_me": {
+            "type": "string",
+            "maxLength": 140,
+            "nullable": true
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "posts_url": {
+            "type": "string",
+            "format": "url",
+            "readOnly": true
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "username"
+        ]
+      },
+      "UpdateUserUpdate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 64
+          },
+          "email": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 3
+          },
+          "has_password": {
+            "type": "boolean",
+            "readOnly": true
+          },
+          "avatar_url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "about_me": {
+            "type": "string",
+            "maxLength": 140,
+            "nullable": true
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "posts_url": {
+            "type": "string",
+            "format": "url",
+            "readOnly": true
+          },
+          "old_password": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 3
+          }
+        }
+      },
+      "DateTimePagination": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "after": {
+            "type": "string",
+            "format": "date-time",
+            "writeOnly": true
+          },
+          "count": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "total": {
+            "type": "integer",
+            "readOnly": true
+          }
+        }
+      },
+      "Post": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "author": {
+            "readOnly": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "PaginatedPost": {
+        "type": "object",
+        "properties": {
+          "pagination": {
+            "$ref": "#/components/schemas/DateTimePagination"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Post"
+            }
+          }
+        }
+      },
+      "StringPagination": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "after": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "count": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "total": {
+            "type": "integer",
+            "readOnly": true
+          }
+        }
+      },
+      "PaginatedUser": {
+        "type": "object",
+        "properties": {
+          "pagination": {
+            "$ref": "#/components/schemas/StringPagination"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            }
+          }
+        }
+      },
+      "Token": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "refresh_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token"
+        ]
+      },
+      "Empty": {
+        "type": "object",
+        "properties": {}
+      },
+      "PasswordResetRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "PasswordReset": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "required": [
+          "new_password",
+          "token"
+        ]
+      },
+      "PostUpdate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "readOnly": true
+          },
+          "url": {
+            "type": "string",
+            "readOnly": true
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 280
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "author": {
+            "readOnly": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          }
+        }
+      },
+      "OAuth2": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "state"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "basic_auth": {
+        "type": "http",
+        "scheme": "basic"
+      },
+      "token_auth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

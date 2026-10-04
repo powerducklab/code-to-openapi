@@ -33,7 +33,7 @@ describe("axum modular module routers", () => {
   it("unwraps scoped Result<Json<T>> return types to a component $ref", async () => {
     const { doc } = await scan();
     const schema = doc.paths["/api/user"].get.responses["200"].content["application/json"].schema;
-    expect(schema).toEqual({ $ref: "#/components/schemas/User" });
-    expect(doc.components.schemas.User.properties.username).toEqual({ type: "string" });
+    expect(schema).toEqual({ $ref: "#/components/schemas/serialized_User" });
+    expect(doc.components.schemas.serialized_User.properties.username).toEqual({ type: "string" });
   });
 });

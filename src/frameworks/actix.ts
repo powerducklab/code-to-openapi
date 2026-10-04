@@ -1,3 +1,4 @@
+import {mergeResponseVariants} from "../core/response-variants.js";
 /**
  * actix-web framework pack (Rust, tree-sitter based).
  *
@@ -289,7 +290,11 @@ function collectResourceRoutes(
   for (const routeCall of findAll(root, (n) => n.type === "call_expression")) {
     if (chainMethod(routeCall) !== "route") continue;
     const fe = routeCall.namedChildren.find((c) => c.type === "field_expression");
-    const receiver = fe?.namedChildren[0];
+    let receiver = fe?.namedChildren[0];
+    let hops = 0;
+    while (receiver?.type === "call_expression" && calleeText(receiver) !== "web::resource" && hops++ < 50) {
+      receiver = receiver.namedChildren.find(c => c.type === "field_expression")?.namedChildren[0];
+    }
     if (!receiver || receiver.type !== "call_expression" || calleeText(receiver) !== "web::resource") {
       continue;
     }
@@ -467,6 +472,20 @@ function collectParameters(
     // Unknown extractors are left out rather than guessed.
   }
 
+  if (!requestBody) {
+    for (const parameter of functionParameters(fn)) {
+      const binding = parameter.namedChildren.find(c => c.type === "identifier")?.text;
+      if (!binding || !/\bBytes\b/.test(parameter.text)) continue;
+      for (const call of findAll(fn, n => n.type === "call_expression")) {
+        const type = deserializedJsonType(call);
+        const argument = childrenOfType(call, "arguments")[0]?.namedChildren[0]?.text;
+        if (type && (argument === binding || argument === `&${binding}`)) {
+          requestBody = { required: true, confidence: "high", content: [{ mediaType: "application/json", schema: rustTypeToSchema(type, model) }] };
+        }
+      }
+    }
+  }
+
   for (const name of pathParams) {
     if (!parameters.some((p) => p.in === "path" && p.name === name)) {
       addParam("path", name, { type: "string" }, "low", true);
@@ -518,7 +537,7 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
       const firstArg = args?.namedChildren[0];
       if (method === "json") {
         mediaType = "application/json";
-        schema = payloadSchema(firstArg, model);
+        schema = payloadSchema(firstArg, model, fn);
       } else if (method === "body") {
         mediaType = "text/plain";
         schema = { type: "string" };
@@ -572,8 +591,23 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
 }
 
 /** Best-effort payload schema from `.json(arg)`. */
-function payloadSchema(arg: TsNode | undefined, model: RustModelIndex): JsonSchema | undefined {
+function payloadSchema(arg: TsNode | undefined, model: RustModelIndex, fn: TsNode): JsonSchema | undefined {
   if (!arg) return undefined;
+  const access = /^([A-Za-z_][\w]*)(?:\.0|\.into_inner\(\))?$/.exec(arg.text);
+  if (access && !findAll(fn, n => n.type === "let_declaration").some(n => n.namedChildren[0]?.text === access[1])) {
+    const parameter = functionParameters(fn).find(p => p.namedChildren.find(c => c.type === "identifier")?.text === access[1]);
+    const type = parameter?.namedChildren.find(c => c.type === "generic_type");
+    const inner = type && extractorBase(type) === "Json" ? genericArgsOf(type)[0] : undefined;
+    if (inner) return rustTypeToSchema(inner, model);
+  }
+  if (arg.type === "identifier") {
+    const declarations = findAll(fn, n => n.type === "let_declaration" && n.namedChildren[0]?.text === arg.text);
+    if (declarations.length === 1) {
+      const call = findFirst(declarations[0]!, n => n.type === "call_expression");
+      const type = call ? deserializedJsonType(call) : undefined;
+      if (type) return rustTypeToSchema(type, model);
+    }
+  }
   if (arg.type === "struct_expression") {
     const name = arg.namedChildren.find((c) => c.type === "type_identifier")?.text;
     if (name) return ensureRustComponent(name, model) ?? undefined;
@@ -597,7 +631,7 @@ function mergeByStatus(responses: DiscoveredResponse[]): DiscoveredResponse[] {
       byStatus.set(r.statusCode, r);
       continue;
     }
-    if (!existing.content && r.content) existing.content = r.content;
+    byStatus.set(r.statusCode, mergeResponseVariants(existing, r));
   }
   return [...byStatus.values()];
 }
@@ -694,4 +728,11 @@ function detectServers(ctx: ScanContext): DiscoveredServer[] {
     }
   }
   return [...urls].map((url) => ({ url }));
+}
+
+function deserializedJsonType(call: TsNode): TsNode | undefined {
+  const generic = call.namedChildren.find(n => n.type === "generic_function");
+  const name = generic?.namedChildren.find(n => n.type === "scoped_identifier")?.text;
+  if (name !== "serde_json::from_slice" && name !== "serde_json::from_str") return undefined;
+  return generic?.namedChildren.find(n => n.type === "type_arguments")?.namedChildren[0];
 }

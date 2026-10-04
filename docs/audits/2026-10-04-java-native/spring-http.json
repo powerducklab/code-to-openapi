@@ -1,0 +1,1332 @@
+{
+  "scope": "Original Spring Petclinic app, isolated H2 database",
+  "completed": true,
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/api/oops",
+      "status": 500,
+      "mediaType": "application/problem+json",
+      "body": {
+        "detail": "An unexpected error occurred while processing your request",
+        "instance": "/petclinic/api/oops",
+        "status": 500,
+        "title": "NoResourceFoundException",
+        "type": "http://127.0.0.1:18763/petclinic/api/oops",
+        "timestamp": "2026-10-04T00:23:57.933893Z",
+        "schemaValidationErrors": []
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "firstName": "George",
+          "lastName": "Franklin",
+          "address": "110 W. Liberty St.",
+          "city": "Madison",
+          "telephone": "6085551023",
+          "pets": [
+            {
+              "name": "Leo",
+              "birthDate": "2010-09-07",
+              "type": {
+                "name": "cat",
+                "id": 1
+              },
+              "id": 1,
+              "visits": [],
+              "ownerId": 1
+            }
+          ],
+          "id": 1
+        },
+        {
+          "firstName": "Betty",
+          "lastName": "Davis",
+          "address": "638 Cardinal Ave.",
+          "city": "Sun Prairie",
+          "telephone": "6085551749",
+          "pets": [
+            {
+              "name": "Basil",
+              "birthDate": "2012-08-06",
+              "type": {
+                "name": "hamster",
+                "id": 6
+              },
+              "id": 2,
+              "visits": [],
+              "ownerId": 2
+            }
+          ],
+          "id": 2
+        },
+        {
+          "firstName": "Eduardo",
+          "lastName": "Rodriquez",
+          "address": "2693 Commerce St.",
+          "city": "McFarland",
+          "telephone": "6085558763",
+          "pets": [
+            {
+              "name": "Jewel",
+              "birthDate": "2010-03-07",
+              "type": {
+                "name": "dog",
+                "id": 2
+              },
+              "id": 4,
+              "visits": [],
+              "ownerId": 3
+            },
+            {
+              "name": "Rosy",
+              "birthDate": "2011-04-17",
+              "type": {
+                "name": "dog",
+                "id": 2
+              },
+              "id": 3,
+              "visits": [],
+              "ownerId": 3
+            }
+          ],
+          "id": 3
+        },
+        {
+          "firstName": "Harold",
+          "lastName": "Davis",
+          "address": "563 Friendly St.",
+          "city": "Windsor",
+          "telephone": "6085553198",
+          "pets": [
+            {
+              "name": "Iggy",
+              "birthDate": "2010-11-30",
+              "type": {
+                "name": "lizard",
+                "id": 3
+              },
+              "id": 5,
+              "visits": [],
+              "ownerId": 4
+            }
+          ],
+          "id": 4
+        },
+        {
+          "firstName": "Peter",
+          "lastName": "McTavish",
+          "address": "2387 S. Fair Way",
+          "city": "Madison",
+          "telephone": "6085552765",
+          "pets": [
+            {
+              "name": "George",
+              "birthDate": "2010-01-20",
+              "type": {
+                "name": "snake",
+                "id": 4
+              },
+              "id": 6,
+              "visits": [],
+              "ownerId": 5
+            }
+          ],
+          "id": 5
+        },
+        {
+          "firstName": "Jean",
+          "lastName": "Coleman",
+          "address": "105 N. Lake St.",
+          "city": "Monona",
+          "telephone": "6085552654",
+          "pets": [
+            {
+              "name": "Max",
+              "birthDate": "2012-09-04",
+              "type": {
+                "name": "cat",
+                "id": 1
+              },
+              "id": 8,
+              "visits": [
+                {
+                  "description": "neutered",
+                  "id": 3,
+                  "petId": 8,
+                  "date": "2013-01-03"
+                },
+                {
+                  "description": "rabies shot",
+                  "id": 2,
+                  "petId": 8,
+                  "date": "2013-01-02"
+                }
+              ],
+              "ownerId": 6
+            },
+            {
+              "name": "Samantha",
+              "birthDate": "2012-09-04",
+              "type": {
+                "name": "cat",
+                "id": 1
+              },
+              "id": 7,
+              "visits": [
+                {
+                  "description": "spayed",
+                  "id": 4,
+                  "petId": 7,
+                  "date": "2013-01-04"
+                },
+                {
+                  "description": "rabies shot",
+                  "id": 1,
+                  "petId": 7,
+                  "date": "2013-01-01"
+                }
+              ],
+              "ownerId": 6
+            }
+          ],
+          "id": 6
+        },
+        {
+          "firstName": "Jeff",
+          "lastName": "Black",
+          "address": "1450 Oak Blvd.",
+          "city": "Monona",
+          "telephone": "6085555387",
+          "pets": [
+            {
+              "name": "Lucky",
+              "birthDate": "2011-08-06",
+              "type": {
+                "name": "bird",
+                "id": 5
+              },
+              "id": 9,
+              "visits": [],
+              "ownerId": 7
+            }
+          ],
+          "id": 7
+        },
+        {
+          "firstName": "Maria",
+          "lastName": "Escobito",
+          "address": "345 Maple St.",
+          "city": "Madison",
+          "telephone": "6085557683",
+          "pets": [
+            {
+              "name": "Mulligan",
+              "birthDate": "2007-02-24",
+              "type": {
+                "name": "dog",
+                "id": 2
+              },
+              "id": 10,
+              "visits": [],
+              "ownerId": 8
+            }
+          ],
+          "id": 8
+        },
+        {
+          "firstName": "David",
+          "lastName": "Schroeder",
+          "address": "2749 Blackhawk Trail",
+          "city": "Madison",
+          "telephone": "6085559435",
+          "pets": [
+            {
+              "name": "Freddy",
+              "birthDate": "2010-03-09",
+              "type": {
+                "name": "bird",
+                "id": 5
+              },
+              "id": 11,
+              "visits": [],
+              "ownerId": 9
+            }
+          ],
+          "id": 9
+        },
+        {
+          "firstName": "Carlos",
+          "lastName": "Estaban",
+          "address": "2335 Independence La.",
+          "city": "Waunakee",
+          "telephone": "6085555487",
+          "pets": [
+            {
+              "name": "Lucky",
+              "birthDate": "2010-06-24",
+              "type": {
+                "name": "dog",
+                "id": 2
+              },
+              "id": 12,
+              "visits": [],
+              "ownerId": 10
+            },
+            {
+              "name": "Sly",
+              "birthDate": "2012-06-08",
+              "type": {
+                "name": "cat",
+                "id": 1
+              },
+              "id": 13,
+              "visits": [],
+              "ownerId": 10
+            }
+          ],
+          "id": 10
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/owners",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "content": [
+          {
+            "firstName": "George",
+            "lastName": "Franklin",
+            "address": "110 W. Liberty St.",
+            "city": "Madison",
+            "telephone": "6085551023",
+            "pets": [
+              {
+                "name": "Leo",
+                "birthDate": "2010-09-07",
+                "type": {
+                  "name": "cat",
+                  "id": 1
+                },
+                "id": 1,
+                "visits": [],
+                "ownerId": 1
+              }
+            ],
+            "id": 1
+          },
+          {
+            "firstName": "Betty",
+            "lastName": "Davis",
+            "address": "638 Cardinal Ave.",
+            "city": "Sun Prairie",
+            "telephone": "6085551749",
+            "pets": [
+              {
+                "name": "Basil",
+                "birthDate": "2012-08-06",
+                "type": {
+                  "name": "hamster",
+                  "id": 6
+                },
+                "id": 2,
+                "visits": [],
+                "ownerId": 2
+              }
+            ],
+            "id": 2
+          },
+          {
+            "firstName": "Eduardo",
+            "lastName": "Rodriquez",
+            "address": "2693 Commerce St.",
+            "city": "McFarland",
+            "telephone": "6085558763",
+            "pets": [
+              {
+                "name": "Jewel",
+                "birthDate": "2010-03-07",
+                "type": {
+                  "name": "dog",
+                  "id": 2
+                },
+                "id": 4,
+                "visits": [],
+                "ownerId": 3
+              },
+              {
+                "name": "Rosy",
+                "birthDate": "2011-04-17",
+                "type": {
+                  "name": "dog",
+                  "id": 2
+                },
+                "id": 3,
+                "visits": [],
+                "ownerId": 3
+              }
+            ],
+            "id": 3
+          },
+          {
+            "firstName": "Harold",
+            "lastName": "Davis",
+            "address": "563 Friendly St.",
+            "city": "Windsor",
+            "telephone": "6085553198",
+            "pets": [
+              {
+                "name": "Iggy",
+                "birthDate": "2010-11-30",
+                "type": {
+                  "name": "lizard",
+                  "id": 3
+                },
+                "id": 5,
+                "visits": [],
+                "ownerId": 4
+              }
+            ],
+            "id": 4
+          },
+          {
+            "firstName": "Peter",
+            "lastName": "McTavish",
+            "address": "2387 S. Fair Way",
+            "city": "Madison",
+            "telephone": "6085552765",
+            "pets": [
+              {
+                "name": "George",
+                "birthDate": "2010-01-20",
+                "type": {
+                  "name": "snake",
+                  "id": 4
+                },
+                "id": 6,
+                "visits": [],
+                "ownerId": 5
+              }
+            ],
+            "id": 5
+          },
+          {
+            "firstName": "Jean",
+            "lastName": "Coleman",
+            "address": "105 N. Lake St.",
+            "city": "Monona",
+            "telephone": "6085552654",
+            "pets": [
+              {
+                "name": "Max",
+                "birthDate": "2012-09-04",
+                "type": {
+                  "name": "cat",
+                  "id": 1
+                },
+                "id": 8,
+                "visits": [
+                  {
+                    "description": "neutered",
+                    "id": 3,
+                    "petId": 8,
+                    "date": "2013-01-03"
+                  },
+                  {
+                    "description": "rabies shot",
+                    "id": 2,
+                    "petId": 8,
+                    "date": "2013-01-02"
+                  }
+                ],
+                "ownerId": 6
+              },
+              {
+                "name": "Samantha",
+                "birthDate": "2012-09-04",
+                "type": {
+                  "name": "cat",
+                  "id": 1
+                },
+                "id": 7,
+                "visits": [
+                  {
+                    "description": "spayed",
+                    "id": 4,
+                    "petId": 7,
+                    "date": "2013-01-04"
+                  },
+                  {
+                    "description": "rabies shot",
+                    "id": 1,
+                    "petId": 7,
+                    "date": "2013-01-01"
+                  }
+                ],
+                "ownerId": 6
+              }
+            ],
+            "id": 6
+          },
+          {
+            "firstName": "Jeff",
+            "lastName": "Black",
+            "address": "1450 Oak Blvd.",
+            "city": "Monona",
+            "telephone": "6085555387",
+            "pets": [
+              {
+                "name": "Lucky",
+                "birthDate": "2011-08-06",
+                "type": {
+                  "name": "bird",
+                  "id": 5
+                },
+                "id": 9,
+                "visits": [],
+                "ownerId": 7
+              }
+            ],
+            "id": 7
+          },
+          {
+            "firstName": "Maria",
+            "lastName": "Escobito",
+            "address": "345 Maple St.",
+            "city": "Madison",
+            "telephone": "6085557683",
+            "pets": [
+              {
+                "name": "Mulligan",
+                "birthDate": "2007-02-24",
+                "type": {
+                  "name": "dog",
+                  "id": 2
+                },
+                "id": 10,
+                "visits": [],
+                "ownerId": 8
+              }
+            ],
+            "id": 8
+          },
+          {
+            "firstName": "David",
+            "lastName": "Schroeder",
+            "address": "2749 Blackhawk Trail",
+            "city": "Madison",
+            "telephone": "6085559435",
+            "pets": [
+              {
+                "name": "Freddy",
+                "birthDate": "2010-03-09",
+                "type": {
+                  "name": "bird",
+                  "id": 5
+                },
+                "id": 11,
+                "visits": [],
+                "ownerId": 9
+              }
+            ],
+            "id": 9
+          },
+          {
+            "firstName": "Carlos",
+            "lastName": "Estaban",
+            "address": "2335 Independence La.",
+            "city": "Waunakee",
+            "telephone": "6085555487",
+            "pets": [
+              {
+                "name": "Lucky",
+                "birthDate": "2010-06-24",
+                "type": {
+                  "name": "dog",
+                  "id": 2
+                },
+                "id": 12,
+                "visits": [],
+                "ownerId": 10
+              },
+              {
+                "name": "Sly",
+                "birthDate": "2012-06-08",
+                "type": {
+                  "name": "cat",
+                  "id": 1
+                },
+                "id": 13,
+                "visits": [],
+                "ownerId": 10
+              }
+            ],
+            "id": 10
+          }
+        ],
+        "page": 0,
+        "size": 20,
+        "totalElements": 10,
+        "totalPages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "firstName": "George",
+        "lastName": "Franklin",
+        "address": "110 W. Liberty St.",
+        "city": "Madison",
+        "telephone": "6085551023",
+        "pets": [
+          {
+            "name": "Leo",
+            "birthDate": "2010-09-07",
+            "type": {
+              "name": "cat",
+              "id": 1
+            },
+            "id": 1,
+            "visits": [],
+            "ownerId": 1
+          }
+        ],
+        "id": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/1/pets/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "name": "Leo",
+        "birthDate": "2010-09-07",
+        "type": {
+          "name": "cat",
+          "id": 1
+        },
+        "id": 1,
+        "visits": [],
+        "ownerId": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/pettypes",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "name": "bird",
+          "id": 5
+        },
+        {
+          "name": "cat",
+          "id": 1
+        },
+        {
+          "name": "dog",
+          "id": 2
+        },
+        {
+          "name": "hamster",
+          "id": 6
+        },
+        {
+          "name": "lizard",
+          "id": 3
+        },
+        {
+          "name": "snake",
+          "id": 4
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/pettypes/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "name": "cat",
+        "id": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/pets",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "name": "Leo",
+          "birthDate": "2010-09-07",
+          "type": {
+            "name": "cat",
+            "id": 1
+          },
+          "id": 1,
+          "visits": [],
+          "ownerId": 1
+        },
+        {
+          "name": "Basil",
+          "birthDate": "2012-08-06",
+          "type": {
+            "name": "hamster",
+            "id": 6
+          },
+          "id": 2,
+          "visits": [],
+          "ownerId": 2
+        },
+        {
+          "name": "Rosy",
+          "birthDate": "2011-04-17",
+          "type": {
+            "name": "dog",
+            "id": 2
+          },
+          "id": 3,
+          "visits": [],
+          "ownerId": 3
+        },
+        {
+          "name": "Jewel",
+          "birthDate": "2010-03-07",
+          "type": {
+            "name": "dog",
+            "id": 2
+          },
+          "id": 4,
+          "visits": [],
+          "ownerId": 3
+        },
+        {
+          "name": "Iggy",
+          "birthDate": "2010-11-30",
+          "type": {
+            "name": "lizard",
+            "id": 3
+          },
+          "id": 5,
+          "visits": [],
+          "ownerId": 4
+        },
+        {
+          "name": "George",
+          "birthDate": "2010-01-20",
+          "type": {
+            "name": "snake",
+            "id": 4
+          },
+          "id": 6,
+          "visits": [],
+          "ownerId": 5
+        },
+        {
+          "name": "Samantha",
+          "birthDate": "2012-09-04",
+          "type": {
+            "name": "cat",
+            "id": 1
+          },
+          "id": 7,
+          "visits": [
+            {
+              "description": "spayed",
+              "id": 4,
+              "petId": 7,
+              "date": "2013-01-04"
+            },
+            {
+              "description": "rabies shot",
+              "id": 1,
+              "petId": 7,
+              "date": "2013-01-01"
+            }
+          ],
+          "ownerId": 6
+        },
+        {
+          "name": "Max",
+          "birthDate": "2012-09-04",
+          "type": {
+            "name": "cat",
+            "id": 1
+          },
+          "id": 8,
+          "visits": [
+            {
+              "description": "neutered",
+              "id": 3,
+              "petId": 8,
+              "date": "2013-01-03"
+            },
+            {
+              "description": "rabies shot",
+              "id": 2,
+              "petId": 8,
+              "date": "2013-01-02"
+            }
+          ],
+          "ownerId": 6
+        },
+        {
+          "name": "Lucky",
+          "birthDate": "2011-08-06",
+          "type": {
+            "name": "bird",
+            "id": 5
+          },
+          "id": 9,
+          "visits": [],
+          "ownerId": 7
+        },
+        {
+          "name": "Mulligan",
+          "birthDate": "2007-02-24",
+          "type": {
+            "name": "dog",
+            "id": 2
+          },
+          "id": 10,
+          "visits": [],
+          "ownerId": 8
+        },
+        {
+          "name": "Freddy",
+          "birthDate": "2010-03-09",
+          "type": {
+            "name": "bird",
+            "id": 5
+          },
+          "id": 11,
+          "visits": [],
+          "ownerId": 9
+        },
+        {
+          "name": "Lucky",
+          "birthDate": "2010-06-24",
+          "type": {
+            "name": "dog",
+            "id": 2
+          },
+          "id": 12,
+          "visits": [],
+          "ownerId": 10
+        },
+        {
+          "name": "Sly",
+          "birthDate": "2012-06-08",
+          "type": {
+            "name": "cat",
+            "id": 1
+          },
+          "id": 13,
+          "visits": [],
+          "ownerId": 10
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/pets",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "content": [
+          {
+            "name": "Leo",
+            "birthDate": "2010-09-07",
+            "type": {
+              "name": "cat",
+              "id": 1
+            },
+            "id": 1,
+            "visits": [],
+            "ownerId": 1
+          },
+          {
+            "name": "Basil",
+            "birthDate": "2012-08-06",
+            "type": {
+              "name": "hamster",
+              "id": 6
+            },
+            "id": 2,
+            "visits": [],
+            "ownerId": 2
+          },
+          {
+            "name": "Rosy",
+            "birthDate": "2011-04-17",
+            "type": {
+              "name": "dog",
+              "id": 2
+            },
+            "id": 3,
+            "visits": [],
+            "ownerId": 3
+          },
+          {
+            "name": "Jewel",
+            "birthDate": "2010-03-07",
+            "type": {
+              "name": "dog",
+              "id": 2
+            },
+            "id": 4,
+            "visits": [],
+            "ownerId": 3
+          },
+          {
+            "name": "Iggy",
+            "birthDate": "2010-11-30",
+            "type": {
+              "name": "lizard",
+              "id": 3
+            },
+            "id": 5,
+            "visits": [],
+            "ownerId": 4
+          },
+          {
+            "name": "George",
+            "birthDate": "2010-01-20",
+            "type": {
+              "name": "snake",
+              "id": 4
+            },
+            "id": 6,
+            "visits": [],
+            "ownerId": 5
+          },
+          {
+            "name": "Samantha",
+            "birthDate": "2012-09-04",
+            "type": {
+              "name": "cat",
+              "id": 1
+            },
+            "id": 7,
+            "visits": [
+              {
+                "description": "spayed",
+                "id": 4,
+                "petId": 7,
+                "date": "2013-01-04"
+              },
+              {
+                "description": "rabies shot",
+                "id": 1,
+                "petId": 7,
+                "date": "2013-01-01"
+              }
+            ],
+            "ownerId": 6
+          },
+          {
+            "name": "Max",
+            "birthDate": "2012-09-04",
+            "type": {
+              "name": "cat",
+              "id": 1
+            },
+            "id": 8,
+            "visits": [
+              {
+                "description": "neutered",
+                "id": 3,
+                "petId": 8,
+                "date": "2013-01-03"
+              },
+              {
+                "description": "rabies shot",
+                "id": 2,
+                "petId": 8,
+                "date": "2013-01-02"
+              }
+            ],
+            "ownerId": 6
+          },
+          {
+            "name": "Lucky",
+            "birthDate": "2011-08-06",
+            "type": {
+              "name": "bird",
+              "id": 5
+            },
+            "id": 9,
+            "visits": [],
+            "ownerId": 7
+          },
+          {
+            "name": "Mulligan",
+            "birthDate": "2007-02-24",
+            "type": {
+              "name": "dog",
+              "id": 2
+            },
+            "id": 10,
+            "visits": [],
+            "ownerId": 8
+          },
+          {
+            "name": "Freddy",
+            "birthDate": "2010-03-09",
+            "type": {
+              "name": "bird",
+              "id": 5
+            },
+            "id": 11,
+            "visits": [],
+            "ownerId": 9
+          },
+          {
+            "name": "Lucky",
+            "birthDate": "2010-06-24",
+            "type": {
+              "name": "dog",
+              "id": 2
+            },
+            "id": 12,
+            "visits": [],
+            "ownerId": 10
+          },
+          {
+            "name": "Sly",
+            "birthDate": "2012-06-08",
+            "type": {
+              "name": "cat",
+              "id": 1
+            },
+            "id": 13,
+            "visits": [],
+            "ownerId": 10
+          }
+        ],
+        "page": 0,
+        "size": 20,
+        "totalElements": 13,
+        "totalPages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/pets/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "name": "Leo",
+        "birthDate": "2010-09-07",
+        "type": {
+          "name": "cat",
+          "id": 1
+        },
+        "id": 1,
+        "visits": [],
+        "ownerId": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/visits",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "description": "rabies shot",
+          "id": 1,
+          "petId": 7,
+          "date": "2013-01-01"
+        },
+        {
+          "description": "rabies shot",
+          "id": 2,
+          "petId": 8,
+          "date": "2013-01-02"
+        },
+        {
+          "description": "neutered",
+          "id": 3,
+          "petId": 8,
+          "date": "2013-01-03"
+        },
+        {
+          "description": "spayed",
+          "id": 4,
+          "petId": 7,
+          "date": "2013-01-04"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/visits/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "description": "rabies shot",
+        "id": 1,
+        "petId": 7,
+        "date": "2013-01-01"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/specialties",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "id": 3,
+          "name": "dentistry"
+        },
+        {
+          "id": 1,
+          "name": "radiology"
+        },
+        {
+          "id": 2,
+          "name": "surgery"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/specialties/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "id": 1,
+        "name": "radiology"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/vets",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": [
+        {
+          "firstName": "James",
+          "lastName": "Carter",
+          "specialties": [],
+          "id": 1
+        },
+        {
+          "firstName": "Helen",
+          "lastName": "Leary",
+          "specialties": [
+            {
+              "id": 1,
+              "name": "radiology"
+            }
+          ],
+          "id": 2
+        },
+        {
+          "firstName": "Linda",
+          "lastName": "Douglas",
+          "specialties": [
+            {
+              "id": 3,
+              "name": "dentistry"
+            },
+            {
+              "id": 2,
+              "name": "surgery"
+            }
+          ],
+          "id": 3
+        },
+        {
+          "firstName": "Rafael",
+          "lastName": "Ortega",
+          "specialties": [
+            {
+              "id": 2,
+              "name": "surgery"
+            }
+          ],
+          "id": 4
+        },
+        {
+          "firstName": "Henry",
+          "lastName": "Stevens",
+          "specialties": [
+            {
+              "id": 1,
+              "name": "radiology"
+            }
+          ],
+          "id": 5
+        },
+        {
+          "firstName": "Sharon",
+          "lastName": "Jenkins",
+          "specialties": [],
+          "id": 6
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/vets/1",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "firstName": "James",
+        "lastName": "Carter",
+        "specialties": [],
+        "id": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/999999",
+      "status": 404,
+      "mediaType": null,
+      "body": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/not-an-integer",
+      "status": 500,
+      "mediaType": "application/problem+json",
+      "body": {
+        "detail": "An unexpected error occurred while processing your request",
+        "instance": "/petclinic/api/owners/not-an-integer",
+        "status": 500,
+        "title": "MethodArgumentTypeMismatchException",
+        "type": "http://127.0.0.1:18763/petclinic/api/owners/not-an-integer",
+        "timestamp": "2026-10-04T00:23:58.052457Z",
+        "schemaValidationErrors": []
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/owners",
+      "status": 400,
+      "mediaType": "application/problem+json",
+      "body": {
+        "detail": "The request contains invalid or missing parameters",
+        "instance": "/petclinic/api/owners",
+        "status": 400,
+        "title": "MethodArgumentNotValidException",
+        "type": "http://127.0.0.1:18763/petclinic/api/owners",
+        "timestamp": "2026-10-04T00:23:58.124894Z",
+        "schemaValidationErrors": [
+          {
+            "message": "Field 'address' \u4e0d\u80fd\u4e3anull (rejected value: null)",
+            "field": "address",
+            "defaultMessage": "\u4e0d\u80fd\u4e3anull",
+            "rejectedValue": "null"
+          },
+          {
+            "message": "Field 'city' \u4e0d\u80fd\u4e3anull (rejected value: null)",
+            "field": "city",
+            "defaultMessage": "\u4e0d\u80fd\u4e3anull",
+            "rejectedValue": "null"
+          },
+          {
+            "message": "Field 'lastName' \u4e0d\u80fd\u4e3anull (rejected value: null)",
+            "field": "lastName",
+            "defaultMessage": "\u4e0d\u80fd\u4e3anull",
+            "rejectedValue": "null"
+          },
+          {
+            "message": "Field 'telephone' \u4e0d\u80fd\u4e3anull (rejected value: null)",
+            "field": "telephone",
+            "defaultMessage": "\u4e0d\u80fd\u4e3anull",
+            "rejectedValue": "null"
+          },
+          {
+            "message": "Field 'firstName' \u4e0d\u80fd\u4e3anull (rejected value: null)",
+            "field": "firstName",
+            "defaultMessage": "\u4e0d\u80fd\u4e3anull",
+            "rejectedValue": "null"
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/owners",
+      "status": 201,
+      "mediaType": "application/json",
+      "body": {
+        "firstName": "Audit",
+        "lastName": "Example",
+        "address": "123 Test Street",
+        "city": "Madison",
+        "telephone": "1234567890",
+        "pets": [],
+        "id": 11
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/11",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "firstName": "Audit",
+        "lastName": "Example",
+        "address": "123 Test Street",
+        "city": "Madison",
+        "telephone": "1234567890",
+        "pets": [],
+        "id": 11
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/api/owners/11",
+      "status": 204,
+      "mediaType": "application/json",
+      "body": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/11",
+      "status": 200,
+      "mediaType": "application/json",
+      "body": {
+        "firstName": "Audit",
+        "lastName": "Example",
+        "address": "123 Test Street",
+        "city": "Test City",
+        "telephone": "1234567890",
+        "pets": [],
+        "id": 11
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/owners/11",
+      "status": 204,
+      "mediaType": null,
+      "body": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/owners/11",
+      "status": 404,
+      "mediaType": null,
+      "body": ""
+    }
+  ]
+}

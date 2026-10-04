@@ -6,3 +6,10 @@ coverage
 .vscode
 discovered.openapi.json
 .powerduck
+__pycache__/
+*.pyc
+bin/
+obj/
+target/
+.gradle/
+build/

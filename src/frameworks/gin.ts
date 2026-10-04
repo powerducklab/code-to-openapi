@@ -9,6 +9,9 @@
  *  - everything unproven is recorded as an explicit gap, never invented.
  */
 
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
+import {mergeResponseVariants} from "../core/response-variants.js";
+
 import type {
   Confidence,
   ExtractionResult,
@@ -25,6 +28,7 @@ import {
   buildGoModelIndex,
   ensureGoComponent,
   goTypeToSchema,
+  goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
@@ -143,19 +147,17 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
 
     // Empty slice literal: []Type{} -> array of $ref.
     if (typeNode && (typeNode.type === "slice_type" || typeNode.type === "array_type")) {
-      const inner = typeNode.namedChildren[0];
-      if (inner) return { type: "array", items: goTypeToSchema(inner, index, depth + 1) };
-      return { type: "array", items: {} };
+      return goConstructedTypeToSchema(typeNode, index);
     }
 
-    // Named struct literal: Type{} or pkg.Type{} -> $ref (or inline for
-    // anonymous structs). The package qualifier is stripped before lookup.
+    // Resolve the package qualifier before choosing a component; equal short
+    // names in different packages must not share response fields.
     const typeText = typeNode?.text ?? "";
     const baseName = typeText.includes(".") ? typeText.split(".").pop() ?? typeText : typeText;
     if (typeNode && (typeNode.type === "type_identifier" || typeNode.type === "selector_expression" || typeNode.type === "qualified_type") && baseName) {
       if (index.byName.has(baseName)) {
-        ensureGoComponent(baseName, index);
-        return { $ref: `#/components/schemas/${baseName}` };
+        const schema = goTypeToSchema(typeNode, index, depth + 1);
+        return Object.keys(schema).length ? schema : null;
       }
     }
 
@@ -222,6 +224,7 @@ function analyzeHandler(
   fn: GoFunction,
   analysis: GoAnalysis,
   modelIndex: GoModelIndex,
+  inputModel: GoModelIndex,
   routeParams: string[],
 ): {
   parameters: RouteParameter[];
@@ -238,6 +241,7 @@ function analyzeHandler(
   let requestBody: RouteCandidate["requestBody"];
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
   let multipartField: string | null = null;
+  const formFields: Record<string, JsonSchema> = {};
 
   // Adapter wrappers around *gin.Context, e.g. `appG := app.Gin{C: c}`. Their
   // methods are resolved below when they delegate to c.JSON.
@@ -276,7 +280,9 @@ function analyzeHandler(
   }
 
   const addResponse = (status: string, response: RouteCandidate["responses"][number]) => {
-    responseStatus.set(status, response);
+    if (status === "default") gaps.add("response-unknown");
+    const previous = responseStatus.get(status);
+    responseStatus.set(status, previous ? mergeResponseVariants(previous, response) : response);
   };
 
   const referencedVarType = (arg: TsNode | undefined): TsNode | null => {
@@ -291,6 +297,9 @@ function analyzeHandler(
     let isSse = false;
 
     for (const call of calls) {
+      let owner = call.parent;
+      while (owner && owner.id !== body.id && owner.type !== "func_literal") owner = owner.parent;
+      if (owner?.type === "func_literal") continue;
       const sel = selectorCall(call);
       if (!sel) continue;
       // Allow chained context calls such as c.Request.FormFile("image").
@@ -338,20 +347,11 @@ function analyzeHandler(
         continue;
       }
 
-      // c.PostForm / c.DefaultPostForm read ad-hoc form fields. With no bound
-      // struct they cannot form a grouped requestBody, so they surface as
-      // string query parameters, matching c.Query.
+      // PostForm reads the entity body, never the URL query string.
       if (method === "PostForm" || method === "DefaultPostForm") {
         const name = literalString(args[0]);
-        if (name && !parameters.some((p) => p.name === name)) {
-          parameters.push({
-            name,
-            in: "query",
-            required: false,
-            schema: { type: "string" },
-            confidence: "high",
-          });
-        }
+        if (name) formFields[name] = {type: "string"};
+        else gaps.add("body-schema-unknown");
         continue;
       }
 
@@ -393,13 +393,13 @@ function analyzeHandler(
       }
 
       if (method === "Redirect") {
-        const status = statusCode(args[0]) ?? "302";
+        const status = statusCode(args[0]) ?? "default";
         addResponse(status, { statusCode: status, description: "", confidence: "high" });
         continue;
       }
 
       if (method === "Data") {
-        const status = statusCode(args[0]) ?? "200";
+        const status = statusCode(args[0]) ?? "default";
         const mediaType = literalString(args[1]);
         if (mediaType) {
           const binary = mediaType !== "application/json";
@@ -423,10 +423,8 @@ function analyzeHandler(
       }
 
       if (method === "AbortWithStatus") {
-        const status = statusCode(args[0]);
-        if (status) {
-          addResponse(status, { statusCode: status, description: "", confidence: "high" });
-        }
+        const status = statusCode(args[0]) ?? "default";
+        addResponse(status, {statusCode: status, description: "", confidence: "high"});
         continue;
       }
 
@@ -435,8 +433,8 @@ function analyzeHandler(
         if (typeNode) {
           const schema =
             typeNode.type === "type_identifier"
-              ? goTypeToSchema(typeNode, modelIndex)
-              : goTypeToSchema(typeNode, modelIndex);
+              ? goTypeToSchema(typeNode, inputModel)
+              : goTypeToSchema(typeNode, inputModel);
           if (typeNode.type === "struct_type") {
             // Anonymous struct: inline.
           }
@@ -496,7 +494,7 @@ function analyzeHandler(
       ) {
         const statusArg = method === "AbortWithStatusJSON" ? args[0] : args[0];
         const payloadArg = method === "AbortWithStatusJSON" ? args[1] : args[1];
-        const status = statusCode(statusArg) ?? "200";
+        const status = statusCode(statusArg) ?? "default";
         let schema: JsonSchema | null = null;
         const payload = payloadArg;
         if (payload) {
@@ -524,10 +522,8 @@ function analyzeHandler(
       }
 
       if (method === "Status") {
-        const status = statusCode(args[0]);
-        if (status) {
-          addResponse(status, { statusCode: status, description: "", confidence: "high" });
-        }
+        const status = statusCode(args[0]) ?? "default";
+        addResponse(status, {statusCode: status, description: "", confidence: "high"});
         continue;
       }
     }
@@ -571,6 +567,20 @@ function analyzeHandler(
     };
   }
 
+  if (Object.keys(formFields).length && !requestBody && !multipartField) {
+    requestBody = {
+      required: false, confidence: "medium",
+      content: ["application/x-www-form-urlencoded", "multipart/form-data"].map(mediaType => ({
+        mediaType, schema: {type: "object", properties: formFields}, confidence: "medium" as const,
+      })),
+    };
+  } else if (Object.keys(formFields).length && requestBody) {
+    // Additional form reads may coexist with bound bodies; never discard them.
+    const content = requestBody.content.find(media => media.mediaType === "application/x-www-form-urlencoded");
+    if (content?.schema?.properties) content.schema = {...content.schema, properties: {...formFields, ...content.schema.properties}};
+    else gaps.add("body-schema-unknown");
+  }
+
   // Multipart upload detected via c.FormFile / c.Request.FormFile.
   if (multipartField && !requestBody) {
     requestBody = {
@@ -581,7 +591,7 @@ function analyzeHandler(
           mediaType: "multipart/form-data",
           schema: {
             type: "object",
-            properties: { [multipartField]: { type: "string", format: "binary" } },
+            properties: { ...formFields, [multipartField]: { type: "string", format: "binary" } },
             required: [multipartField],
           },
           confidence: "high",
@@ -653,7 +663,7 @@ function resolveWrapperResponse(
     const idx = paramNames.indexOf(statusExpr.text);
     if (idx >= 0) resolvedStatus = statusCode(callArgs[idx]) ?? null;
   }
-  if (!resolvedStatus) resolvedStatus = statusCode(statusExpr) ?? "200";
+  if (!resolvedStatus) resolvedStatus = statusCode(statusExpr) ?? "default";
 
   let schema: JsonSchema | null = null;
   if (payloadExpr) {
@@ -661,8 +671,7 @@ function resolveWrapperResponse(
       payloadExpr.type === "composite_literal" ? payloadExpr : findFirst(payloadExpr, (n) => n.type === "composite_literal");
     const typeNode = composite?.namedChildren[0];
     if (composite && typeNode?.type === "type_identifier" && modelIndex.byName.has(typeNode.text)) {
-      ensureGoComponent(typeNode.text, modelIndex);
-      schema = { $ref: `#/components/schemas/${typeNode.text}` };
+      schema = goTypeToSchema(typeNode, modelIndex);
     } else {
       schema = literalSchema(payloadExpr, modelIndex);
     }
@@ -787,6 +796,7 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel: GoModelIndex = {...modelIndex, input: true, validated: true, validationTag: "binding", components: new Map()};
     const servers = new Set<string>();
 
     for (const file of analysis.files.values()) {
@@ -970,7 +980,7 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
 
             for (const method of methods) {
               const analyzed = handlerFn
-                ? analyzeHandler(handlerFn, analysis, modelIndex, converted.params)
+                ? analyzeHandler(handlerFn, analysis, modelIndex, inputModel, converted.params)
                 : {
                     parameters: converted.params.map((name) => ({
                       name,
@@ -1053,13 +1063,12 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
       }
     }
 
+    const inputs = namespaceComponents(inputModel.components, new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]), "input");
+    for (const route of routes) if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, inputs.names);
     return {
       routes: dedupe(routes),
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({
-        name,
-        schema,
-      })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({name, schema})), ...inputs.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };

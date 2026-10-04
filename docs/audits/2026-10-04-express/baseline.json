@@ -1,0 +1,1290 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Express native routes and original mapping samples",
+    "version": "1"
+  },
+  "paths": {
+    "/api/tags": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/articles": {
+      "get": {
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "favorited",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "articles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "tagList": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "favorited": {
+                            "type": "boolean"
+                          },
+                          "favoritesCount": {
+                            "type": "number"
+                          },
+                          "author": {
+                            "type": "object",
+                            "properties": {
+                              "username": {
+                                "type": "string"
+                              },
+                              "bio": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "image": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "following": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "username",
+                              "bio",
+                              "image",
+                              "following"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "slug",
+                          "title",
+                          "description",
+                          "body",
+                          "tagList",
+                          "createdAt",
+                          "updatedAt",
+                          "favorited",
+                          "favoritesCount",
+                          "author"
+                        ]
+                      }
+                    },
+                    "articlesCount": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "articles",
+                    "articlesCount"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "number"
+                        },
+                        "author": {
+                          "type": "object",
+                          "properties": {
+                            "username": {
+                              "type": "string"
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "body",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt",
+                        "favorited",
+                        "favoritesCount",
+                        "author"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/feed": {
+      "get": {
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "articles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "tagList": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "favorited": {
+                            "type": "boolean"
+                          },
+                          "favoritesCount": {
+                            "type": "number"
+                          },
+                          "author": {
+                            "type": "object",
+                            "properties": {
+                              "username": {
+                                "type": "string"
+                              },
+                              "bio": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "image": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "following": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "username",
+                              "bio",
+                              "image",
+                              "following"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "slug",
+                          "title",
+                          "description",
+                          "body",
+                          "tagList",
+                          "createdAt",
+                          "updatedAt",
+                          "favorited",
+                          "favoritesCount",
+                          "author"
+                        ]
+                      }
+                    },
+                    "articlesCount": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "articles",
+                    "articlesCount"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "number"
+                        },
+                        "author": {
+                          "type": "object",
+                          "properties": {
+                            "username": {
+                              "type": "string"
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "body",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt",
+                        "favorited",
+                        "favoritesCount",
+                        "author"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "number"
+                        },
+                        "author": {
+                          "type": "object",
+                          "properties": {
+                            "username": {
+                              "type": "string"
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "body",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt",
+                        "favorited",
+                        "favoritesCount",
+                        "author"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Original handler success"
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/comments": {
+      "get": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/articles/{slug}/comments/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/favorite": {
+      "post": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "number"
+                        },
+                        "author": {
+                          "type": "object",
+                          "properties": {
+                            "username": {
+                              "type": "string"
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "body",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt",
+                        "favorited",
+                        "favoritesCount",
+                        "author"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "number"
+                        },
+                        "author": {
+                          "type": "object",
+                          "properties": {
+                            "username": {
+                              "type": "string"
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "body",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt",
+                        "favorited",
+                        "favoritesCount",
+                        "author"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{username}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{username}/follow": {
+      "post": {
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "number"
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "username",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/login": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "email": {
+                          "type": "string"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "email",
+                        "username",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "number"
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "username",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Original handler success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "number"
+                        },
+                        "email": {
+                          "type": "string"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "email",
+                        "username",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

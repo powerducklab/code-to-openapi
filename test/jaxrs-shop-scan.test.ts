@@ -67,9 +67,10 @@ describe("JAX-RS shared pack (Jakarta + javax)", () => {
     expect(create.responses["201"].content["application/json"].schema).toEqual({
       $ref: "#/components/schemas/Product",
     });
-    expect(create.requestBody.content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/CreateProductRequest",
-    });
+    expect(create.requestBody.required ?? false).toBe(false);
+    expect(create.requestBody.content["application/json"].schema.anyOf).toEqual([
+      { $ref: "#/components/schemas/CreateProductRequest" }, { type: "null" },
+    ]);
     const dto = doc.components.schemas.CreateProductRequest;
     expect(dto.properties.name).toMatchObject({ type: "string" });
     expect(dto.required).toContain("name");
@@ -79,7 +80,8 @@ describe("JAX-RS shared pack (Jakarta + javax)", () => {
     expect(update.responses["200"].content["application/json"].schema).toEqual({
       $ref: "#/components/schemas/Product",
     });
-    expect(update.requestBody.content["application/json"].schema).toEqual({
+    expect(update.requestBody.required ?? false).toBe(false);
+    expect(update.requestBody.content["application/json"].schema.anyOf).toContainEqual({
       $ref: "#/components/schemas/CreateProductRequest",
     });
 

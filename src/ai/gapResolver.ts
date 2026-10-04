@@ -25,6 +25,19 @@ export interface GapRequest {
     framework: string;
     language: string;
   };
+  /**
+   * Reusable schemas the deterministic pass already extracted as components.
+   * The model may reference these by exact $ref instead of re-describing a
+   * model; only names present here are accepted by the response parser.
+   */
+  componentCatalog?: ComponentCatalogEntry[];
+}
+
+/** Compact component summary sized to fit a small per-route prompt. */
+export interface ComponentCatalogEntry {
+  name: string;
+  /** Top-level property names (object components only), capped upstream. */
+  properties?: string[];
 }
 
 export interface GapResolution {
@@ -63,6 +76,7 @@ export function gapCacheKey(request: GapRequest, promptVersion: string): string 
         gaps: request.gaps,
         source: request.handlerSource,
         known: request.known,
+        catalog: (request.componentCatalog ?? []).map((entry) => entry.name),
       }),
     )
     .digest("hex");

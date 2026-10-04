@@ -1,4 +1,4 @@
-import type { Confidence, GapCode } from "./types.js";
+import type { Confidence, GapCode, JsonSchema } from "./types.js";
 import type { RouteCandidate } from "./types.js";
 
 /**
@@ -10,16 +10,103 @@ import type { RouteCandidate } from "./types.js";
  * The gate never invents content: a missing shape stays a gap and is either
  * sent to the AI resolver or surfaced in the scan report.
  */
-function hasUnknownSchema(schema: unknown): boolean {
-  if (!schema || typeof schema !== "object") return false;
-  const value = schema as Record<string, unknown>;
-  if (!Object.keys(value).length) return true;
-  if (value.properties && Object.values(value.properties as object).some(hasUnknownSchema)) return true;
-  if (value.items && hasUnknownSchema(value.items)) return true;
-  return ["anyOf", "oneOf", "allOf"].some(key => Array.isArray(value[key]) && (value[key] as unknown[]).some(hasUnknownSchema));
+const SCHEMA_ANNOTATIONS = new Set(["title", "description", "default", "examples", "example", "readOnly", "writeOnly", "deprecated", "$comment", "$id", "$schema"]);
+
+export function hasUnknownSchema(schema: unknown, components?: ReadonlyMap<string, JsonSchema>): boolean {
+  if (schema === undefined || schema === null) return true;
+  return walkUnknown(schema, components, new Set<object>());
 }
 
-export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate {
+// Iterative depth-first check sharing one cycle set, so self-referential
+// branch schemas cannot recurse forever across nested evaluations.
+function walkUnknown(
+  start: unknown,
+  components: ReadonlyMap<string, JsonSchema> | undefined,
+  rootSeen: Set<object>,
+): boolean {
+  const pending: unknown[] = [start];
+  const seen = rootSeen;
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const value = current as Record<string, unknown>;
+    if (!Object.keys(value).some(key => !SCHEMA_ANNOTATIONS.has(key) && !key.startsWith("x-"))) return true;
+    if (components && typeof value.$ref === "string" && value.$ref.startsWith("#/components/schemas/")) {
+      const name = value.$ref.slice("#/components/schemas/".length).replace(/~1/g, "/").replace(/~0/g, "~");
+      const target = components.get(name);
+      if (!target) return true;
+      pending.push(target);
+    }
+    const types = Array.isArray(value.type) ? value.type : [value.type];
+    if (types.includes("array") && value.items === undefined && value.maxItems !== 0 &&
+        !["anyOf", "oneOf", "allOf"].some(key => Array.isArray(value[key]))) {
+      const prefix = Array.isArray(value.prefixItems) ? value.prefixItems.length : 0;
+      if (!prefix || typeof value.maxItems !== "number" || value.maxItems > prefix) return true;
+    }
+    if (value.properties) for (const item of Object.values(value.properties as object)) pending.push(item);
+    // An array element schema of {} means the element type is genuinely
+    // unknown, so it stays a gap (unlike additionalProperties: {}, which is
+    // the standard "any extra property allowed" assertion).
+    if (value.items) {
+      if (Array.isArray(value.items)) for (const item of value.items as unknown[]) pending.push(item);
+      else pending.push(value.items);
+    }
+    for (const key of ["contains", "propertyNames", "not", "if", "then", "else"]) {
+      if (value[key] && typeof value[key] === "object" &&
+          Object.keys(value[key] as object).length > 0) {
+        pending.push(value[key]);
+      }
+    }
+    // additionalProperties / unevaluatedProperties of {} (or true) mean
+    // "unconstrained extra values allowed" — a complete assertion, not an
+    // unknown shape; only non-empty constraint schemas carry gated evidence.
+    for (const key of ["additionalProperties", "unevaluatedProperties"]) {
+      const slot = value[key];
+      if (slot && typeof slot === "object" && Object.keys(slot as object).length > 0) {
+        pending.push(slot);
+      }
+    }
+    // Pattern-matched properties with an empty schema likewise mean "any
+    // value for matching keys"; only non-empty value schemas are gated.
+    if (value.patternProperties && typeof value.patternProperties === "object") {
+      for (const item of Object.values(value.patternProperties as object)) {
+        if (item && typeof item === "object" && Object.keys(item as object).length > 0) {
+          pending.push(item);
+        }
+      }
+    }
+    if (value.dependentSchemas && typeof value.dependentSchemas === "object") {
+      for (const item of Object.values(value.dependentSchemas as object)) {
+        if (item && typeof item === "object" && Object.keys(item as object).length > 0) {
+          pending.push(item);
+        }
+      }
+    }
+    // anyOf/oneOf describe alternatives: if at least one branch is fully
+    // typed, consumers already have a concrete shape, so a weak sibling
+    // branch (for example the unauthenticated null variant) is not an
+    // unknown gap. allOf still requires every branch to be complete.
+    for (const key of ["anyOf", "oneOf"] as const) {
+      const branches = value[key];
+      if (Array.isArray(branches) && branches.length > 0) {
+        const someTyped = branches.some(
+          (branch) =>
+            branch &&
+            typeof branch === "object" &&
+            !walkUnknown(branch, components, new Set(seen)),
+        );
+        if (!someTyped) for (const item of branches) pending.push(item);
+      }
+    }
+    for (const key of ["allOf", "prefixItems"]) {
+      if (Array.isArray(value[key])) for (const item of value[key] as unknown[]) pending.push(item);
+    }
+  }
+  return false;
+}
+
+export function applyCompletenessGate(candidate: RouteCandidate, components?: ReadonlyMap<string, JsonSchema>): RouteCandidate {
   const gaps = new Set<GapCode>(candidate.gaps);
   const templateParams = new Set(
     [...candidate.fullPath!.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!),
@@ -51,7 +138,7 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
     declaredPath.add(name);
   }
 
-  if (candidate.requestBody && candidate.requestBody.content.length === 0) {
+  if (candidate.requestBody && (candidate.requestBody.content.length === 0 || candidate.requestBody.content.some(media => hasUnknownSchema(media.schema, components)))) {
     gaps.add("body-schema-unknown");
   }
 
@@ -61,7 +148,7 @@ export function applyCompletenessGate(candidate: RouteCandidate): RouteCandidate
     if (!r.content) return true;
     return r.content.every((m) => {
       if (m.schema || m.itemSchema) {
-        if (hasUnknownSchema(m.itemSchema ?? m.schema)) gaps.add(m.mediaType === "text/event-stream" ? "sse-events-unknown" : "response-schema-unknown");
+        if (hasUnknownSchema(m.itemSchema ?? m.schema, components)) gaps.add(m.mediaType === "text/event-stream" ? "sse-events-unknown" : "response-schema-unknown");
         return true;
       }
       // SSE event payloads have their own dedicated gap code.

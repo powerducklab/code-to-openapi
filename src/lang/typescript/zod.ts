@@ -32,6 +32,7 @@ function callChain(ts: any, node: any): { base: any; steps: ChainStep[] } | null
 }
 
 function literalValue(ts: any, node: any): unknown {
+  if (!node) return undefined;
   if (ts.isStringLiteralLike(node)) return node.text;
   if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
   if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
@@ -52,6 +53,7 @@ export interface ZodResolveContext {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resolveSchemaBinding: (name: string, from?: any) => any | null;
   depth?: number;
+  mode?: "input" | "output";
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,7 +128,7 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
             const name = propertyNameText(ts, member.name);
             if (name === null) continue;
             const child = convertZodNode(member.initializer, { ...rc, depth: depth + 1 });
-            if (!child) continue;
+            if (!child) { properties[name] = {}; continue; }
             const isOptional = child["x-optional"] === true;
             delete child["x-optional"];
             properties[name] = child;
@@ -185,9 +187,8 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
         const arr = step.name === "union" ? arg0 : step.args[1];
         if (arr && ts.isArrayLiteralExpression(arr)) {
           const variants = arr.elements
-            .map((el: any) => convertZodNode(el, { ...rc, depth: depth + 1 }))
-            .filter(Boolean);
-          schema = { oneOf: variants };
+            .map((el: any) => convertZodNode(el, { ...rc, depth: depth + 1 }) ?? {});
+          schema = { anyOf: variants };
         }
         break;
       }
@@ -221,11 +222,10 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
             ...((other as any).properties ?? {}),
           };
           const required = [
-            ...new Set([
-              ...(((schema as any).required as string[] | undefined) ?? []),
-              ...(((other as any).required as string[] | undefined) ?? []),
-            ]),
+            ...(((schema as any).required as string[] | undefined) ?? []).filter(name => !(name in ((other as any).properties ?? {}))),
+            ...(((other as any).required as string[] | undefined) ?? []),
           ];
+          delete schema.required;
           schema = {
             ...schema,
             ...(Object.keys(properties).length ? { properties } : {}),
@@ -256,6 +256,7 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
           const required = ((schema.required as string[] | undefined) ?? []).filter(
             (key) => key in properties,
           );
+          delete schema.required;
           schema = {
             ...schema,
             properties,
@@ -281,7 +282,10 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
       case "length": {
         const num = literalValue(ts, arg0);
         if (typeof num === "number") {
-          if (schema.type === "string")
+          if (step.name === "length") {
+            if (schema.type === "string") { schema.minLength = num; schema.maxLength = num; }
+            else if (schema.type === "array") { schema.minItems = num; schema.maxItems = num; }
+          } else if (schema.type === "string")
             schema[step.name === "min" ? "minLength" : "maxLength"] = num;
           else if (schema.type === "array")
             schema[step.name === "min" ? "minItems" : "maxItems"] = num;
@@ -290,6 +294,8 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
         break;
       }
       case "default": {
+        if (rc.mode !== "output") schema["x-optional"] = true;
+        else delete schema["x-optional"];
         const value = literalValue(ts, arg0);
         if (value !== undefined) schema = { ...schema, default: value };
         break;

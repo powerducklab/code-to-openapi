@@ -18,7 +18,7 @@ for case in json.loads(manifest.read_text()):
             raise ValueError('Checkout does not match pinned commit')
         dest = output / (case['framework'] + '.json')
         run = subprocess.run(['node', '--max-old-space-size=1536', '--import', 'tsx',
-            str(repo / 'examples/scan-audit-project.ts'), case['localRoot'], str(dest)],
+            str(repo / 'examples/scan-audit-project.ts'), case['localRoot'], str(dest), *case.get('additionalSourceRoots', [])],
             cwd=repo, capture_output=True, text=True, timeout=90)
         if run.returncode:
             raise RuntimeError(run.stderr[-2000:])

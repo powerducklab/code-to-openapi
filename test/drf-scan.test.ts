@@ -105,20 +105,22 @@ describe("Django REST Framework pack", () => {
 
     const article = components.get("ArticleSerializer");
     expect(article).toBeDefined();
-    expect(article.properties.title).toEqual({ type: "string" });
+    expect(article.properties.title).toEqual({ type: "string", minLength: 1 });
     expect(article.properties.author).toEqual({
       $ref: "#/components/schemas/ProfileSerializer",
+      readOnly: true,
     });
     expect(article.properties.tag_list).toEqual({
       type: "array",
       items: { type: "string" },
     });
     // SerializerMethodField carries no inspectable return shape: honest gap.
-    expect(article.properties.rating).toEqual({});
+    expect(article.properties.rating).toEqual({readOnly: true});
 
     const comment = components.get("CommentSerializer");
     expect(comment.properties.author).toEqual({
       $ref: "#/components/schemas/ProfileSerializer",
+      readOnly: true,
     });
   });
 });

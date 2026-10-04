@@ -40,7 +40,7 @@ describe("gin edge cases", () => {
 
     const create = op(ops, "post", "/v1/articles");
     expect(create.requestBody.content[0].schema).toEqual({
-      $ref: "#/components/schemas/ArticleInput",
+      $ref: "#/components/schemas/input_ArticleInput",
     });
     expect(create.responses.map((r: any) => r.statusCode).sort()).toEqual(["201", "422"]);
   });

@@ -48,7 +48,7 @@ describe("chi edge cases", () => {
 
     const create = op(ops, "post", "/v1/products");
     expect(create.requestBody.content[0].schema).toEqual({
-      $ref: "#/components/schemas/ProductInput",
+      $ref: "#/components/schemas/input_ProductInput",
     });
     expect(create.responses.map((r: any) => r.statusCode).sort()).toEqual(["201", "400"]);
 

@@ -1,3 +1,4 @@
+import { remapSchemaReferences, namespaceComponents } from "../core/schema-references.js";
 /**
  * FastAPI framework pack (Python).
  *
@@ -78,6 +79,7 @@ interface RouterInstance {
   name: string;
   kind: "app" | "router";
   prefix: string;
+  dynamicPrefix?: boolean;
   tags: string[];
 }
 
@@ -85,6 +87,7 @@ interface MountEdge {
   parent: string;
   child: string;
   prefix: string;
+  dynamicPrefix?: boolean;
   tags: string[];
 }
 
@@ -294,8 +297,15 @@ function parameterSchema(
   base: JsonSchemaLocal,
   param: PyParam,
   call: TsNode | null,
+  wireParameter = true,
 ): JsonSchemaLocal {
   const schema: JsonSchemaLocal = { ...base };
+  // Missing query/header/path values are represented by required=false, not
+  // by a JSON null token in a URL/header string.
+  if (wireParameter && Array.isArray(schema.type)) {
+    const types = schema.type.filter(type => type !== "null");
+    schema.type = types.length === 1 ? types[0] : types;
+  }
   if (call) {
     const ge = numericLiteral(keywordArgument(call, "ge"));
     const le = numericLiteral(keywordArgument(call, "le"));
@@ -351,6 +361,11 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
 
   extract(analysis, ctx) {
     const modelIndex = buildModelIndex(analysis);
+    modelIndex.byAlias = true;
+    const outputModelIndex = buildModelIndex(analysis);
+    outputModelIndex.mode = "output";
+    outputModelIndex.byAlias = true;
+    const outputVariants = new Map<string, { index: ModelIndex; routes: RouteCandidate[] }>();
     const routers = new Map<string, RouterInstance>();
     const edges: MountEdge[] = [];
     const sites: RouteSite[] = [];
@@ -448,6 +463,56 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
       return targetFile ? routerById(targetFile, attr.text) ?? null : null;
     };
 
+    // Preserve a settings default as a qualified, low-confidence path rather
+    // than silently deleting a nonliteral mount prefix. Environment overrides
+    // and factory-side mutation remain explicitly unresolved.
+    const resolveSymbol = (file: string, name: string) => {
+      const imported = analysis.files.get(file)?.imports.get(name);
+      return imported?.importedName
+        ? { file: resolveModuleFile(resolveRelativeModule(file, imported.module)) ?? file, name: imported.importedName }
+        : { file, name };
+    };
+    const prefixInfo = (node: TsNode | null, file: string, depth = 0): { prefix: string; dynamicPrefix: boolean } => {
+      if (!node) return { prefix: "", dynamicPrefix: false };
+      const literal = literalString(node);
+      if (literal !== null) return { prefix: literal, dynamicPrefix: false };
+      if (depth > 6) return { prefix: "", dynamicPrefix: true };
+      const root = analysis.files.get(file)?.root;
+      const lexicalScope = (item: TsNode): TsNode => {
+        let scope = item.parent;
+        while (scope?.parent && !["function_definition", "class_definition", "lambda"].includes(scope.type)) scope = scope.parent;
+        return scope ?? item;
+      };
+      const scope = lexicalScope(node);
+      const binding = (name: string): TsNode | undefined => {
+        const matches = findAll(root, item => item.type === "assignment" && item.namedChildren[0]?.text === name && item.startIndex < node.startIndex && lexicalScope(item).id === scope.id);
+        return matches.length === 1 ? matches[0]!.namedChildren.at(-1) : undefined;
+      };
+      if (node.type === "identifier") {
+        const value = binding(node.text);
+        if (value && value !== node) return prefixInfo(value, file, depth + 1);
+      }
+      if (node.type === "attribute" && node.namedChildren[0]?.type === "identifier") {
+        const value = binding(node.namedChildren[0].text);
+        if (value?.type === "call" && value.namedChildren[0]?.type === "identifier") {
+          let symbol = resolveSymbol(file, value.namedChildren[0].text);
+          const fn = analysis.functions.find(fn => fn.file === symbol.file && fn.name === symbol.name);
+          if (fn?.returnType?.type === "identifier") symbol = resolveSymbol(fn.file, fn.returnType.text);
+          let cls = analysis.classes.find(cls => cls.file === symbol.file && cls.name === symbol.name);
+          const seen = new Set<string>();
+          while (cls && !seen.has(`${cls.file}:${cls.name}`)) {
+            seen.add(`${cls.file}:${cls.name}`);
+            const field = cls.fields.find(field => field.name === node.namedChildren[1]?.text);
+            if (field) return { prefix: literalString(field.default) ?? "", dynamicPrefix: true };
+            if (cls.bases.length !== 1) break;
+            symbol = resolveSymbol(cls.file, cls.bases[0]!.text);
+            cls = analysis.classes.find(cls => cls.file === symbol.file && cls.name === symbol.name);
+          }
+        }
+      }
+      return { prefix: "", dynamicPrefix: true };
+    };
+
     // Pass 1a: register every app/router/security binding across all files.
     for (const file of analysis.files.values()) {
       for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
@@ -472,7 +537,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
             file: file.path,
             name: target.text,
             kind: "router",
-            prefix: prefixNode ? literalString(prefixNode) ?? "" : "",
+            ...prefixInfo(prefixNode, file.path),
             tags: tagsNode ? listElements(tagsNode).map((t) => literalString(t) ?? "").filter(Boolean) : [],
           });
         } else if (constructorName === "OAuth2PasswordBearer") {
@@ -524,7 +589,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         edges.push({
           parent: parent.id,
           child: child.id,
-          prefix: prefixNode ? literalString(prefixNode) ?? "" : "",
+          ...prefixInfo(prefixNode, file.path),
           tags: tagsNode
             ? listElements(tagsNode).map((t) => literalString(t) ?? "").filter(Boolean)
             : [],
@@ -627,30 +692,31 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
     }
 
     // Reachability: DFS prefix/tag chains from every FastAPI app.
-    const reachable = new Map<string, { prefix: string; tags: string[] }>();
-    const appIds = [...routers.values()].filter((r) => r.kind === "app").map((r) => r.id);
-    for (const appId of appIds) {
-      reachable.set(appId, { prefix: "", tags: [] });
-      const stack = [appId];
-      while (stack.length) {
-        const current = stack.pop()!;
-        const currentMeta = reachable.get(current)!;
-        for (const edge of edges.filter((e) => e.parent === current)) {
-          const child = routers.get(edge.child);
-          if (!child) continue;
-          const next = {
-            prefix: joinPrefix(currentMeta.prefix, edge.prefix, child.prefix),
-            tags: [...new Set([...currentMeta.tags, ...edge.tags, ...child.tags])],
-          };
-          // Keep the shortest prefix chain if a router is mounted twice.
-          const existing = reachable.get(edge.child);
-          if (!existing || next.prefix.length < existing.prefix.length) {
-            reachable.set(edge.child, next);
-            stack.push(edge.child);
-          }
-        }
+    const reachable = new Map<string, Array<{ prefix: string; tags: string[]; dynamicPrefix?: boolean }>>();
+    const outgoing = new Map<string, MountEdge[]>();
+    for (const edge of edges) outgoing.set(edge.parent, [...(outgoing.get(edge.parent) ?? []), edge]);
+    const appIds = [...routers.values()].filter(r => r.kind === "app").map(r => r.id);
+    const pending = appIds.map(id => ({ id, prefix: "", dynamicPrefix: false, tags: [] as string[], ancestors: new Set<string>() }));
+    let traversed = 0;
+    const visitedMounts = new Set<string>();
+    while (pending.length && traversed++ < 10000) {
+      const mount = pending.pop()!;
+      if (mount.ancestors.has(mount.id)) {
+        unresolved.push({ reason: "path-dynamic", message: "Cyclic include_router chain was not expanded", origin: { file: routers.get(mount.id)?.file ?? "" } });
+        continue;
+      }
+      const key = `${mount.id}::${mount.prefix}`;
+      if (visitedMounts.has(key)) continue;
+      visitedMounts.add(key);
+      reachable.set(mount.id, [...(reachable.get(mount.id) ?? []), { prefix: mount.prefix, tags: mount.tags, dynamicPrefix: mount.dynamicPrefix }]);
+      const ancestors = new Set(mount.ancestors).add(mount.id);
+      for (const edge of outgoing.get(mount.id) ?? []) {
+        const child = routers.get(edge.child);
+        if (!child) continue;
+        pending.push({ id: child.id, dynamicPrefix: mount.dynamicPrefix || Boolean(edge.dynamicPrefix) || Boolean(child.dynamicPrefix), prefix: joinPrefix(mount.prefix, edge.prefix, child.prefix), tags: [...new Set([...mount.tags, ...edge.tags, ...child.tags])], ancestors });
       }
     }
+    if (pending.length) unresolved.push({ reason: "path-dynamic", message: "Router expansion exceeded 10000 mount paths; remaining mounts are unresolved", origin: { file: "" } });
 
     // Orphan routers with routes are reported once.
     const orphanRouters = new Set<string>();
@@ -663,9 +729,29 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         orphanRouters.add(site.routerId);
         continue;
       }
-      const mount = chain ?? { prefix: "", tags: [] };
-      const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings, resolveAnnotatedAlias);
-      routes.push(candidate);
+      for (const mount of chain ?? [{ prefix: "", tags: [] }]) {
+        const omitDefaults = ["response_model_exclude_unset", "response_model_exclude_defaults", "response_model_exclude_none", "response_model_include", "response_model_exclude"].some(key => {
+          const value = keywordArgument(site.call, key);
+          return value && value.type !== "false" && value.type !== "none";
+        });
+        const byAlias = keywordArgument(site.call, "response_model_by_alias")?.type !== "false";
+        const variantKey = `${byAlias ? "alias" : "plain"}_${omitDefaults ? "partial" : "complete"}_output`;
+        let variant = outputVariants.get(variantKey);
+        if ((omitDefaults || !byAlias) && !variant) {
+          const index = buildModelIndex(analysis);
+          index.mode = "output"; index.byAlias = byAlias; index.outputRequired = !omitDefaults;
+          variant = { index, routes: [] }; outputVariants.set(variantKey, variant);
+        }
+        const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings, resolveAnnotatedAlias, variant?.index ?? outputModelIndex);
+        variant?.routes.push(candidate);
+        if (keywordArgument(site.call, "response_model_include") || keywordArgument(site.call, "response_model_exclude")) candidate.gaps.push("response-schema-unknown");
+        if (mount.dynamicPrefix) {
+          candidate.gaps.push("path-dynamic");
+          candidate.confidence = "low";
+          unresolved.push({ reason: "path-dynamic", message: `Nonliteral router prefix: the emitted path uses a source default when available; runtime configuration may override it`, origin: candidate.origin });
+        }
+        routes.push(candidate);
+      }
     }
 
     for (const id of orphanRouters) {
@@ -678,7 +764,36 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
     }
 
     // Components accumulated during schema conversion.
-    const components = [...modelIndex.componentsByName.values()];
+    const variantReserved = new Set([...modelIndex.componentsByName.keys(), ...outputModelIndex.componentsByName.keys()]);
+    for (const [key, variant] of outputVariants) {
+      const grouped = namespaceComponents(new Map([...variant.index.componentsByName].map(([name, component]) => [name, component.schema])), variantReserved, key);
+      for (const component of grouped.components) outputModelIndex.componentsByName.set(component.name, component);
+      for (const route of variant.routes) route.responses = remapSchemaReferences(route.responses, grouped.names);
+    }
+    const names = new Map<string, string>();
+    const reserved = new Set([...modelIndex.componentsByName.keys(), ...outputModelIndex.componentsByName.keys()]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [name, input] of modelIndex.componentsByName) {
+        const output = outputModelIndex.componentsByName.get(name);
+        if (!names.has(name) && output && JSON.stringify(remapSchemaReferences(input.schema, names)) !== JSON.stringify(output.schema)) {
+          let renamed = `input_${name}`, suffix = 2;
+          while (reserved.has(renamed)) renamed = `input_${name}_${suffix++}`;
+          names.set(name, renamed); reserved.add(renamed); changed = true;
+        }
+      }
+    }
+    const componentMap = new Map(outputModelIndex.componentsByName);
+    for (const [name, input] of modelIndex.componentsByName) {
+      const renamed = names.get(name) ?? name;
+      componentMap.set(renamed, { ...input, name: renamed, schema: remapSchemaReferences(input.schema, names) });
+    }
+    for (const route of routes) {
+      route.parameters = remapSchemaReferences(route.parameters, names);
+      if (route.requestBody) route.requestBody = remapSchemaReferences(route.requestBody, names);
+    }
+    const components = [...componentMap.values()];
 
     const securitySchemes = securityBindings
       .filter((binding) =>
@@ -750,6 +865,7 @@ function buildRoute(
   modelIndex: ModelIndex,
   securityBindings: SecurityBinding[],
   resolveAlias: (ownerFile: string, name: string) => TsNode | null,
+  outputModelIndex: ModelIndex,
 ): RouteCandidate {
   const { call: decoratorCall, fn, file } = site;
   const parameters: RouteParameter[] = [];
@@ -781,9 +897,7 @@ function buildRoute(
   const placeholderNames = new Set(placeholders.map((p) => p.name));
 
   // Body accumulators.
-  let bodyModelName: string | null = null;
-  let bodyModelNode: TsNode | null = null;
-  const bodyScalarFields = new Map<string, TsNode | null>();
+  const bodyBindings: Array<{ name: string; node: TsNode | null; required: boolean; embed: boolean; param: PyParam; call: TsNode | null }> = [];
   const formFields = new Map<string, { node: TsNode | null; kind: "form" | "file"; required: boolean }>();
   const security: Array<Record<string, string[]>> = [];
 
@@ -969,22 +1083,13 @@ function buildRoute(
       annotationName &&
       modelIndex.pydanticNames.has(annotationName)
     ) {
-      bodyModelName = annotationName;
-      bodyModelNode = innerType;
+      bodyBindings.push({ name: param.name, node: innerType, required: param.default === null, embed: false, param, call: null });
       continue;
     }
 
     if (kind === "Body") {
-      if (
-        innerType?.type === "identifier" &&
-        (modelIndex.pydanticNames.has(innerType.text) ||
-          modelIndex.enumNames.has(innerType.text))
-      ) {
-        bodyModelName = innerType.text;
-        bodyModelNode = innerType;
-      } else {
-        bodyScalarFields.set(param.name, innerType);
-      }
+      bodyBindings.push({ name: injectionAlias(injection!.call) ?? param.name, node: innerType,
+        required: bindingRequired(param, injection!.call), embed: keywordArgument(injection!.call, "embed")?.type === "true", param, call: injection!.call });
       continue;
     }
 
@@ -1038,37 +1143,26 @@ function buildRoute(
         },
       ],
     };
-  } else if (bodyModelName && bodyModelNode) {
-    ensureComponent(bodyModelName, modelIndex);
-    const requiredBody = fn.params.some(
-      (param) =>
-        param.annotation?.type === "identifier" &&
-        param.annotation.text === bodyModelName &&
-        param.default === null,
-    );
-    requestBody = {
-      required: requiredBody,
-      confidence: "high",
-      content: [
-        { mediaType: "application/json", schema: { $ref: `#/components/schemas/${bodyModelName}` } },
-      ],
-    };
-  } else if (bodyScalarFields.size) {
+  } else if (bodyBindings.length) {
+    const wrapped = bodyBindings.length > 1 || bodyBindings.some(binding => binding.embed);
     const properties: Record<string, JsonSchemaLocal> = {};
-    for (const [name, annotation] of bodyScalarFields) {
-      const schema = annotation ? annotationToSchema(annotation, modelIndex) : null;
-      properties[name] = schema ?? {};
-      if (!schema) gaps.add("body-schema-unknown");
+    const required: string[] = [];
+    for (const binding of bodyBindings) {
+      const base = binding.node ? annotationToSchema(binding.node, modelIndex) : null;
+      properties[binding.name] = parameterSchema(base ?? {}, binding.param, binding.call, false);
+      if (!base) gaps.add("body-schema-unknown");
+      if (binding.required) required.push(binding.name);
     }
+    const schema = wrapped ? { type: "object", properties, ...(required.length ? { required } : {}) } : properties[bodyBindings[0]!.name]!;
     requestBody = {
-      required: true,
-      confidence: bodyScalarFields.size && !gaps.has("body-schema-unknown") ? "high" : "medium",
-      content: [{ mediaType: "application/json", schema: { type: "object", properties } }],
+      required: required.length > 0,
+      confidence: gaps.has("body-schema-unknown") ? "medium" : "high",
+      content: [{ mediaType: "application/json", schema }],
     };
   }
 
   // Responses.
-  const responses = buildResponses(site, modelIndex, gaps, analysis);
+  const responses = buildResponses(site, outputModelIndex, gaps, analysis);
 
   const confidence: Confidence = gaps.size ? "medium" : "high";
 

@@ -26,6 +26,7 @@ import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { createBindingResolver } from "../lang/typescript/bindings.js";
 import { convertZodNode } from "../lang/typescript/zod.js";
 import { analyzeHandler } from "./express-handler.js";
+import { httpMethodReachability } from '../lang/typescript/httpMethodFlow.js';
 import {
   addParam,
   collectComponents,
@@ -250,15 +251,18 @@ function collectPagesRouter(
   }
   if (!handlerNode) return;
 
-  // Method detection: `req.method === "POST"`.
-  let method = "get";
-  source.forEachChild((child: any) => walkMethod(ts, child, (m) => (method = m)));
-
   const origin = locationAt(ts, source, handlerNode, rel);
+  // Pages handlers receive every method. Analyze each reachable method branch;
+  // scanning the whole file and keeping the last comparison loses operations.
+  for (const method of VERBS) {
+  const reachableNodes = httpMethodReachability(analysis, handlerNode, method);
   const facts = analyzeHandler(analysis, source, handlerNode, origin, {
     pathParams,
     validators: [],
+    reachableNodes,
   });
+  if (reachableNodes.uncertain && !facts.gaps.includes('response-unknown')) facts.gaps.push('response-unknown');
+  if (facts.responses.length && facts.responses.every(response => response.statusCode === '405')) continue;
 
   into.push({
     method,
@@ -274,20 +278,7 @@ function collectPagesRouter(
     gaps: facts.gaps,
     components: [],
   });
-}
-
-function walkMethod(ts: any, node: any, set: (m: string) => void): void {
-  if (
-    ts.isBinaryExpression(node) &&
-    node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
-  ) {
-    const text = node.left.getText?.() ?? "";
-    if (/\.method$/.test(text) && ts.isStringLiteralLike(node.right)) {
-      const m = node.right.text.toLowerCase();
-      if (VERBS.has(m)) set(m);
-    }
   }
-  ts.forEachChild(node, (c: any) => walkMethod(ts, c, set));
 }
 
 interface AppFacts {
@@ -310,6 +301,8 @@ function analyzeAppHandler(
   const responses = new ResponseCollector();
   let hasResponseSite = false;
   let bodyReferenced = false;
+  let textBodyReferenced = false;
+  const requestUrls = new Set<string>();
   let bodySchema: { schema: any; confidence: "high" | "medium" | "low" } | undefined;
 
   const reqName = handler.parameters?.[0]?.name?.getText?.(source) ?? "request";
@@ -325,6 +318,10 @@ function analyzeAppHandler(
     bindingResolver.resolve(name, from)?.node ?? null;
 
   const visit = (node: any) => {
+    if (node !== handler && ts.isFunctionLike(node)) return;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isNewExpression(node.initializer) && node.initializer.expression.getText(source) === "URL" && node.initializer.arguments?.[0]?.getText(source) === `${reqName}.url`) {
+      requestUrls.add(node.name.text);
+    }
     // const body: T = await request.json()
     if (
       ts.isVariableDeclaration(node) &&
@@ -369,7 +366,10 @@ function analyzeAppHandler(
       const referencesJson =
         (arg && ts.isIdentifier(arg) && jsonVars.has(arg.text)) ||
         (arg && isJsonCall(ts, arg, reqName));
-      if (referencesJson) {
+      const fromEntries = arg && ts.isCallExpression(arg) && arg.expression.getText(source) === "Object.fromEntries" ? arg.arguments[0] : undefined;
+      const queryReceiver = fromEntries && ts.isPropertyAccessExpression(fromEntries) && fromEntries.name.text === "searchParams" ? fromEntries.expression : undefined;
+      const referencesQuery = queryReceiver && ((ts.isIdentifier(queryReceiver) && requestUrls.has(queryReceiver.text)) || queryReceiver.getText(source) === `${reqName}.nextUrl`);
+      if ((referencesJson || referencesQuery) && node.expression.name.text === "parse") {
         const receiver = node.expression.expression;
         let schemaNode: any = null;
         if (ts.isCallExpression(receiver)) {
@@ -386,8 +386,14 @@ function analyzeAppHandler(
               resolveSchemaNode(name, from ?? source),
           });
           if (schema && Object.keys(schema).length) {
-            bodyReferenced = true;
-            bodySchema = { schema, confidence: "high" };
+            if (referencesQuery) {
+              for (const [name, property] of Object.entries(schema.properties ?? {})) {
+                addParam(parameters, seen, "query", name, property as any, "high", Array.isArray(schema.required) && schema.required.includes(name));
+              }
+            } else {
+              bodyReferenced = true;
+              bodySchema = { schema, confidence: "high" };
+            }
           }
         }
       }
@@ -404,7 +410,7 @@ function analyzeAppHandler(
       const receiver = node.expression.expression.getText(source);
       if (/\bsearchParams$/.test(receiver)) {
         addParam(parameters, seen, "query", node.arguments[0].text, { type: "string" }, "low", false);
-      } else if (/request\.headers$/.test(receiver) || /\bheaders$/.test(receiver)) {
+      } else if (receiver === `${reqName}.headers` || (ts.isCallExpression(node.expression.expression) && importedFrom(analysis, node.expression.expression.expression, "headers", ["next/headers"]))) {
         addParam(parameters, seen, "header", node.arguments[0].text.toLowerCase(), { type: "string" }, "low", false);
       }
     }
@@ -415,8 +421,7 @@ function analyzeAppHandler(
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === "json" &&
       ts.isIdentifier(node.expression.expression) &&
-      (node.expression.expression.text === "Response" ||
-        node.expression.expression.text === "NextResponse")
+      isFetchResponse(analysis, node.expression.expression)
     ) {
       hasResponseSite = true;
       const arg = node.arguments[0];
@@ -434,29 +439,38 @@ function analyzeAppHandler(
     if (
       ts.isNewExpression(node) &&
       ts.isIdentifier(node.expression) &&
-      (node.expression.text === "Response" || node.expression.text === "NextResponse")
+      isFetchResponse(analysis, node.expression)
     ) {
       hasResponseSite = true;
       const status = statusFromOpts(ts, node.arguments?.[1]) ?? "200";
-      let bodyArg = node.arguments?.[0];
-      // new Response(JSON.stringify(payload)) -> infer payload's shape.
-      if (
-        bodyArg &&
-        ts.isCallExpression(bodyArg) &&
-        ts.isPropertyAccessExpression(bodyArg.expression) &&
-        bodyArg.expression.name.text === "stringify" &&
-        bodyArg.expression.expression.getText(source) === "JSON" &&
-        bodyArg.arguments[0]
-      ) {
-        bodyArg = bodyArg.arguments[0];
-      }
-      if (bodyArg && bodyArg.kind !== ts.SyntaxKind.NullKeyword) {
-        const { schema, typed } = schemaFromNode(analysis, bodyArg);
-        responses.record(status, "application/json", schema, typed ? "high" : "medium");
+      const bodyArg = node.arguments?.[0];
+      if (!bodyArg || bodyArg.kind === ts.SyntaxKind.NullKeyword) {
+        responses.recordEmpty(status, "high");
       } else {
-        responses.record(status, "application/json", undefined, "medium");
+        const jsonPayload = ts.isCallExpression(bodyArg) && ts.isPropertyAccessExpression(bodyArg.expression) &&
+          bodyArg.expression.name.text === "stringify" && bodyArg.expression.expression.getText(source) === "JSON"
+          ? bodyArg.arguments[0] : undefined;
+        const explicitMedia = contentTypeFromOpts(ts, node.arguments?.[1]);
+        const body = schemaFromNode(analysis, bodyArg);
+        const isText = Boolean(jsonPayload) || ts.isStringLiteralLike(bodyArg) || ts.isTemplateExpression(bodyArg) || body.schema?.type === "string";
+        const media = explicitMedia ?? (isText ? "text/plain" : "application/octet-stream");
+        if (/^(application\/json|[^;]+\+json)(?:;|$)/i.test(media)) {
+          const inferred = jsonPayload ? schemaFromNode(analysis, jsonPayload) : undefined;
+          responses.record(status, media, inferred?.schema, inferred?.typed ? "high" : "medium");
+        } else if (isText) {
+          responses.record(status, media, { type: "string" }, "high");
+        } else {
+          gaps.add("response-schema-unknown");
+          responses.record(status, media, undefined, "low");
+        }
       }
     }
+
+    if (ts.isNewExpression(node) && importedFrom(analysis, node.expression, "ImageResponse", ["@vercel/og", "next/og", "next/server"])) {
+      hasResponseSite = true;
+      responses.record(statusFromOpts(ts, node.arguments?.[1]) ?? "200", "image/png", { type: "string", format: "binary" }, "high");
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(source) === reqName && node.expression.name.text === "text") textBodyReferenced = true;
 
     // Bare request.json() reference (untyped body).
     if (isJsonCall(ts, node, reqName)) bodyReferenced = true;
@@ -477,6 +491,8 @@ function analyzeAppHandler(
     requestBody = { required: true, content: [{ mediaType: "application/json", schema: bodySchema.schema }], confidence: "high" };
   } else if (bodyReferenced) {
     gaps.add("body-schema-unknown");
+  } else if (textBodyReferenced) {
+    requestBody = { required: true, content: [{ mediaType: "*/*", schema: { type: "string" } }], confidence: "medium" };
   }
 
   if (!hasResponseSite) gaps.add("response-unknown");
@@ -523,4 +539,38 @@ function statusFromOpts(ts: any, opts: any): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Only literal headers establish a media type; the Fetch string-body default is text/plain. */
+function contentTypeFromOpts(ts: any, opts: any): string | undefined {
+  if (!opts || !ts.isObjectLiteralExpression(opts)) return undefined;
+  for (const property of opts.properties) {
+    if (!ts.isPropertyAssignment(property) || property.name?.getText().replace(/^["']|["']$/g, "") !== "headers") continue;
+    if (!ts.isObjectLiteralExpression(property.initializer)) return undefined;
+    for (const header of property.initializer.properties) {
+      if (ts.isPropertyAssignment(header) && header.name?.getText().replace(/^["']|["']$/g, "").toLowerCase() === "content-type" && ts.isStringLiteralLike(header.initializer)) {
+        return header.initializer.text.split(";")[0].trim().toLowerCase();
+      }
+    }
+  }
+  return undefined;
+}
+
+function importedFrom(analysis: TsAnalysis, identifier: any, name: string, modules: string[]): boolean {
+  const { ts } = analysis;
+  if (!identifier || !ts.isIdentifier(identifier)) return false;
+  const declarations = analysis.checker.getSymbolAtLocation(identifier)?.declarations ?? [];
+  return declarations.some((declaration: any) => {
+    if (!ts.isImportSpecifier(declaration) || (declaration.propertyName ?? declaration.name).text !== name) return false;
+    let parent = declaration.parent;
+    while (parent && !ts.isImportDeclaration(parent)) parent = parent.parent;
+    return parent && modules.includes(parent.moduleSpecifier.text);
+  });
+}
+
+function isFetchResponse(analysis: TsAnalysis, identifier: any): boolean {
+  if (importedFrom(analysis, identifier, "NextResponse", ["next/server"])) return true;
+  if (identifier.text !== "Response") return false;
+  const declarations = analysis.checker.getSymbolAtLocation(identifier)?.declarations ?? [];
+  return declarations.every((declaration: any) => !analysis.isProjectFile(declaration.getSourceFile().fileName));
 }

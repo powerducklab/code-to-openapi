@@ -30,7 +30,7 @@ describe("FastEndpoints", () => {
     });
     expect(create.responses[0].statusCode).toBe("201");
     expect(create.responses[0].content[0].schema).toEqual({
-      $ref: "#/components/schemas/CreateResponse",
+      $ref: "#/components/schemas/serialized_CreateResponse",
     });
   });
 
@@ -43,7 +43,7 @@ describe("FastEndpoints", () => {
     expect(list.requestBody).toBeUndefined();
     expect(list.responses[0].statusCode).toBe("200");
     expect(list.responses[0].content[0].schema).toEqual({
-      $ref: "#/components/schemas/ItemResponse",
+      $ref: "#/components/schemas/serialized_ItemResponse",
     });
 
     const del = op(ops, "delete", "/api/items/{id}");

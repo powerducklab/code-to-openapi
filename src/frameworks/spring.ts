@@ -7,6 +7,7 @@
  * produces=text/event-stream.
  */
 
+import {hasOnlyThrowingExit} from "../lang/java/http-shared.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -25,10 +26,12 @@ import type {
   ScanContext,
   SourceLocation,
 } from "../core/types.js";
+import { extractValidation } from "../lang/java/index.js";
 import type { JavaAnalysis } from "../lang/java/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
+  applyValidation,
   annotationElement,
   annotationStringArg,
   buildJavaModelIndex,
@@ -106,9 +109,12 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
         if (!isRest && !isController) continue;
 
         const clsRequestMapping = classAnnotation(cls, "RequestMapping");
-        const basePath = clsRequestMapping
-          ? normalizePath(annotationStringArg(clsRequestMapping, PATH_ELEMENTS) ?? "")
-          : "";
+        const classPath = clsRequestMapping ? resolveMapping(clsRequestMapping, "RequestMapping", model, rel).subPath : "";
+        if (classPath === null) {
+          unresolved.push({ reason: "dynamic-path", message: `Cannot resolve Spring controller mapping ${clsRequestMapping!.text}`, origin: { file: rel, line: cls.startPosition.row + 1 } });
+          continue;
+        }
+        const basePath = normalizePath(classPath);
         const tagName =
           cls.namedChildren.find((c) => c.type === "identifier")?.text
             .replace(/Controller$/, "")
@@ -122,15 +128,36 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
         const body = childrenOfType(cls, "class_body")[0];
         if (!body) continue;
 
-        // Interface mappings may live in generated sources absent from the scan.
-        // Never silently count such a controller as completely analyzed.
-        const interfaces = cls.namedChildren.find(n => n.type === "super_interfaces");
-        if (interfaces && !childrenOfType(body, "method_declaration").some(method =>
-          listAnnotations(method).some(a => MAPPING_ANNOTATIONS.has(a.name)))) {
-          unresolved.push({ reason: "handler-unresolved",
-            message: `Controller ${controllerShort} implements ${interfaces.text}; inherited route mappings require interface/generated-source analysis.`,
-            origin: { file: rel, line: cls.startPosition.row + 1 } });
-        }
+        const inherited = new Map<string, { method: TsNode; file: string; base: string }>();
+        const visited = new Set<string>();
+        const visitInterfaces = (owner: TsNode, ownerFile: string): void => {
+          const parents = owner.namedChildren.find(n => n.type === "super_interfaces" || n.type === "extends_interfaces");
+          const list = parents?.namedChildren.find(n => n.type === "type_list");
+          for (const parent of list?.namedChildren ?? parents?.namedChildren ?? []) {
+            const name = parent.type === "generic_type" ? parent.namedChildren[0]?.text : parent.text;
+            if (!name) continue;
+            const def = model.resolveDef(name, ownerFile);
+            if (!def) {
+              unresolved.push({ reason: "handler-unresolved", message: `Controller ${controllerShort}: interface ${name} source is missing; generate/include its Java sources to resolve inherited mappings.`, origin: { file: ownerFile, line: parent.startPosition.row + 1 } });
+              continue;
+            }
+            if (visited.has(def.fqn)) continue;
+            visited.add(def.fqn);
+            const interfaceBody = def.node.namedChildren.find(n => n.type === "interface_body");
+            const typeMapping = classAnnotation(def.node, "RequestMapping");
+            const interfacePath = typeMapping ? resolveMapping(typeMapping, "RequestMapping", model, def.file).subPath : "";
+            if (interfacePath === null) {
+              unresolved.push({ reason: "dynamic-path", message: `Cannot resolve Spring interface mapping ${typeMapping!.text}`, origin: { file: def.file, line: def.node.startPosition.row + 1 } });
+              continue;
+            }
+            const inheritedBase = normalizePath(interfacePath);
+            for (const method of interfaceBody ? childrenOfType(interfaceBody, "method_declaration") : []) {
+              if (!inherited.has(methodSignature(method))) inherited.set(methodSignature(method), { method, file: def.file, base: inheritedBase });
+            }
+            visitInterfaces(def.node, def.file);
+          }
+        };
+        visitInterfaces(cls, rel);
 
         // Injected bean fields (constructor / @Autowired / @Resource / Lombok
         // @AllArgsConstructor all materialise as ordinary private fields here).
@@ -138,7 +165,14 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
         // follow `return service.method(...)` to the service method's return type.
         const fieldTypes = fieldTypesOf(cls);
 
-        for (const method of childrenOfType(body, "method_declaration")) {
+        const implementations = new Map(childrenOfType(body, "method_declaration").map(method => [methodSignature(method), method]));
+        const signatures = new Set([...implementations.keys(), ...inherited.keys()]);
+        for (const signature of signatures) {
+          const implementation = implementations.get(signature);
+          const contract = inherited.get(signature);
+          const ownMapping = implementation && listAnnotations(implementation).some(a => MAPPING_ANNOTATIONS.has(a.name));
+          const method = ownMapping ? implementation! : contract?.method ?? implementation!;
+          const contractFile = method === implementation ? rel : contract!.file;
           const annotations = listAnnotations(method);
           const mapping = annotations.find((a) => MAPPING_ANNOTATIONS.has(a.name));
           if (!mapping) continue;
@@ -148,14 +182,18 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             mapping.name !== "RequestMapping";
           if (!responseBody) continue;
 
-          const { verb, subPath } = resolveMapping(mapping.node, mapping.name);
-          const fullPath = joinPath(basePath, normalizePath(subPath));
+          const { verb, subPath } = resolveMapping(mapping.node, mapping.name, model, contractFile);
+          if (subPath === null) {
+            unresolved.push({ reason: "dynamic-path", message: `Cannot resolve Spring mapping ${mapping.node.text}`, origin: { file: contractFile, line: mapping.node.startPosition.row + 1 } });
+            continue;
+          }
+          const fullPath = joinPath(basePath || contract?.base || "", normalizePath(subPath));
           const pathParams = new Set(
             [...fullPath.matchAll(/\{([^}]+)\}/g)].map((m) => stripRegex(m[1]!)),
           );
 
           const origin: SourceLocation = {
-            file: rel,
+            file: contractFile,
             line: method.startPosition.row + 1,
           };
 
@@ -163,7 +201,7 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             method,
             model,
             pathParams,
-            rel,
+            contractFile,
           );
 
           const producesEventStream = annotationProducesEventStream(mapping.node);
@@ -187,9 +225,23 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             (isStreamingEmitter && /text\/event-stream/.test(method.text)) ||
             (returnType === null && /text\/event-stream/.test(method.text));
 
-          const responses = isSse
-            ? collectSseResponse(method, returnType, model, gaps, rel)
-            : collectJsonResponse(method, mapping.node, verb, returnType, model, gaps, rel, fieldTypes);
+          const throwing = hasOnlyThrowingExit(implementation ?? method);
+          if (throwing) gaps.push("response-unknown");
+          const responses: DiscoveredResponse[] = throwing ? [{statusCode:"default",description:"Exception response requires advice resolution",confidence:"low"}] : isSse
+            ? collectSseResponse(implementation ?? method, returnType, model, gaps, contractFile)
+            : collectJsonResponse(implementation ?? method, mapping.node, verb, returnType, model, gaps, contractFile, fieldTypes);
+
+          // Swagger/OpenAPI annotations on generated interfaces are explicit
+          // response contracts, including error DTOs absent from the return type.
+          if (!isSse) {
+            for (const declared of annotatedResponses(method, model, contractFile)) {
+              if (throwing && /^2\d\d$/.test(declared.statusCode)) continue;
+              const existing = responses.find(response => response.statusCode === declared.statusCode);
+              if (existing) {
+                if (declared.content?.length) existing.content = declared.content;
+              } else responses.push(declared);
+            }
+          }
 
           const extensions = isSse ? { "x-protocol": "sse" } : undefined;
 
@@ -209,7 +261,7 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             confidence: gaps.length ? "medium" : "high",
             gaps,
             components: [],
-            handlerSource: sliceNode(method),
+            handlerSource: sliceNode(implementation ?? method),
           });
         }
       }
@@ -247,7 +299,9 @@ function disambiguateOperationIds(routes: RouteCandidate[]): RouteCandidate[] {
 function resolveMapping(
   node: TsNode,
   annotationName: string,
-): { verb: string; subPath: string } {
+  model: JavaModelIndex,
+  file: string,
+): { verb: string; subPath: string | null } {
   let verb = annotationName
     .replace("Mapping", "")
     .toLowerCase()
@@ -270,7 +324,8 @@ function resolveMapping(
       }
     }
   }
-  const subPath = annotationStringArg(node, PATH_ELEMENTS) ?? "";
+  const expression = annotationElement(node, "value") ?? annotationElement(node, "path");
+  const subPath = expression ? mappingString(expression, model, file) : annotationStringArg(node, PATH_ELEMENTS) ?? "";
   return { verb, subPath };
 }
 
@@ -425,7 +480,7 @@ function collectParameters(
         addParam(
           "path",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
+          typeNode ? applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param)) : { type: "string" },
           "high",
           !isRequiredFalse(pathVar.node),
         );
@@ -443,7 +498,7 @@ function collectParameters(
         addParam(
           "query",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : undefined,
+          typeNode ? applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param)) : undefined,
           "high",
           required,
         );
@@ -459,7 +514,7 @@ function collectParameters(
         addParam(
           "header",
           explicitName ? name : name.toLowerCase(),
-          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
+          typeNode ? applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param)) : { type: "string" },
           "high",
           !isRequiredFalse(requestHeader.node),
         );
@@ -475,7 +530,7 @@ function collectParameters(
         addParam(
           "cookie",
           name,
-          typeNode ? javaTypeToSchema(typeNode, model, 0, undefined, rel) : { type: "string" },
+          typeNode ? applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param)) : { type: "string" },
           "high",
           !isRequiredFalse(cookieValue.node),
         );
@@ -500,7 +555,7 @@ function collectParameters(
                 [partName]: isFile
                   ? { type: "string", format: "binary" }
                   : typeNode
-                    ? javaTypeToSchema(typeNode, model, 0, undefined, rel)
+                    ? applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param))
                     : { type: "string" },
               },
               required: [partName],
@@ -513,7 +568,7 @@ function collectParameters(
     }
 
     if (body && typeNode) {
-      const schema = javaTypeToSchema(typeNode, model, 0, undefined, rel);
+      const schema = applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param));
       if (schema && Object.keys(schema).length) {
         requestBody = {
           required: !isRequiredFalse(body.node),
@@ -544,7 +599,7 @@ function collectParameters(
         addParam(
           "query",
           nameNode.text,
-          javaTypeToSchema(typeNode, model, 0, undefined, rel),
+          applyValidation(javaTypeToSchema(typeNode, model, 0, undefined, rel), extractValidation(param)),
           "high",
           false,
         );
@@ -1082,4 +1137,60 @@ function detectServers(ctx: ScanContext): DiscoveredServer[] {
     }
   }
   return [];
+}
+
+/** Match overloads by signature rather than method name or parameter names. */
+function methodSignature(method: TsNode): string {
+  const name = method.namedChildren.find(n => n.type === "identifier")?.text ?? "";
+  const parameters = method.namedChildren.find(n => n.type === "formal_parameters");
+  const types = parameters?.namedChildren.map(parameter => {
+    const type = parameter.namedChildren.find(n => n.type !== "modifiers" && n.type !== "identifier" && n.type !== "dimensions");
+    return (type?.text ?? "?").replace(/\s+/g, "") + (parameter.namedChildren.some(n => n.type === "dimensions") ? "[]" : "");
+  }) ?? [];
+  return `${name}(${types.join(",")})`;
+}
+
+function mappingString(node: TsNode, model: JavaModelIndex, file: string, seen = new Set<string>()): string | null {
+  if (node.type === "string_literal") {
+    try { return JSON.parse(node.text); } catch { return null; }
+  }
+  if (node.type === "element_value_array_initializer" || node.type === "array_initializer") {
+    return node.namedChildren.length === 1 ? mappingString(node.namedChildren[0]!, model, file, seen) : null;
+  }
+  const access = /^([\w.]+)\.([\w]+)$/.exec(node.text);
+  if (!access) return null;
+  const def = model.resolveDef(access[1]!, file);
+  if (!def) return null;
+  const key = `${def.fqn}.${access[2]}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+  const declaration = findAll(def.node, n => n.type === "variable_declarator")
+    .find(n => n.namedChildren[0]?.text === access[2]);
+  const value = declaration?.namedChildren[1];
+  return value ? mappingString(value, model, def.file, seen) : null;
+}
+
+function annotatedResponses(method: TsNode, model: JavaModelIndex, file: string): DiscoveredResponse[] {
+  const result: DiscoveredResponse[] = [];
+  const name = (node: TsNode) => node.namedChildren.find(c => c.type === "identifier")?.text;
+  const modifiers = method.namedChildren.find(n => n.type === "modifiers");
+  if (!modifiers) return result;
+  for (const response of findAll(modifiers, n => n.type === "annotation" && name(n) === "ApiResponse")) {
+    const status = annotationStringArg(response, new Set(["responseCode"]));
+    if (!status || !/^(?:[1-5]\d\d|[1-5]XX|default)$/.test(status)) continue;
+    const content: DiscoveredMediaType[] = [];
+    for (const entry of findAll(response, n => n.type === "annotation" && name(n) === "Content")) {
+      const mediaType = annotationStringArg(entry, new Set(["mediaType"]));
+      if (!mediaType) continue;
+      const schemaAnnotation = findAll(entry, n => n.type === "annotation" && name(n) === "Schema")[0];
+      const implementation = schemaAnnotation ? annotationElement(schemaAnnotation, "implementation") : null;
+      const type = implementation?.namedChildren[0];
+      if (!type) continue;
+      let schema = javaTypeToSchema(type, model, 0, undefined, file);
+      if (findAll(entry, n => n.type === "annotation" && name(n) === "ArraySchema").length) schema = { type: "array", items: schema };
+      content.push({ mediaType, schema });
+    }
+    result.push({ statusCode: status, description: annotationStringArg(response, new Set(["description"])) ?? "", confidence: "high", ...(content.length ? { content } : {}) });
+  }
+  return result;
 }

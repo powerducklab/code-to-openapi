@@ -28,7 +28,7 @@ describe("axum edge cases", () => {
     expect(list.parameters.map((p: any) => p.name).sort()).toEqual(["limit", "q"]);
     expect(list.responses[0].content[0].schema).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/Order" },
+      items: { $ref: "#/components/schemas/serialized_Order" },
     });
 
     const health = op(ops, "get", "/healthz");
@@ -64,7 +64,7 @@ describe("axum edge cases", () => {
     const events = op(ops, "get", "/api/orders/{id}/events");
     expect(events.extensions?.["x-protocol"]).toBe("sse");
     expect(events.responses[0].content[0].itemSchema).toEqual({
-      $ref: "#/components/schemas/OrderEvent",
+      $ref: "#/components/schemas/serialized_OrderEvent",
     });
 
     const legacy = op(ops, "get", "/api/legacy/orders/{id}");

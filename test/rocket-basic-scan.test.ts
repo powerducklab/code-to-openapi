@@ -40,7 +40,7 @@ describe("Rocket routes", () => {
     const create = op(ops, "post", "/api/users");
     expect(create.requestBody.content[0].schema).toEqual({ $ref: "#/components/schemas/NewUser" });
     expect(create.responses[0].statusCode).toBe("200");
-    expect(create.responses[0].content[0].schema).toEqual({ $ref: "#/components/schemas/User" });
+    expect(create.responses[0].content[0].schema).toEqual({ $ref: "#/components/schemas/serialized_User" });
 
     // BasicAuth guard must not leak as a parameter.
     const protected_ = op(ops, "get", "/protected");

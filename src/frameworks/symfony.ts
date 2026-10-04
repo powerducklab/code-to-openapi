@@ -1,3 +1,7 @@
+import { belongsToPhpFunction } from "../lang/php/scope.js";
+import {mergeResponseVariants} from "../core/response-variants.js";
+import {parseDocument} from "yaml";
+import {posix} from "node:path";
 /**
  * Symfony framework pack (PHP, tree-sitter based).
  *
@@ -55,7 +59,7 @@ import {
   unknownJsonResponse,
 } from "../lang/php/response.js";
 
-const ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head"]);
+const ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete", "options", "head", "trace"]);
 
 function emptyResult() {
   return {
@@ -102,58 +106,24 @@ export const symfonyPack: FrameworkPack<PhpAnalysis> = {
     const candidates: RouteCandidate[] = [];
     const model = buildPhpModelIndex(analysis);
 
-    for (const [rel, file] of analysis.files) {
-      for (const classNode of findAll(file.root, (n) => n.type === "class_declaration")) {
-        const className = classNode.namedChildren.find((c) => c.type === "name")?.text;
-        if (!className) continue;
-        const classRoute = routeAttribute(classNode);
-        const body = classNode.namedChildren.find((c) => c.type === "declaration_list");
-        if (!body) continue;
-
-        const methodNodes = childrenOfType(body, "method_declaration");
-        let emittedInvokable = false;
-
-        for (const methodNode of methodNodes) {
-          const methodName = methodNode.namedChildren.find((c) => c.type === "name")?.text;
-          if (!methodName) continue;
-          const methodRoute = routeAttribute(methodNode);
-          if (!methodRoute) {
-            // Pure invokable controller: the class-level #[Route] binds to
-            // __invoke when the method itself carries no route attribute.
-            if (methodName === "__invoke" && classRoute && !emittedInvokable) {
-              emittedInvokable = true;
-              for (const verb of classRoute.methods) {
-                const candidate = buildCandidate({
-                  analysis,
-                  model,
-                  rel,
-                  methodNode,
-                  className,
-                  methodName,
-                  path: joinPath(classRoute.path, ""),
-                  name: combineNames(classRoute.name, ""),
-                  verb,
-                  originNode: classNode,
-                });
-                if (candidate) candidates.push(candidate);
-              }
+    const imports=yamlImports(ctx);
+    for(const [rel,file] of analysis.files)for(const classNode of findAll(file.root,n=>n.type==='class_declaration')){
+      const className=classNode.namedChildren.find(n=>n.type==='name')?.text;if(!className)continue;
+      const body=classNode.namedChildren.find(n=>n.type==='declaration_list');if(!body)continue;
+      const declared=routeAttributes(classNode);const parents:RouteAttr[] = declared.length?declared:[{path:'',name:'',methods:[],explicitMethods:false}];
+      for(const methodNode of childrenOfType(body,'method_declaration')){
+        const methodName=methodNode.namedChildren.find(n=>n.type==='name')?.text;if(!methodName)continue;
+        const children=routeAttributes(methodNode);
+        for(const parent of parents){
+          const routes=children.length?children:methodName==='__invoke'&&declared.length?[{path:'',name:'',methods:[],explicitMethods:false}]:[];
+          for(const route of routes){
+            const methods=route.explicitMethods?route.methods:parent.explicitMethods?parent.methods:[...ROUTE_VERBS];
+            const matches=imports.filter(entry=>entry.all||rel.startsWith(entry.directory!));
+            for(const imported of matches.length?matches:[{prefix:''}])for(const verb of methods){
+              const path=joinPath(imported.prefix,joinPath(parent.path,route.path));
+              const candidate=buildCandidate({analysis,model,rel,methodNode,className,methodName,path,name:combineNames(parent.name,route.name),verb,originNode:methodNode});
+              if(candidate)candidates.push(candidate);
             }
-            continue;
-          }
-          for (const verb of methodRoute.methods) {
-            const candidate = buildCandidate({
-              analysis,
-              model,
-              rel,
-              methodNode,
-              className,
-              methodName,
-              path: joinPath(classRoute?.path ?? "", methodRoute.path),
-              name: combineNames(classRoute?.name ?? "", methodRoute.name),
-              verb,
-              originNode: methodNode,
-            });
-            if (candidate) candidates.push(candidate);
           }
         }
       }
@@ -180,6 +150,7 @@ interface RouteAttr {
   path: string;
   name: string;
   methods: string[];
+  explicitMethods:boolean;
 }
 
 /**
@@ -187,9 +158,10 @@ interface RouteAttr {
  * when it carries no such attribute. Resolves both the short `#[Route(...)]`
  * and the fully-qualified `#[\\Symfony\\...\\Route(...)]` forms.
  */
-function routeAttribute(node: TsNode): RouteAttr | null {
+function routeAttributes(node: TsNode): RouteAttr[] {
+  const result:RouteAttr[]=[];
   const list = node.namedChildren.find((c) => c.type === "attribute_list");
-  if (!list) return null;
+  if (!list) return result;
   for (const group of childrenOfType(list, "attribute_group")) {
     for (const attr of childrenOfType(group, "attribute")) {
       const short = attributeName(attr);
@@ -225,11 +197,10 @@ function routeAttribute(node: TsNode): RouteAttr | null {
           }
         }
       }
-      // Symfony defaults to GET when no method constraint is declared.
-      return { path, name, methods: methods.length ? methods : ["get"] };
+      result.push({path,name,methods:methods.filter(m=>ROUTE_VERBS.has(m)),explicitMethods:methods.length>0});
     }
   }
-  return null;
+  return result;
 }
 
 /** Short attribute class name (last segment), handling qualified FQCN forms. */
@@ -243,7 +214,7 @@ function attributeName(attr: TsNode): string {
 function joinPath(prefix: string, sub: string): string {
   const clean = (s: string) => s.replace(/^\/+|\/+$/g, "");
   const joined = [clean(prefix), clean(sub)].filter(Boolean).join("/");
-  return joined ? `/${joined}` : "/";
+  return joined ? `/${joined}${sub.endsWith("/")?"/":""}` : "/";
 }
 
 /** Combine class- and method-level route names (class name is a prefix). */
@@ -365,9 +336,7 @@ function collectParameters(
 
     // #[MapRequestPayload] DTO: the request body is validated against the DTO.
     if (attrs.has("MapRequestPayload")) {
-      const dtoName = typeNode?.namedChildren.find((c) => c.type === "name")?.text
-        ?? (typeNode?.text.split("\\").pop() || "");
-      const ref = dtoName && analysis.classes.has(dtoName) ? ensurePhpComponent(dtoName, model) : undefined;
+      const ref = schema && Object.keys(schema).length ? schema : undefined;
       if (ref) {
         requestBody = {
           required: true,
@@ -422,7 +391,7 @@ function paramAttributes(param: TsNode): Set<string> {
 function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
   const responses: DiscoveredResponse[] = [];
 
-  for (const ret of findAll(handler, (n) => n.type === "return_statement")) {
+  for (const ret of findAll(handler, (n) => n.type === "return_statement" && belongsToPhpFunction(n, handler))) {
     const nullRet = ret.namedChildren.find((c) => c.type === "null");
     const expression = ret.namedChildren.find(
       (c) =>
@@ -467,15 +436,9 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
   const merged = new Map<string, DiscoveredResponse>();
   for (const response of responses) {
     const existing = merged.get(response.statusCode);
-    if (!existing || confidenceRank(response.confidence) > confidenceRank(existing.confidence)) {
-      merged.set(response.statusCode, response);
-    }
+    merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
   }
   return [...merged.values()];
-}
-
-function confidenceRank(confidence: Confidence): number {
-  return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
 }
 
 function interpretResponse(
@@ -491,7 +454,8 @@ function interpretResponse(
     const args = expression.namedChildren.find((c) => c.type === "arguments");
     const argNodes = args ? childrenOfType(args, "argument") : [];
     if (name === "JsonResponse") {
-      const status = integerText(argNodes[1]) ?? "200";
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
       const payload = argNodes[0];
       if (!payload) {
         return {
@@ -512,7 +476,8 @@ function interpretResponse(
     }
     if (name === "Response") {
       // Symfony's base Response renders an HTML (or streamed) payload.
-      const status = integerText(argNodes[1]) ?? "200";
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
       return {
         statusCode: status,
         description: "",
@@ -521,7 +486,9 @@ function interpretResponse(
       };
     }
     if (name === "StreamedResponse" || name === "BinaryFileResponse") {
-      return binaryResponse(integerText(argNodes[1]) ?? "200");
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
+      return binaryResponse(status);
     }
     if (name && model.analysis.classes.has(name)) {
       const ref = ensurePhpComponent(name, model);
@@ -546,7 +513,8 @@ function interpretResponse(
     const isThis = receiver?.text === "$this";
 
     if (isThis && method === "json") {
-      const status = integerText(argNodes[1]) ?? "200";
+      const status = integerText(argNodes[1]) ?? (argNodes[1] ? "default" : "200");
+      if (status === "default") gaps.push("response-unknown");
       const payload = argNodes[0];
       if (!payload) {
         return {
@@ -652,6 +620,25 @@ function hasRoutesYaml(ctx: ScanContext): boolean {
   return ctx.index.files.some((f) => /config\/routes.*\.ya?ml$/.test(f.path));
 }
 
+function routingDocuments(ctx:ScanContext):Array<{path:string;entries:Record<string,any>}>{
+ const documents=[];
+ for(const file of ctx.index.files){
+  if(!/(?:^|\/)config\/routes(?:\/[^]+)?\.ya?ml$/.test(file.path))continue;
+  try{const doc=parseDocument(file.content);if(doc.errors.length)continue;const value=doc.toJS({maxAliasCount:100});if(value&&typeof value==='object'&&!Array.isArray(value))documents.push({path:file.path,entries:value});}catch{/* Unknown YAML is not guessed. */}
+ }
+ return documents;
+}
+function yamlImports(ctx:ScanContext):Array<{prefix:string;all?:boolean;directory?:string}>{
+ const imports=[];
+ for(const doc of routingDocuments(ctx))for(const entry of Object.values(doc.entries)){
+  if(!entry||typeof entry!=='object'||typeof entry.resource!=='string')continue;
+  const prefix=typeof entry.prefix==='string'?entry.prefix:'';
+  if(entry.resource==='routing.controllers')imports.push({prefix,all:true});
+  else if((entry.type==='attribute'||entry.type==='annotation')&&!entry.resource.includes('*'))imports.push({prefix,directory:posix.normalize(posix.join(posix.dirname(doc.path),entry.resource)).replace(/\/?$/,'/')});
+ }
+ return imports;
+}
+
 function yamlRoutes(
   ctx: ScanContext,
   analysis: PhpAnalysis,
@@ -659,22 +646,12 @@ function yamlRoutes(
   unresolved: DiscoveredUnresolved[],
 ): RouteCandidate[] {
   const out: RouteCandidate[] = [];
-  for (const f of ctx.index.files) {
-    if (!/config\/routes.*\.ya?ml$/.test(f.path)) continue;
-    const text = f.content;
-    // Minimal YAML route table reader: each top-level key is a route name, with
-    // `path:` and optionally `methods:` and `controller:` lines beneath it.
-    const routeBlocks = text.split(/^(?=\S)/m);
-    for (const block of routeBlocks) {
-      const pathMatch = /^\s+path:\s*["']?([^\s"']+)["']?\s*$/m.exec(block);
-      if (!pathMatch) continue;
-      const rawPath = pathMatch[1]!.startsWith("/") ? pathMatch[1]! : `/${pathMatch[1]!}`;
-      const path = normalizeSymfonyPath(rawPath);
-      const methodsMatch = /^\s+methods:\s*\[?([^\]\n]*)\]?\s*$/m.exec(block);
-      const verbs = methodsMatch
-        ? methodsMatch[1]!.split(",").map((v) => v.trim().toLowerCase()).filter((v) => ROUTE_VERBS.has(v))
-        : ["get"];
-      const controllerMatch = /^\s+controller:\s*["']?([^"'\s]+)["']?\s*$/m.exec(block);
+  for(const f of routingDocuments(ctx)){
+    for(const entry of Object.values(f.entries)){
+      if(!entry||typeof entry!=='object'||typeof entry.path!=='string')continue;
+      const path=normalizeSymfonyPath(entry.path.startsWith('/')?entry.path:'/'+entry.path);
+      const verbs=entry.methods?(Array.isArray(entry.methods)?entry.methods:[entry.methods]).map((v:any)=>String(v).toLowerCase()).filter((v:string)=>ROUTE_VERBS.has(v)):[...ROUTE_VERBS];
+      const controllerMatch=typeof entry.controller==='string'?['',entry.controller]:null;
       let methodNode: TsNode | null = null;
       let className: string | null = null;
       let methodName: string | null = null;

@@ -1,0 +1,321 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Chi source-known contract",
+    "version": "1"
+  },
+  "paths": {
+    "/notes": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent source contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "title",
+                      "content",
+                      "created_at"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Independent source contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "title",
+                    "content",
+                    "created_at"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "title",
+                  "content"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/notes/{ID}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Independent source contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "title",
+                    "content",
+                    "created_at"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "Independent source contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "title",
+                    "content",
+                    "created_at"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "500": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Independent source contract",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "x-audit-source": {
+    "repository": "https://github.com/Woun1zoN/go-notes-api",
+    "commit": "60c127f3d16828dc1ec2650d5ebd9bf58a7f4504",
+    "files": [
+      "cmd/main.go",
+      "internal/handlers/handlers.go",
+      "internal/models/dto.go",
+      "internal/models/note.go",
+      "internal/middleware/recovery.go"
+    ]
+  },
+  "x-audit-limitations": [
+    "DB-error helper response variants not yet independently enumerated. Recovery middleware 500 is included. Pointer nullability beyond validator-proven fields not certified."
+  ],
+  "x-audit-provenance": {
+    "sourceBaseline": "docs/audits/2026-10-04-go-writers/chi-baseline.json",
+    "nativeEvidence": "chi-native-validation.json",
+    "correction": "Original UpdateDTO Content *string has validate:omitempty,min=1. Native validator accepts content:null when title is valid; minLength still applies to strings."
+  }
+}

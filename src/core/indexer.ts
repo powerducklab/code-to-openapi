@@ -196,7 +196,7 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
 
       const dot = entry.name.lastIndexOf(".");
       const ext = dot >= 0 ? entry.name.slice(dot).toLowerCase() : "";
-      const language = EXTENSION_LANGUAGE[ext];
+      const language = EXTENSION_LANGUAGE[ext]??(/(?:^|\/)config\/routes(?:\/[^]+)?\.ya?ml$/.test(rel)?'yaml':undefined);
       if (!language) continue;
       if (!options.includeTests && TEST_FILE.test(rel)) continue;
       if (ig.ignores(rel)) continue;

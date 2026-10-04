@@ -1,0 +1,2147 @@
+{
+  "assertions": 766,
+  "mismatches": 352,
+  "errors": [
+    {
+      "where": "post /api/users response 200 application/json",
+      "field": "/properties/user/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /api/users/login response 200 application/json",
+      "field": "/properties/user/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/user response 200 application/json",
+      "field": "/properties/user/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "put /api/user response 200 application/json",
+      "field": "/properties/user/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/profiles/{username} response 200 application/json",
+      "field": "/properties/profile/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /api/profiles/{username}/follow response 200 application/json",
+      "field": "/properties/profile/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "delete /api/profiles/{username}/follow response 200 application/json",
+      "field": "/properties/profile/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/author/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articlesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articlesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articlesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles response 200 application/json",
+      "field": "/properties/articlesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles request application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favorited/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favorited/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favorited/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/slug/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/slug/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/slug/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/author/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articles/items/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articlesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articlesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articlesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/feed response 200 application/json",
+      "field": "/properties/articlesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": false,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": false,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": false,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} request application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favorited/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/slug/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "put /api/articles/{slug} response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/description/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favorited/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/favoritesCount/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/slug/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/type",
+      "expected": "array",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/tagList/items/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/title/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "delete /api/articles/{slug}/favorite response 200 application/json",
+      "field": "/properties/article/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/author/properties/image/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "get /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comments/items/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments request application/json",
+      "field": "/properties/comment/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments request application/json",
+      "field": "/properties/comment/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments request application/json",
+      "field": "/properties/comment/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments request application/json",
+      "field": "/properties/comment/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/bio/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/bio/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/bio/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/following/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/following/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/following/type",
+      "expected": "boolean",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/image/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/image/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/image/type",
+      "expected": [
+        "string",
+        "null"
+      ],
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/username/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/username/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/author/properties/username/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/body/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/body/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/body/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/createdAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/createdAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/createdAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/createdAt/format",
+      "expected": "date-time",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/id/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/id/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/id/type",
+      "expected": "integer",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/id/format",
+      "expected": "int64",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/updatedAt/present",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/updatedAt/required",
+      "expected": true,
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/updatedAt/type",
+      "expected": "string",
+      "actual": null
+    },
+    {
+      "where": "post /api/articles/{slug}/comments response 200 application/json",
+      "field": "/properties/comment/properties/updatedAt/format",
+      "expected": "date-time",
+      "actual": null
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

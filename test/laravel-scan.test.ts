@@ -35,8 +35,8 @@ describe("Laravel PHP scan", () => {
     expect(bodySchema?.required).toEqual(["name"]);
     expect(bodySchema?.properties).toMatchObject({
       name: { type: "string" },
-      age: { type: "integer" },
-      tags: { type: "array", items: { type: "string" } },
+      age: { type: ["integer", "null"] },
+      tags: { type: ["array", "null"], items: { type: "string" } },
     });
 
     // Group prefix accumulation.
@@ -79,7 +79,7 @@ describe("Laravel PHP scan", () => {
     expect(user?.schema.properties).toMatchObject({
       id: { type: "string" },
       name: { type: "string" },
-      age: { type: "integer" },
+      age: { type: ["integer", "null"] },
       tags: { type: "array", items: {} },
     });
     expect(user?.schema.required).toEqual(["id", "name"]);

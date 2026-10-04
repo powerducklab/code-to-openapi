@@ -11,7 +11,7 @@ import type {
 } from "../../core/types.js";
 import type { PyClass, PythonAnalysis, PyField } from "./index.js";
 import type { TsNode } from "../treesitter/runtime.js";
-import { childrenOfType, firstChildOfType, literalString } from "../treesitter/ast.js";
+import { childrenOfType, firstChildOfType, literalString, keywordArgument, positionalArguments } from "../treesitter/ast.js";
 
 const SCALAR_MAP: Record<string, JsonSchema> = {
   int: { type: "integer" },
@@ -40,8 +40,8 @@ const SCALAR_MAP: Record<string, JsonSchema> = {
   time: { type: "string", format: "time" },
   timedelta: { type: "string", format: "duration" },
   Decimal: { type: "number" },
-  HttpUrl: { type: "string", format: "uri" },
-  AnyHttpUrl: { type: "string", format: "uri" },
+  HttpUrl: { type: "string", format: "uri", minLength: 1, maxLength: 2083 },
+  AnyHttpUrl: { type: "string", format: "uri", minLength: 1, maxLength: 2083 },
   EmailStr: { type: "string", format: "email" },
   None: { type: "null" },
 };
@@ -51,6 +51,9 @@ export interface ModelIndex {
   pydanticNames: Set<string>;
   enumNames: Set<string>;
   componentsByName: Map<string, DiscoveredComponent>;
+  mode?: "input" | "output";
+  byAlias?: boolean;
+  outputRequired?: boolean;
 }
 
 function baseName(node: TsNode): string {
@@ -123,7 +126,7 @@ function literalValue(node: TsNode): unknown {
   return undefined;
 }
 
-function genericParts(node: TsNode): { name: string; args: TsNode[] } | null {
+export function genericParts(node: TsNode): { name: string; args: TsNode[] } | null {
   // Current grammars expose generic_type; older ones use subscript.
   let nameNode: TsNode | null = null;
   let args: TsNode[] = [];
@@ -160,20 +163,11 @@ function isBareRef(schema: JsonSchema | null | undefined): boolean {
   return !!schema && typeof schema.$ref === "string" && Object.keys(schema).length === 1;
 }
 
-// Nullable shorthand for a single non-null variant. When the variant is a type
-// variable bound through generic specialization (Optional[T] with T a model),
-// emit the bare component $ref: the substitution fixes the contract and
-// sibling keywords are not portable on a $ref. Direct optional model fields
-// (Optional[ConcreteModel]) keep the established `{ $ref, nullable }` shorthand.
-function nullableSchema(
-  schema: JsonSchema,
-  origin: TsNode | null,
-  subst: Map<string, TsNode>,
-): JsonSchema {
-  if (isBareRef(schema) && origin?.type === "identifier" && subst.has(origin.text)) {
-    return schema;
-  }
-  return { ...schema, nullable: true };
+function nullableSchema(schema: JsonSchema, _origin?: TsNode | null, _subst?: Map<string, TsNode>): JsonSchema {
+  if (schema.type === "null" || (Array.isArray(schema.anyOf) && schema.anyOf.some((branch) => branch && branch.type === "null" && Object.keys(branch).length === 1))) return schema;
+  if (typeof schema.type === "string" && !schema.enum && schema.const === undefined) return { ...schema, type: [schema.type, "null"] };
+  if (Array.isArray(schema.type)) return { ...schema, type: [...new Set([...schema.type, "null"])] };
+  return { anyOf: [schema, { type: "null" }] };
 }
 
 export function annotationToSchema(
@@ -202,7 +196,7 @@ export function annotationToSchema(
       return nullable ? nullableSchema(schemas[0]!, variants[0] ?? null, subst) : schemas[0];
     }
     const union: JsonSchema = { anyOf: schemas };
-    return nullable ? { ...union, nullable: true } : union;
+    return nullable ? nullableSchema(union) : union;
   }
 
   if (node.type === "generic_type" || node.type === "subscript") {
@@ -239,7 +233,7 @@ export function annotationToSchema(
       if (schemas.length === 1) return nullable ? nullableSchema(schemas[0]!, variants[0] ?? null, subst) : schemas[0];
       if (schemas.length > 1) {
         const union: JsonSchema = { anyOf: schemas };
-        return nullable ? { ...union, nullable: true } : union;
+        return nullable ? nullableSchema(union) : union;
       }
       return null;
     }
@@ -258,7 +252,7 @@ export function annotationToSchema(
       return schema;
     }
     if (SCALAR_MAP[generic.name] || SCALAR_MAP[name]) {
-      return SCALAR_MAP[name] ?? SCALAR_MAP[generic.name] ?? null;
+      return { ...(SCALAR_MAP[name] ?? SCALAR_MAP[generic.name]) };
     }
     // Parameterized user model (e.g. ApiResponse[Product]): build a specialized
     // component so every type variable is bound to its concrete argument.
@@ -284,7 +278,7 @@ export function annotationToSchema(
       ensureComponent(name, index);
       return { $ref: `#/components/schemas/${name}` };
     }
-    return SCALAR_MAP[name] ?? null;
+    return SCALAR_MAP[name] ? { ...SCALAR_MAP[name] } : null;
   }
 
   if (node.type === "string") {
@@ -322,7 +316,50 @@ function enumValues(cls: PyClass): { type: string; values: (string | number)[] }
   return { type, values };
 }
 
+function pydanticFieldCall(field: PyField): TsNode | null {
+  return field.default?.type === "call" && /(?:^|\.)Field$/.test(field.default.namedChildren[0]?.text ?? "") ? field.default : null;
+}
+
+function fieldAlias(field: PyField, cls: PyClass, index: ModelIndex): string {
+  if (!index.byAlias) return field.name;
+  const call = pydanticFieldCall(field);
+  const explicit = call ? keywordArgument(call, index.mode === "output" ? "serialization_alias" : "validation_alias") ?? keywordArgument(call, "alias") : null;
+  if (explicit) return literalString(explicit) ?? field.name;
+  // Recognize the bounded snake-to-camel generator used by the source, not
+  // the generator's name. Unknown user functions do not invent field aliases.
+  const visited = new Set<string>();
+  const generatorFor = (owner: PyClass): TsNode | null => {
+    if (visited.has(owner.name)) return null;
+    visited.add(owner.name);
+    const config = owner.node.namedChildren.find(n => n.type === "block")?.namedChildren.find(n => n.type === "class_definition" && n.childForFieldName("name")?.text === "Config");
+    const configClass = config ? index.analysis.classes.find(c => c.node.id === config.id) : undefined;
+    const own = configClass?.fields.find(f => f.name === "alias_generator")?.default;
+    if (own) return own;
+    for (const base of owner.bases) {
+      const parent = index.analysis.classes.find(c => c.name === base.text);
+      const found = parent ? generatorFor(parent) : null;
+      if (found) return found;
+    }
+    return null;
+  };
+  const generator = generatorFor(cls);
+  const matches = generator?.type === "identifier" ? index.analysis.functions.filter(fn => fn.name === generator.text) : [];
+  const fn = matches.find(fn => fn.file === cls.file) ?? (matches.length === 1 ? matches[0] : undefined);
+  const code = fn?.body?.text.replace(/\s+/g, " ") ?? "";
+  if (/return ["']{2}\.join\( word if index == 0 else word\.capitalize\(\) for index, word in enumerate\(string\.split\(["']_["']\)\) \)/.test(code)) {
+    return field.name.split("_").map((word,i) => i ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() : word).join("");
+  }
+  return field.name;
+}
+
 export function fieldRequired(field: PyField, index: ModelIndex): boolean {
+  if (index.mode === "output" && index.outputRequired !== false) return true;
+  const fieldCall = pydanticFieldCall(field);
+  if (fieldCall) {
+    const value = keywordArgument(fieldCall, "default") ?? positionalArguments(fieldCall)[0];
+    if (keywordArgument(fieldCall, "default_factory")) return false;
+    return !value || value.type === "ellipsis";
+  }
   if (!field.annotation) return field.default === null;
   // Optional / X | None annotations are never required.
   if (field.annotation.type === "binary_operator" && field.annotation.text.includes("None")) {
@@ -453,15 +490,35 @@ export function buildComponent(
         properties[key] = value as JsonSchema;
       }
       for (const key of (parentSchema.required as string[]) ?? []) required.push(key);
+      for (const field of parent.fields) {
+        const oldName = fieldAlias(field, parent, index);
+        const newName = fieldAlias(field, cls, index);
+        if (oldName !== newName && properties[oldName]) {
+          properties[newName] = properties[oldName]!;
+          delete properties[oldName];
+          for (let i = 0; i < required.length; i++) if (required[i] === oldName) required[i] = newName;
+        }
+      }
     }
   }
 
   for (const field of cls.fields) {
-    const schema = field.annotation
-      ? annotationToSchema(field.annotation, index, 1, subst)
-      : null;
-    if (schema) properties[field.name] = schema;
-    if (fieldRequired(field, index) && schema) required.push(field.name);
+    if (!field.annotation || field.name.startsWith("_") || /^(?:typing\.)?ClassVar\[/.test(field.annotation.text)) continue;
+    const call = pydanticFieldCall(field);
+    if (index.mode === "output" && call && keywordArgument(call, "exclude")?.type === "true") continue;
+    let schema = annotationToSchema(field.annotation, index, 1, subst);
+    const value = call ? keywordArgument(call, "default") ?? positionalArguments(call)[0] : field.default;
+    if (value?.type === "none" && schema && !(Array.isArray(schema.type) && schema.type.includes("null"))) schema = nullableSchema(schema);
+    if (schema && value) {
+      const literal = literalValue(value);
+      if (literal !== undefined && literal !== null) schema = { ...schema, default: literal };
+    }
+    const wireName = fieldAlias(field, cls, index);
+    // A child override replaces inherited requiredness as well as its type.
+    for (let i = required.length - 1; i >= 0; i--) if (required[i] === wireName || required[i] === field.name) required.splice(i, 1);
+    if (wireName !== field.name) delete properties[field.name];
+    properties[wireName] = schema ?? {};
+    if (fieldRequired(field, index) && schema) required.push(wireName);
   }
 
   stack.delete(name);

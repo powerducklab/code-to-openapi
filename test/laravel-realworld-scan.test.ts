@@ -51,10 +51,10 @@ describe("laravel real-world API resources", () => {
     expect(show).toEqual({ $ref: "#/components/schemas/ProductResource" });
 
     const body = doc.paths["/api/products"].post.requestBody.content["application/json"].schema;
-    expect(body.properties.name).toEqual({ type: "string" });
-    expect(body.properties.price).toEqual({ type: "number" });
+    expect(body.properties.name).toEqual({ type: "string", minLength: 1, maxLength: 120 });
+    expect(body.properties.price).toEqual({ type: "number", minimum: 0 });
     expect(body.properties.tags).toEqual({ type: "array", items: { type: "string" } });
-    expect(body.properties.category_id).toEqual({ type: "integer" });
+    expect(body.properties.category_id).toEqual({ type: ["integer", "null"] });
     expect(body.required).toEqual(["name", "price"]);
   });
 });

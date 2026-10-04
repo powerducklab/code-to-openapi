@@ -39,7 +39,7 @@ describe("asp.net core golden project", () => {
     const list = doc.paths["/api/Users"].get;
     expect(list.responses["200"].content["application/json"].schema).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/User" },
+      items: { $ref: "#/components/schemas/serialized_User" },
     });
 
     // Route constraint {id:guid} normalizes to {id}.
@@ -49,7 +49,7 @@ describe("asp.net core golden project", () => {
     expect(idParam.required).toBe(true);
     expect(idParam.schema).toEqual({ type: "string" });
     expect(detail.responses["200"].content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/User",
+      $ref: "#/components/schemas/serialized_User",
     });
 
     // ProducesResponseType(typeof(User), 201).
@@ -60,7 +60,7 @@ describe("asp.net core golden project", () => {
     });
     const dto = doc.components.schemas.CreateUserRequest;
     expect(dto.properties.name).toEqual({ type: "string" });
-    expect(dto.properties.age).toEqual({ type: "integer" });
+    expect(dto.properties.age).toEqual({ type: ["integer", "null"] });
     expect(dto.properties.tags).toEqual({
       type: "array",
       items: { type: "string" },
@@ -74,7 +74,7 @@ describe("asp.net core golden project", () => {
     expect(q.required).toBe(true);
     const page = search.parameters.find((p: any) => p.name === "page");
     expect(page.required).toBeFalsy();
-    expect(page.schema).toEqual({ type: "integer" });
+    expect(page.schema).toEqual({ type: ["integer", "null"] });
     const trace = search.parameters.find((p: any) => p.name === "X-Trace");
     expect(trace.in).toBe("header");
     expect(trace.required).toBeFalsy();
@@ -90,13 +90,13 @@ describe("asp.net core golden project", () => {
     expect(events["x-protocol"]).toBe("sse");
     expect(
       events.responses["200"].content["text/event-stream"].itemSchema,
-    ).toEqual({ $ref: "#/components/schemas/UserEvent" });
+    ).toEqual({ $ref: "#/components/schemas/serialized_UserEvent" });
 
     // Minimal APIs.
     const health = doc.paths["/health"].get;
     expect(health.operationId).toBe("GetHealth");
     expect(health.responses["200"].content["application/json"].schema).toEqual({
-      $ref: "#/components/schemas/HealthStatus",
+      $ref: "#/components/schemas/serialized_HealthStatus",
     });
 
     const createProduct = doc.paths["/products"].post;

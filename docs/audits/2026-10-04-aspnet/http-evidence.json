@@ -1,0 +1,180 @@
+[
+  {
+    "method": "post",
+    "path": "/api/users",
+    "status": 201,
+    "media": "application/json",
+    "fields": [
+      "user"
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/api/users/login",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "user"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/user",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "user"
+    ]
+  },
+  {
+    "method": "put",
+    "path": "/api/user",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "user"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/profiles/{username}",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "profile"
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/api/profiles/{username}/follow",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "profile"
+    ]
+  },
+  {
+    "method": "delete",
+    "path": "/api/profiles/{username}/follow",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "profile"
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/api/articles",
+    "status": 201,
+    "media": "application/json",
+    "fields": [
+      "article"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/articles/{slug}",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "article"
+    ]
+  },
+  {
+    "method": "put",
+    "path": "/api/articles/{slug}",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "article"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/articles",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "articles",
+      "articlesCount"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/articles/feed",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "articles",
+      "articlesCount"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/tags",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "tags"
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/api/articles/{slug}/favorite",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "article"
+    ]
+  },
+  {
+    "method": "delete",
+    "path": "/api/articles/{slug}/favorite",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "article"
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/api/articles/{slug}/comments",
+    "status": 201,
+    "media": "application/json",
+    "fields": [
+      "comment"
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/api/articles/{slug}/comments",
+    "status": 200,
+    "media": "application/json",
+    "fields": [
+      "comments"
+    ]
+  },
+  {
+    "method": "delete",
+    "path": "/api/articles/{slug}/comments/{id}",
+    "status": 204,
+    "media": "text/plain",
+    "fields": null
+  },
+  {
+    "method": "delete",
+    "path": "/api/articles/{slug}",
+    "status": 204,
+    "media": "text/plain",
+    "fields": null
+  },
+  {
+    "method": "post",
+    "path": "/api/users",
+    "status": 422,
+    "media": "application/json",
+    "fields": [
+      "errors"
+    ]
+  }
+]

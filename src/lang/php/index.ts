@@ -16,12 +16,15 @@ export interface PhpRule {
 }
 
 export interface PhpClass {
+  node?: TsNode;
   name: string;
   fqcn: string;
   extends: string | null;
   methods: Map<string, TsNode>;
   /** Constructor promotion and declared public properties. */
-  properties: { name: string; typeNode: TsNode; nullable: boolean; hasDefault: boolean }[];
+  properties: { name: string; typeNode: TsNode; nullable: boolean; hasDefault: boolean; promoted?: boolean; visibility?: string }[];
+  /** True only for the global PHP JSON serialization interface. */
+  jsonSerializable?: boolean;
   /** Docblock @var tag per property name (e.g. "string[]"). */
   propertyDoc: Map<string, string>;
   /** FormRequest rules() entries, when present. */
@@ -87,7 +90,7 @@ function docblockAbove(lines: string[], row: number): string {
   return collected.join("\n");
 }
 
-function parseClass(node: TsNode, namespace: string | null, lines: string[]): PhpClass | null {
+function parseClass(node: TsNode, namespace: string | null, lines: string[], imports: Map<string, string>): PhpClass | null {
   const nameNode = node.namedChildren.find((c) => c.type === "name");
   if (!nameNode) return null;
   const name = nameNode.text;
@@ -130,25 +133,25 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[]): Ph
     }
 
     for (const prop of childrenOfType(body, "property_declaration")) {
-      const variable = findFirst(prop, (c) => c.type === "variable_name");
-      const typeNode = prop.namedChildren.find(
-        (c) =>
-          c.type === "primitive_type" ||
-          c.type === "named_type" ||
-          c.type === "optional_type" ||
-          c.type === "union_type",
-      );
-      if (!variable || !typeNode) continue;
-      const propName = variable.text.replace(/^\$/, "");
+      // Static fields are class state, not JSON instance properties.
+      if (prop.namedChildren.some(child => child.type === "static_modifier")) continue;
+      const declaredType = prop.namedChildren.find(child => ["primitive_type", "named_type", "optional_type", "union_type"].includes(child.type));
       const doc = docblockAbove(lines, prop.startPosition.row);
       const varMatch = doc.match(/@var\s+([^\s*]+)/);
-      if (varMatch) propertyDoc.set(propName, varMatch[1]!);
-      properties.push({
-        name: propName,
-        typeNode,
-        nullable: typeNode.type === "optional_type",
-        hasDefault: Boolean(prop.namedChildren.find((c) => c.type === "assignment_expression")),
-      });
+      for (const element of childrenOfType(prop, "property_element")) {
+        const variable = element.namedChildren.find(child => child.type === "variable_name");
+        if (!variable) continue;
+        const name = variable.text.replace(/^\$/, "");
+        if (varMatch) propertyDoc.set(name, varMatch[1]!);
+        properties.push({
+          name,
+          visibility: prop.namedChildren.find(child => child.type === "visibility_modifier")?.text ?? "public",
+          // Untyped properties accept any value; their initial value is not a type constraint.
+          typeNode: declaredType ?? prop,
+          nullable: !declaredType || declaredType.type === "optional_type",
+          hasDefault: !declaredType || element.namedChildren.some(child => child.type === "property_initializer"),
+        });
+      }
     }
 
     const constructor = methods.get("__construct");
@@ -180,6 +183,8 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[]): Ph
           );
           properties.push({
             name: variable.text.replace(/^\$/, ""),
+            promoted: true,
+            visibility: promoted.namedChildren.find(c => c.type === "visibility_modifier")?.text ?? "public",
             typeNode,
             nullable:
               typeNode.type === "optional_type" ||
@@ -192,7 +197,13 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[]): Ph
   }
 
   return {
+    node,
     name,
+    jsonSerializable: node.namedChildren.find(c => c.type === "class_interface_clause")?.namedChildren.some(c => {
+      const raw = c.text;
+      const resolved = raw.startsWith("\\") ? raw.slice(1) : imports.get(raw) ?? (namespace ? `${namespace}\\${raw}` : raw);
+      return resolved === "JsonSerializable";
+    }) ?? false,
     fqcn: namespace ? `${namespace}\\${name}` : name,
     extends: extendsName,
     methods,
@@ -209,8 +220,14 @@ export function parseRulesMethod(method: TsNode): PhpRule[] {
   const rules: PhpRule[] = [];
   // Only the returned top-level array defines rule entries; iterating every
   // nested array would double-count array-form rule values.
-  const returned = findAll(method, (n) => n.type === "array_creation_expression");
-  const topLevel = returned[0];
+  const body = method.namedChildren.find(n => n.type === 'compound_statement');
+  // A helper's argument array is not a returned validation contract. Keep
+  // dynamic/branch-dependent rule builders unresolved instead of guessing.
+  const returned = body?.namedChildren.filter(n => n.type === 'return_statement') ?? [];
+  const args = method.namedChildren.find(n => n.type === 'arguments');
+  const topLevel = method.type === 'method_declaration'
+    ? (returned.length === 1 && findAll(body, n => n.type === 'return_statement').length === 1 ? returned[0]!.namedChildren.find(n => n.type === 'array_creation_expression') : undefined)
+    : args?.namedChildren.find(n => n.type === 'argument')?.namedChildren.find(n => n.type === 'array_creation_expression');
   if (!topLevel) return rules;
   for (const element of childrenOfType(topLevel, "array_element_initializer")) {
     const strings = childrenOfType(element, "string");
@@ -263,6 +280,42 @@ export function phpStringText(node: TsNode | undefined): string | null {
   return content ? content.text : node.text.replace(/^['"]|['"]$/g, "");
 }
 
+const lexicalFileCache = new WeakMap<PhpAnalysis, Map<number, PhpFile>>();
+
+/** Resolve a class in the lexical file, never by an ambiguous short name. */
+export function resolvePhpClass(name: string, analysis: PhpAnalysis, at?: TsNode): PhpClass | undefined {
+  let root = at;
+  while (root?.parent) root = root.parent;
+  let files = lexicalFileCache.get(analysis);
+  if (!files) {
+    files = new Map([...analysis.files.values()].map(file => [file.root.id, file]));
+    lexicalFileCache.set(analysis, files);
+  }
+  const file = root ? files.get(root.id) : undefined;
+  const raw = name.replace(/^\\/, "");
+  if (name.startsWith("\\")) return analysis.classes.get(raw);
+  if (file) {
+    const parts = raw.split("\\");
+    const imported = file.imports.get(parts[0]!);
+    const qualified = imported ? [imported, ...parts.slice(1)].join("\\") : file.namespace ? `${file.namespace}\\${raw}` : raw;
+    return analysis.classes.get(qualified);
+  }
+  return analysis.classes.get(raw);
+}
+
+export function findPhpMethod(cls: PhpClass, name: string, analysis: PhpAnalysis): TsNode | undefined {
+  const visited = new Set<string>();
+  let current: PhpClass | undefined = cls;
+  while (current && !visited.has(current.fqcn) && visited.size < 16) {
+    visited.add(current.fqcn);
+    const own = current.methods.get(name);
+    if (own) return own;
+    const context: TsNode | undefined = current.node ?? current.methods.values().next().value;
+    current = current.extends ? resolvePhpClass(current.extends, analysis, context) : undefined;
+  }
+  return undefined;
+}
+
 export const createPhpAnalysis: LanguagePack<PhpAnalysis>["analyze"] = async (
   ctx: ScanContext,
 ) => {
@@ -270,6 +323,7 @@ export const createPhpAnalysis: LanguagePack<PhpAnalysis>["analyze"] = async (
   const files = new Map<string, PhpFile>();
   const classes = new Map<string, PhpClass>();
   const enums = new Map<string, PhpEnum>();
+  const ambiguous = new Set<string>();
 
   for (const file of index.files) {
     if (file.language !== "php") continue;
@@ -305,9 +359,17 @@ export const createPhpAnalysis: LanguagePack<PhpAnalysis>["analyze"] = async (
 
     files.set(file.path, { path: file.path, root, namespace, imports });
 
-    for (const classNode of findAll(root, (n) => n.type === "class_declaration")) {
-      const cls = parseClass(classNode, namespace, file.content.split("\n"));
-      if (cls && !classes.has(cls.name)) classes.set(cls.name, cls);
+    for (const classNode of findAll(root, (n) => n.type === "class_declaration" || n.type === "interface_declaration")) {
+      const cls = parseClass(classNode, namespace, file.content.split("\n"), imports);
+      if (cls) {
+        const previous = classes.get(cls.name);
+        if (previous && previous.fqcn !== cls.fqcn) {
+          ambiguous.add(cls.name);
+          classes.delete(cls.name);
+        }
+        if (!ambiguous.has(cls.name)) classes.set(cls.name, cls);
+        classes.set(cls.fqcn, cls);
+      }
     }
     for (const enumNode of findAll(root, (n) => n.type === "enum_declaration")) {
       const en = parseEnum(enumNode);

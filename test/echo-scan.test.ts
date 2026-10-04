@@ -46,7 +46,7 @@ describe("Echo pack", () => {
 
     const create = op(ops, "post", "/items");
     expect(create.requestBody.content[0].schema).toEqual({
-      $ref: "#/components/schemas/ItemInput",
+      $ref: "#/components/schemas/input_ItemInput",
     });
     expect(create.responses.map((r: any) => r.statusCode).sort()).toEqual(["201", "400"]);
 

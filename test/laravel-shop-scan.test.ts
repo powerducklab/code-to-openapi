@@ -80,7 +80,7 @@ describe("laravel-shop project fixture", () => {
       id: { type: "integer" },
       author: { type: "string" },
       rating: { type: "integer" },
-      comment: { type: "string" },
+      comment: { type: ["string", "null"] },
     });
 
     const orderResource = doc.components.schemas.OrderResource.properties;
@@ -121,6 +121,7 @@ describe("laravel-shop project fixture", () => {
     expect(body.properties.category).toEqual({
       type: "string",
       enum: ["electronics", "books", "home"],
+      minLength: 1,
     });
     expect(body.properties.tags).toEqual({
       type: "array",
@@ -132,7 +133,7 @@ describe("laravel-shop project fixture", () => {
     ].schema;
     expect(update.properties.tags).toEqual({
       type: "array",
-      items: { type: "string" },
+      items: { type: "string", maxLength:32 },
     });
   });
 
@@ -143,7 +144,7 @@ describe("laravel-shop project fixture", () => {
     const form = upload.requestBody.content["multipart/form-data"].schema;
     expect(form.required).toContain("image");
     expect(form.properties.image).toEqual({ type: "string", format: "binary" });
-    expect(form.properties.caption).toEqual({ type: "string" });
+    expect(form.properties.caption).toEqual({ type: ["string", "null"], maxLength:255 });
     const response = upload.responses["201"].content["application/json"].schema;
     expect(response.properties.path).toEqual({ type: "string" });
     expect(response.properties.caption).toEqual({ type: "string" });

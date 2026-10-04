@@ -149,7 +149,7 @@ type Subst = Map<string, TsNode>;
 export interface JavaModelIndex {
   readonly byName: Map<string, JavaTypeDef>;
   readonly components: Map<string, JsonSchema>;
-  resolveDef(name: string, fileRel?: string): JavaTypeDef | undefined;
+  resolveDef(name: string, fileRel?: string, at?: TsNode): JavaTypeDef | undefined;
   resolveFqn(fqn: string): JavaTypeDef | undefined;
 }
 
@@ -175,35 +175,52 @@ export function buildJavaModelIndex(analysis: JavaAnalysis): JavaModelIndex {
   const resolveFqn = (fqn: string): JavaTypeDef | undefined =>
     analysis.typesByFqn.get(fqn);
 
-  const resolveDef = (name: string, fileRel?: string): JavaTypeDef | undefined => {
-    // Fully qualified reference.
+  const byNode = new Map<number, JavaTypeDef>();
+  const scopedNames = new Map<string, JavaTypeDef[]>();
+  const simpleNames = new Map<string, JavaTypeDef[]>();
+  for (const def of analysis.typesByFqn.values()) {
+    byNode.set(def.node.id, def);
+    const key = `${def.file}\0${def.name}`;
+    scopedNames.set(key, [...(scopedNames.get(key) ?? []), def]);
+    simpleNames.set(def.name, [...(simpleNames.get(def.name) ?? []), def]);
+  }
+  const resolveDef = (name: string, fileRel?: string, at?: TsNode): JavaTypeDef | undefined => {
+    let scope = at;
+    while (scope) {
+      const owner = byNode.get(scope.id);
+      if (owner) {
+        // Generic substitutions retain their original AST node. Resolve imports
+        // at that declaration, not in the generic envelope receiving the type.
+        fileRel = owner.file;
+        if (owner.name === name) return owner;
+        const nested = analysis.typesByFqn.get(`${owner.fqn}.${name}`);
+        if (nested) return nested;
+      }
+      scope = scope.parent ?? undefined;
+    }
+    const table = fileRel ? analysis.imports.get(fileRel) : undefined;
     if (name.includes(".")) {
       const exact = analysis.typesByFqn.get(name);
       if (exact) return exact;
-      const tail = name.slice(name.lastIndexOf(".") + 1);
-      return analysis.types.get(tail);
+      if (!table) return undefined;
+      const [head, ...tail] = name.split(".");
+      const imported = table.explicit.get(head!);
+      if (imported) return analysis.typesByFqn.get([imported, ...tail].join("."));
+      return analysis.typesByFqn.get([table.packageName, name].filter(Boolean).join("."));
     }
-    if (fileRel) {
-      const table = analysis.imports.get(fileRel);
-      if (table) {
-        const explicit = table.explicit.get(name);
-        if (explicit) {
-          const def = analysis.typesByFqn.get(explicit);
-          if (def) return def;
-        }
-        // Same-package type.
-        if (table.packageName) {
-          const samePackage = analysis.typesByFqn.get(`${table.packageName}.${name}`);
-          if (samePackage) return samePackage;
-        }
-        // Wildcard imports: first matching package wins.
-        for (const pkg of table.wildcards) {
-          const wildcard = analysis.typesByFqn.get(`${pkg}.${name}`);
-          if (wildcard) return wildcard;
-        }
-      }
+    if (table) {
+      const explicit = table.explicit.get(name);
+      // An unresolved import must not bind to an unrelated project's class.
+      if (explicit) return analysis.typesByFqn.get(explicit);
+      const samePackage = analysis.typesByFqn.get([table.packageName, name].filter(Boolean).join("."));
+      if (samePackage) return samePackage;
+      const local = scopedNames.get(`${fileRel}\0${name}`) ?? [];
+      if (local.length) return local.length === 1 ? local[0] : undefined;
+      const imported = table.wildcards.map(pkg => analysis.typesByFqn.get(`${pkg}.${name}`)).filter((def): def is JavaTypeDef => !!def);
+      return imported.length === 1 ? imported[0] : undefined;
     }
-    return analysis.types.get(name);
+    const candidates = simpleNames.get(name) ?? [];
+    return candidates.length === 1 ? candidates[0] : undefined;
   };
 
   const index: JavaModelIndex = {
@@ -229,7 +246,8 @@ function internal(index: JavaModelIndex): InternalIndex {
 function simpleTypeName(node: TsNode): string | null {
   if (node.type === "type_identifier") return node.text;
   if (node.type === "generic_type") {
-    return node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? null;
+    const base = node.namedChildren.find(c => c.type !== "type_arguments");
+    return base ? simpleTypeName(base) : null;
   }
   if (node.type === "scoped_identifier" || node.type === "scoped_type_identifier") {
     const tail = node.namedChildren[node.namedChildren.length - 1];
@@ -285,10 +303,12 @@ const SCALAR_SCHEMA_TYPES = new Set(["string", "integer", "number", "boolean"]);
  * are only applied to inline scalar schemas (never to `$ref`s, enums, arrays or
  * objects) and never overwrite a more specific keyword already present.
  */
-function applyValidation<T extends JsonSchema>(
+export function applyValidation<T extends JsonSchema>(
   schema: T,
   validation: JavaFieldValidation | undefined,
 ): T {
+  if (validation?.readOnly) (schema as Record<string, unknown>).readOnly = true;
+  if (validation?.writeOnly) (schema as Record<string, unknown>).writeOnly = true;
   if (!validation || !SCALAR_SCHEMA_TYPES.has((schema as { type?: string }).type ?? "")) {
     return schema;
   }
@@ -326,13 +346,13 @@ function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: s
     return bound ? typeKey(bound, index, subst, fileRel) : "Object";
   }
   if (resolved.type === "type_identifier") {
-    const def = index.resolveDef(resolved.text, fileRel);
+    const def = index.resolveDef(resolved.text, fileRel, resolved);
     return def ? internal(index).aliasForDef(def) : resolved.text;
   }
   if (resolved.type === "scoped_identifier" || resolved.type === "scoped_type_identifier") {
     const name = simpleTypeName(resolved) ?? "Object";
     if (resolved.type === "scoped_type_identifier") {
-      const def = index.resolveFqn(resolved.text) ?? index.resolveDef(resolved.text, fileRel);
+      const def = index.resolveFqn(resolved.text) ?? index.resolveDef(resolved.text, fileRel, resolved);
       if (def) return internal(index).aliasForDef(def);
     }
     return name;
@@ -369,7 +389,7 @@ function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: s
     if (WRAPPER_TYPES.has(name) && args[0]) {
       return typeKey(args[0], index, subst, fileRel);
     }
-    const def = index.resolveDef(name, fileRel);
+    const def = index.resolveDef(name, fileRel, resolved);
     const base = def ? internal(index).aliasForDef(def) : name;
     return args.length
       ? `${base}_${args.map((arg) => typeKey(arg, index, subst, fileRel)).join("_")}`
@@ -643,6 +663,10 @@ export function javaTypeToSchema(
 ): JsonSchema {
   if (depth > 6 || !node) return {};
   node = resolveSubst(node, subst);
+  if (node.type === "annotated_type") {
+    const type = node.namedChildren.find(c => c.type !== "annotation" && c.type !== "marker_annotation");
+    return type ? javaTypeToSchema(type, index, depth, subst, fileRel) : {};
+  }
 
   if (node.type === "wildcard") {
     const bound = wildcardBound(node);
@@ -706,7 +730,7 @@ export function javaTypeToSchema(
       return args[0] ? javaTypeToSchema(args[0], index, depth, subst, fileRel) : {};
     }
     if (name) {
-      const def = index.resolveDef(name, fileRel);
+      const def = index.resolveDef(name, fileRel, node);
       if (def) {
         const component = ensureComponentForDef(def, index, subst ?? new Map(), args, depth, new Set());
         return { $ref: `#/components/schemas/${component}` };
@@ -716,6 +740,7 @@ export function javaTypeToSchema(
   }
 
   const handleSimple = (name: string): JsonSchema => {
+    if (name === "URI" || name === "URL") return { type: "string", format: "uri" };
     if (STRING_TYPES.has(name)) return { type: "string" };
     if (INTEGER_TYPES.has(name)) {
       return name === "Long" || name === "long" || name === "BigInteger" || name === "AtomicLong"
@@ -730,7 +755,7 @@ export function javaTypeToSchema(
     if (JSON_OBJECT_TYPES.has(name)) return { type: "object" };
     if (JSON_ARRAY_TYPES.has(name)) return { type: "array", items: { type: "object" } };
     if (JSON_VALUE_TYPES.has(name)) return { type: "object" };
-    const def = index.resolveDef(name, fileRel);
+    const def = index.resolveDef(name, fileRel, node);
     if (def) {
       const component = ensureComponentForDef(def, index, undefined, [], depth, new Set());
       return { $ref: `#/components/schemas/${component}` };
@@ -743,7 +768,7 @@ export function javaTypeToSchema(
     if (!name) return {};
     if (node.type === "scoped_type_identifier") {
       const fqn = node.text;
-      const def = index.resolveFqn(fqn) ?? index.resolveDef(fqn, fileRel);
+      const def = index.resolveFqn(fqn) ?? index.resolveDef(fqn, fileRel, node);
       if (def) {
         const component = ensureComponentForDef(def, index, undefined, [], depth, new Set());
         return { $ref: `#/components/schemas/${component}` };

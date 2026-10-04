@@ -1,0 +1,38 @@
+{
+  "assertions": 1673,
+  "mismatches": 0,
+  "errors": [],
+  "baselineIssues": [
+    {
+      "where": "delete /api/tokens",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    },
+    {
+      "where": "post /api/tokens/reset",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    },
+    {
+      "where": "put /api/tokens/reset",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    },
+    {
+      "where": "get /api/me/following/{id}",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    },
+    {
+      "where": "post /api/me/following/{id}",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    },
+    {
+      "where": "delete /api/me/following/{id}",
+      "status": "204",
+      "error": "Baseline declares content for a bodyless status"
+    }
+  ],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

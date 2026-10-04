@@ -1,0 +1,253 @@
+[
+    {
+        "class": "App\\Http\\Requests\\API\\AiRequest",
+        "rules": {
+            "prompt": [
+                "required",
+                "string",
+                "max:500"
+            ],
+            "current_song_id": [
+                "nullable",
+                "string"
+            ],
+            "current_radio_station_id": [
+                "nullable",
+                "string"
+            ],
+            "conversation_id": [
+                "nullable",
+                "string"
+            ]
+        },
+        "probes": [
+            {
+                "input": {
+                    "prompt": "hello"
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": [],
+                "passes": false,
+                "failed": {
+                    "prompt": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "prompt": null
+                },
+                "passes": false,
+                "failed": {
+                    "prompt": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "prompt": false
+                },
+                "passes": false,
+                "failed": {
+                    "prompt": {
+                        "String": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "prompt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "passes": false,
+                "failed": {
+                    "prompt": {
+                        "Max": [
+                            "500"
+                        ]
+                    }
+                }
+            },
+            {
+                "input": {
+                    "prompt": "hello",
+                    "current_song_id": null
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "prompt": "hello",
+                    "current_song_id": 4
+                },
+                "passes": false,
+                "failed": {
+                    "current_song_id": {
+                        "String": []
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "class": "App\\Http\\Requests\\API\\MediaBrowser\\PaginateFolderSongsRequest",
+        "rules": {
+            "cursor": [
+                "sometimes",
+                "nullable",
+                "string"
+            ],
+            "folder": [
+                "sometimes",
+                "nullable",
+                "string"
+            ]
+        },
+        "probes": [
+            {
+                "input": [],
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "folder": null
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "folder": "music"
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "folder": 4
+                },
+                "passes": false,
+                "failed": {
+                    "folder": {
+                        "String": []
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "class": "App\\Http\\Requests\\API\\GetUserInvitationRequest",
+        "rules": {
+            "token": [
+                "required",
+                "string"
+            ]
+        },
+        "probes": [
+            {
+                "input": [],
+                "passes": false,
+                "failed": {
+                    "token": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "token": null
+                },
+                "passes": false,
+                "failed": {
+                    "token": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "token": "abc"
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "token": ""
+                },
+                "passes": false,
+                "failed": {
+                    "token": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "token": 4
+                },
+                "passes": false,
+                "failed": {
+                    "token": {
+                        "String": []
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "class": "App\\Http\\Requests\\API\\Upload\\CompletePresignedUploadRequest",
+        "rules": {
+            "key": [
+                "required",
+                "string"
+            ]
+        },
+        "probes": [
+            {
+                "input": [],
+                "passes": false,
+                "failed": {
+                    "key": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "key": "file"
+                },
+                "passes": true,
+                "failed": []
+            },
+            {
+                "input": {
+                    "key": null
+                },
+                "passes": false,
+                "failed": {
+                    "key": {
+                        "Required": []
+                    }
+                }
+            },
+            {
+                "input": {
+                    "key": 4
+                },
+                "passes": false,
+                "failed": {
+                    "key": {
+                        "String": []
+                    }
+                }
+            }
+        ]
+    }
+]

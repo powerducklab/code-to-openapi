@@ -1,0 +1,2112 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Native Koel Laravel route baseline",
+    "version": "1"
+  },
+  "paths": {
+    "/api/ping": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      },
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/otp": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/two-factor-challenge": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/forgot-password": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/reset-password": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/invitations": {
+      "get": {
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/invitations/accept": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/email-change/confirm/{user}": {
+      "post": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/embeds/{embed}/{options}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "embed",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "options",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/embed-options": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/one-time-token": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/broadcasting/auth": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/overview": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/data": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/queue/fetch": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/queue/playback-status": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/queue/state": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/settings/media-path": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/settings/branding": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/settings/ai": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/albums/random": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/albums": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}/songs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}/songs/{song}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/random": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/artists": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/albums": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/albums/{album}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/songs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/songs/{song}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/songs/{song}/scrobble": {
+      "post": {
+        "parameters": [
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/songs": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/{song}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/songs/by-folders": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/by-ids": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/in-folder": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/upload": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/upload/presign": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/upload/complete": {
+      "post": {
+        "parameters": [],
+        "responses": {},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/duplicate-uploads": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/duplicate-uploads/{duplicateUpload}": {
+      "post": {
+        "parameters": [
+          {
+            "name": "duplicateUpload",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "duplicateUpload",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/interaction/play": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/interaction/like": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/interaction/batch/like": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/interaction/batch/unlike": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/favorites/toggle": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/favorites/move": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/favorites": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/recently-played": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/favorite": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/favorites": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/{song}/rating": {
+      "put": {
+        "parameters": [
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}/rating": {
+      "put": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/rating": {
+      "put": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/podcasts/{podcast}/rating": {
+      "put": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlist-folders": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/playlist-folders/{playlist_folder}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlist-folders/{playlist_folder}/playlists": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlist-folders/{playlist_folder}/playlists/{playlist}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "playlist_folder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlist-folders/{playlistFolder}/playlists": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "playlistFolder",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlists": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}/songs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}/songs/{song}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}/songs/move": {
+      "post": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/genres/{genre}/songs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "genre",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/genres/{genre}/songs/queue": {
+      "get": {
+        "parameters": [
+          {
+            "name": "genre",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/genres": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/genres/{genre}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "genre",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/users": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/users/{user}": {
+      "put": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/user": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/user/{user}": {
+      "put": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "user",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/me/password": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/preferences": {
+      "patch": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/equalizer-presets": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/equalizer-presets/{id}": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/me/subsonic-api-key/regenerate": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/two-factor": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/two-factor/confirm": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/me/two-factor/recovery-codes": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/lastfm/authorization-url": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/lastfm/session-key": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/lastfm/disconnect": {
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/listenbrainz/token": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/youtube/search/song/{song}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "song",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}/information": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/information": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/artists/{artist}/events": {
+      "get": {
+        "parameters": [
+          {
+            "name": "artist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/albums/{album}/thumbnail": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/album/{album}/thumbnail": {
+      "get": {
+        "parameters": [
+          {
+            "name": "album",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/search": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/search/songs": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/publicize": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/songs/privatize": {
+      "put": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/licenses/activate": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}/collaborators/invite": {
+      "post": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/playlists/collaborators/accept": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/playlists/{playlist}/collaborators": {
+      "get": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "playlist",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/podcasts": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/podcasts/{podcast}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/podcasts/{podcast}/episodes": {
+      "get": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/podcasts/{podcast}/episodes/{episode}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/podcasts/{podcast}/subscriptions": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "podcast",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/browse/folders": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/browse/songs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "folder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/radio/stations": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/radio/stations/{station}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "station",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "station",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "patch": {
+        "parameters": [
+          {
+            "name": "station",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "station",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/radio/stations/{radioStation}/now-playing": {
+      "get": {
+        "parameters": [
+          {
+            "name": "radioStation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/ai/prompt": {
+      "post": {
+        "parameters": [],
+        "responses": {},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "current_song_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "current_radio_station_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "conversation_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "prompt"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/themes": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      },
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/themes/{theme}": {
+      "delete": {
+        "parameters": [
+          {
+            "name": "theme",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {}
+      }
+    },
+    "/api/embeds/resolve": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/os/s3/song": {
+      "post": {
+        "parameters": [],
+        "responses": {}
+      },
+      "delete": {
+        "parameters": [],
+        "responses": {}
+      }
+    },
+    "/api/demo/credits": {
+      "get": {
+        "parameters": [],
+        "responses": {}
+      }
+    }
+  }
+}

@@ -16,6 +16,8 @@ export interface ArkResolveContext {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resolveBinding: (name: string, from?: any) => { node: any; file: any } | null;
   depth?: number;
+  mode?: "input" | "output";
+  onUnresolved?: (message: string) => void;
 }
 
 interface ChainStep {
@@ -45,7 +47,7 @@ const DOMAIN_FORMATS: Record<string, string> = {
   url: "uri",
   uri: "uri",
   uuid: "uuid",
-  ulid: "uuid",
+  ulid: "ulid",
   datetime: "date-time",
   date: "date",
   time: "time",
@@ -53,145 +55,90 @@ const DOMAIN_FORMATS: Record<string, string> = {
   jwt: "jwt",
 };
 
-/** Parses an ArkType string definition into a JSON Schema node. */
-export function parseArkString(def: string): JsonSchema | null {
+// Split only grammar-level unions; a pipe in a string literal or |> morph is not a union.
+function unionParts(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0, nesting = 0, quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    if (c === "(" || c === "[") nesting++;
+    if (c === ")" || c === "]") nesting--;
+    if (c === "|" && text[i + 1] !== ">" && nesting === 0) {
+      parts.push(text.slice(start, i).trim()); start = i + 1;
+    }
+  }
+  parts.push(text.slice(start).trim());
+  return parts;
+}
+
+/** Parses the statically representable ArkType HTTP contract subset. */
+export function parseArkString(def: string, mode: "input" | "output" = "input"): JsonSchema | null {
   const text = def.trim();
   if (!text) return null;
-
-  // Unions: "string | null", "string | undefined", "A | B".
-  const variants = text.split("|").map((s) => s.trim()).filter(Boolean);
+  if (text.endsWith("?")) {
+    const inner = parseArkString(text.slice(0, -1), mode);
+    return inner ? { ...inner, "x-optional": true } : null;
+  }
+  const variants = unionParts(text);
   if (variants.length > 1) {
-    const nodes = variants
-      .map((v) => parseArkString(v))
-      .filter((n): n is JsonSchema => n !== null);
-    if (nodes.length !== variants.length) return null;
-    const meaningful = nodes.filter(
-      (n) => n.type !== "null" && !(n.type === "string" && !("const" in n)),
-    );
-    const nullable = nodes.some((n) => n.type === "null");
     const optional = variants.includes("undefined");
-    if (meaningful.length === 1) {
-      const node: JsonSchema = { ...meaningful[0]! };
-      if (nullable) node.type = [String(node.type), "null"];
-      if (optional) node["x-optional"] = true;
-      return node;
-    }
-    return { anyOf: nodes };
+    const nodes = variants.filter(v => v !== "undefined").map(v => parseArkString(v, mode));
+    if (nodes.some(n => n === null) || !nodes.length) return null;
+    return { ...(nodes.length === 1 ? nodes[0]! : { anyOf: nodes as JsonSchema[] }),
+      ...(optional ? { "x-optional": true } : {}) };
   }
 
-  let rest = text;
-  let minLen: number | undefined;
-  let maxLen: number | undefined;
-  let isArray = false;
+  // The request contains the pre-morph value, never the handler's parsed number.
+  const morph = text.match(/^string\.numeric\.parse(?:\s*\|>\s*(.+))?$/);
+  if (morph) return mode === "input"
+    ? parseArkString("string.numeric")
+    : parseArkString(morph[1] ?? "number", "output");
+  const record = text.match(/^Record<\s*string\s*,\s*(.+)>$/);
+  if (record) return { type: "object", additionalProperties: parseArkString(record[1]!, mode) ?? {} };
+  const genericArray = text.match(/^Array<\s*(.+)>$/);
+  if (genericArray) return { type: "array", items: parseArkString(genericArray[1]!, mode) ?? {} };
+  const literal = text.match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')$/);
+  if (literal) {
+    try { return { type: "string", const: text[0] === '"' ? JSON.parse(text) : text.slice(1, -1).replace(/\\'/g, "'") }; }
+    catch { return null; }
+  }
+  if (text === "true" || text === "false") return { type: "boolean", const: text === "true" };
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) return { type: Number.isInteger(Number(text)) ? "integer" : "number", const: Number(text) };
 
-  // Generic containers: "Record<string, string[]>", "Array<string>".
-  const record = rest.match(/^Record<\s*([^,]+)\s*,\s*(.+)>$/);
-  if (record) {
-    const value = parseArkString(record[2]!.trim());
-    return value ? { type: "object", additionalProperties: value } : null;
-  }
-  const arrayOf = rest.match(/^Array<\s*(.+)>$/);
-  if (arrayOf) {
-    const items = parseArkString(arrayOf[1]!.trim());
-    return items ? { type: "array", items } : null;
-  }
-
-  // Bounds: "8 <= string <= 100", "string <= 1000", "3 <= string",
-  // "string > 0", "string < 100".
-  const lower = rest.match(/^(-?\d+(?:\.\d+)?)\s*<=\s*/);
-  if (lower) {
-    minLen = Number(lower[1]);
-    rest = rest.slice(lower[0].length).trim();
-  }
-  const upperArr = rest.match(/^([\w.]+(?:\[\])?)\s*<=\s*(-?\d+(?:\.\d+)?)$/);
-  let upper: number | undefined;
-  if (upperArr) {
-    rest = upperArr[1]!;
-    upper = Number(upperArr[2]);
-  }
-  const upperGe = rest.match(/^([\w.]+(?:\[\])?)\s*>=\s*(-?\d+(?:\.\d+)?)$/);
-  if (upperGe) {
-    rest = upperGe[1]!;
-    minLen = minLen ?? Number(upperGe[2]);
-  }
-  const strictGt = rest.match(/^([\w.]+(?:\[\])?)\s*>\s*(-?\d+(?:\.\d+)?)$/);
-  if (strictGt) {
-    rest = strictGt[1]!;
-    // Strictly greater than N means the inclusive bound starts at N + 1.
-    minLen = minLen ?? Number(strictGt[2]) + 1;
-  }
-  const strictLt = rest.match(/^([\w.]+(?:\[\])?)\s*<\s*(-?\d+(?:\.\d+)?)$/);
-  if (strictLt) {
-    rest = strictLt[1]!;
-    upper = upper ?? Number(strictLt[2]) - 1;
-  }
-  if (rest.endsWith("[]")) {
-    isArray = true;
-    rest = rest.slice(0, -2).trim();
-  }
-  if (upper !== undefined) maxLen = upper;
-
-  // Literal: "'enabled'" / "true" / "42".
-  const quoted = rest.match(/^["'](.+)["']$/);
-  if (quoted) return { type: "string", const: quoted[1] };
-  if (rest === "true" || rest === "false") return { type: "boolean", const: rest === "true" };
-  if (/^-?\d+$/.test(rest)) return { type: "integer", const: Number(rest) };
-
-  const [domain, narrow] = rest.split(".");
+  const bounded = text.match(/^(?:(-?\d+(?:\.\d+)?)\s*(<=|<)\s*)?([\w.]+(?:\[\])*)(?:\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?))?$/);
+  if (!bounded) return null;
+  const [, low, lowOp, domain, rightOp, right] = bounded;
   let schema: JsonSchema;
-  switch (domain) {
-    case "string":
-      schema = { type: "string" };
-      if (narrow) {
-        if (narrow === "integer" || narrow === "digits") {
-          schema = { type: "string", pattern: "^-?\\d+$" };
-        } else if (DOMAIN_FORMATS[narrow]) {
-          schema = { type: "string", format: DOMAIN_FORMATS[narrow] };
-        } else {
-          return null;
-        }
-      }
-      if (minLen !== undefined) schema.minLength = minLen;
-      if (maxLen !== undefined) schema.maxLength = maxLen;
-      break;
-    case "number":
-      schema = { type: "number" };
-      if (narrow === "integer") schema.type = "integer";
-      else if (narrow) return null;
-      if (minLen !== undefined) schema.minimum = minLen;
-      if (maxLen !== undefined) schema.maximum = maxLen;
-      break;
-    case "integer":
-      schema = { type: "integer" };
-      if (minLen !== undefined) schema.minimum = minLen;
-      if (maxLen !== undefined) schema.maximum = maxLen;
-      break;
-    case "boolean":
-      schema = { type: "boolean" };
-      break;
-    case "null":
-      schema = { type: "null" };
-      break;
-    case "object":
-      schema = { type: "object" };
-      break;
-    case "unknown":
-    case "any":
-      schema = {};
-      break;
-    default:
-      return null;
-  }
+  if (domain!.endsWith("[]")) {
+    schema = { type: "array", items: parseArkString(domain!.slice(0, -2), mode) ?? {} };
+  } else if (domain === "string.numeric") {
+    // ArkType's well-formed numeric string grammar (not arbitrary JS Number coercion).
+    schema = { type: "string", pattern: "^(?:(?!^-0\\.?0*$)(?:-?(?:(?:0|[1-9]\\d*)(?:\\.\\d+)?)|\\.\\d+?))$" };
+  } else if (domain === "string.email") {
+    schema = { type: "string", format: "email", pattern: "^[\\w%+.-]+@[\\d.A-Za-z-]+\\.[A-Za-z]{2,}$" };
+  } else if (domain === "string.integer" || domain === "string.digits") {
+    schema = { type: "string", pattern: domain === "string.digits" ? "^\\d*$" : "^-?\\d+$" };
+  } else if (domain!.startsWith("string.") && DOMAIN_FORMATS[domain!.slice(7)]) {
+    schema = { type: "string", format: DOMAIN_FORMATS[domain!.slice(7)] };
+  } else if (domain === "number.integer" || domain === "integer") schema = { type: "integer" };
+  else if (["string", "number", "boolean", "null", "object"].includes(domain!)) schema = { type: domain! };
+  else if (domain === "unknown" || domain === "any") schema = {};
+  else return null;
 
-  if (isArray) {
-    schema = {
-      type: "array",
-      items: schema,
-      ...(minLen !== undefined ? { minItems: minLen } : {}),
-      ...(maxLen !== undefined ? { maxItems: maxLen } : {}),
-    };
-  }
-  return Object.keys(schema).length ? schema : {};
+  const length = schema.type === "string" || schema.type === "array";
+  const setBound = (value: number, minimum: boolean, exclusive: boolean) => {
+    if (length) {
+      const key = schema.type === "array" ? (minimum ? "minItems" : "maxItems") : (minimum ? "minLength" : "maxLength");
+      schema[key] = minimum ? (exclusive ? Math.floor(value) + 1 : Math.ceil(value)) : (exclusive ? Math.ceil(value) - 1 : Math.floor(value));
+    } else if (schema.type === "number" || schema.type === "integer") {
+      schema[exclusive ? (minimum ? "exclusiveMinimum" : "exclusiveMaximum") : (minimum ? "minimum" : "maximum")] = value;
+    }
+  };
+  if (low !== undefined) setBound(Number(low), true, lowOp === "<");
+  if (right !== undefined) setBound(Number(right), rightOp!.startsWith(">"), rightOp!.length === 1);
+  return schema;
 }
 
 function convertObjectLiteral(
@@ -215,8 +162,7 @@ function convertObjectLiteral(
       optional = true;
       name = name.slice(0, -1);
     }
-    const child = convertArkNode(member.initializer, rc);
-    if (!child) continue;
+    const child = convertArkNode(member.initializer, rc) ?? {};
     if (child["x-optional"] === true) optional = true;
     delete child["x-optional"];
     properties[name] = child;
@@ -235,7 +181,31 @@ export function convertArkNode(node: any, rc: ArkResolveContext): JsonSchema | n
   if (depth > 16 || !node) return null;
   const { ts } = rc;
 
-  if (ts.isStringLiteralLike(node)) return parseArkString(node.text);
+  if (ts.isStringLiteralLike(node)) {
+    if (node.text.includes("|>") && rc.mode !== "output") rc.onUnresolved?.("Post-morph ArkType constraints cannot be fully represented in the wire schema");
+    return parseArkString(node.text, rc.mode);
+  }
+
+  if (ts.isTemplateExpression(node)) {
+    let text = node.head.text;
+    for (const span of node.templateSpans) {
+      let value = span.expression;
+      let file = rc.sourceFile;
+      const seen = new Set<any>();
+      while (ts.isIdentifier(value) && !seen.has(value)) {
+        seen.add(value);
+        const binding = rc.resolveBinding(value.text, file);
+        if (!binding) return null;
+        value = binding.node; file = binding.file;
+      }
+      if (ts.isNumericLiteral(value) || ts.isStringLiteralLike(value)) text += value.text;
+      else if (ts.isPrefixUnaryExpression(value) && value.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(value.operand)) text += "-" + value.operand.text;
+      else return null;
+      text += span.literal.text;
+    }
+    if (text.includes("|>") && rc.mode !== "output") rc.onUnresolved?.("Post-morph ArkType constraints cannot be fully represented in the wire schema");
+    return parseArkString(text, rc.mode);
+  }
 
   if (ts.isObjectLiteralExpression(node)) {
     return convertObjectLiteral(ts, node, { ...rc, depth: depth + 1 });
@@ -283,7 +253,7 @@ export function convertArkNode(node: any, rc: ArkResolveContext): JsonSchema | n
   }
 
   const chain = callChain(ts, node);
-  if (!chain) return null;
+  if (!chain || !chain.steps.length) return null;
 
   // Seed from an identifier base (e.g. CreateUserDto.get("user")).
   let schema: JsonSchema = {};
@@ -305,6 +275,23 @@ export function convertArkNode(node: any, rc: ArkResolveContext): JsonSchema | n
   for (const step of chain.steps) {
     if (step.name === "partial" && schema.type === "object") {
       delete schema.required;
+    } else if ((step.name === "omit" || step.name === "pick") && schema.type === "object") {
+      // ArkType accepts variadic literal keys. Dynamic keys and key schemas
+      // need runtime evaluation; never silently leave the original object.
+      if (!step.args.every((arg: any) => ts.isStringLiteralLike(arg))) {
+        rc.onUnresolved?.(`Dynamic ArkType ${step.name} keys`);
+        return null;
+      }
+      const keys = new Set<string>(step.args.map((arg: any) => arg.text));
+      const properties = schema.properties as Record<string, JsonSchema> | undefined;
+      if ([...keys].some(key => !properties || !(key in properties))) {
+        rc.onUnresolved?.(`Unknown ArkType ${step.name} property`);
+        return null;
+      }
+      const keep = (key: string) => step.name === "pick" ? keys.has(key) : !keys.has(key);
+      schema.properties = Object.fromEntries(Object.entries(properties ?? {}).filter(([key]) => keep(key)));
+      const required = ((schema.required ?? []) as string[]).filter(keep);
+      if (required.length) schema.required = required; else delete schema.required;
     } else if (step.name === "array") {
       // Dto.get("comment").array() / SomeType.array() -> array of the schema.
       schema = { type: "array", items: schema };
@@ -315,29 +302,23 @@ export function convertArkNode(node: any, rc: ArkResolveContext): JsonSchema | n
       schema["x-optional"] = true;
     } else if (step.name === "describe" || step.name === "annotate") {
       // Metadata only.
+    } else if (step.name === "merge" && schema.type === "object") {
+      const other = convertArkNode(step.args[0], { ...rc, depth: depth + 1 });
+      if (!other || other.type !== "object") return null;
+      const replaced = new Set(Object.keys(other.properties ?? {}));
+      const required = [...new Set([...((schema.required ?? []) as string[]).filter((key: string) => !replaced.has(key)), ...((other.required ?? []) as string[])])];
+      schema = { ...schema, properties: { ...(schema.properties as Record<string, JsonSchema>), ...(other.properties as Record<string, JsonSchema>) } };
+      if (required.length) schema.required = required; else delete schema.required;
     } else if (step.name === "and") {
       const arg = step.args[0];
       const other = ts.isStringLiteralLike(arg)
-        ? parseArkString(arg.text)
+        ? parseArkString(arg.text, rc.mode)
         : convertArkNode(arg, { ...rc, depth: depth + 1 });
-      if (!other) continue;
-      if (schema.type === "object" && other.type === "object") {
-        const properties = { ...((schema as any).properties ?? {}), ...(other.properties ?? {}) };
-        const required = [
-          ...new Set<string>([
-            ...(((schema as any).required as string[]) ?? []),
-            ...(((other as any).required as string[]) ?? []),
-          ]),
-        ];
-        schema = {
-          ...schema,
-          ...(Object.keys(properties).length ? { properties } : {}),
-          ...(required.length ? { required } : {}),
-        };
-      } else {
-        // Primitive intersection: string domain plus bounds/format win.
-        schema = { ...schema, ...other };
-      }
+      if (!other) return null;
+      schema = { allOf: [schema, other] };
+    } else {
+      rc.onUnresolved?.(`Unsupported ArkType operation: ${step.name}`);
+      return null;
     }
   }
 

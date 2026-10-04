@@ -1,3 +1,7 @@
+import {mergeResponseVariants} from "../core/response-variants.js";
+import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
+import { goExpressionType, goSourceFile, resolveGoCall } from "../lang/go/symbols.js";
+import { convertedParameterSchema } from "../lang/go/httphandler.js";
 /**
  * Chi router framework pack (Go).
  *
@@ -21,6 +25,7 @@ import {
   buildGoModelIndex,
   ensureGoComponent,
   goTypeToSchema,
+  goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
@@ -61,6 +66,8 @@ const STATUS_CONSTANTS: Record<string, string> = {
 };
 
 interface RouteSite {
+  middleware?: TsNode[];
+  handlerReference?: TsNode;
   method: string;
   path: string;
   handlerName: string | null;
@@ -111,16 +118,11 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
     const value = node.namedChildren[1];
 
     if (typeNode && (typeNode.type === "slice_type" || typeNode.type === "array_type")) {
-      const inner = typeNode.namedChildren[0];
-      return {
-        type: "array",
-        items: inner ? goTypeToSchema(inner, index, depth + 1) : {},
-      };
+      return goConstructedTypeToSchema(typeNode, index);
     }
     if (typeNode && typeNode.type === "type_identifier") {
       if (index.byName.has(typeNode.text)) {
-        ensureGoComponent(typeNode.text, index);
-        return { $ref: `#/components/schemas/${typeNode.text}` };
+        return goTypeToSchema(typeNode, index, depth + 1);
       }
       return {};
     }
@@ -209,6 +211,8 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
   extract(analysis, ctx): ExtractionResult {
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
+    const inputModel = {...modelIndex,input:true,components:new Map()};
+    const validatedModel = {...inputModel,validated:true,components:new Map()};
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
@@ -244,9 +248,11 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         receiverName: string,
         prefix: string,
         visited: Set<TsNode>,
+        inherited: TsNode[] = [],
       ) => {
         if (visited.has(scope)) return;
         visited.add(scope);
+        const middleware = [...inherited];
         // Walk without descending into nested func literals: their receiver is
         // a different (often shadowing) parameter and is handled explicitly
         // through Route/Group below.
@@ -284,6 +290,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
           const base = routerBase(call);
           if (base !== receiverName) return;
           const args = positionalArguments(call);
+          if (sel.method === "Use") { middleware.push(...args); return; }
 
           if (HTTP_METHODS.has(sel.method.toLowerCase())) {
             const rawPath = literalString(args[0]);
@@ -305,6 +312,8 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
                       : null)
                   : null;
             sites.push({
+              middleware: [...middleware],
+              handlerReference: handler,
               method: sel.method.toLowerCase(),
               path: joinPath(prefix, normalizeChiPath(rawPath)),
               handlerName: methodHandlerName,
@@ -332,6 +341,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
                 innerParam.text,
                 joinPath(prefix, nestedPrefix),
                 visited,
+                middleware,
               );
             }
             return;
@@ -434,21 +444,59 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
       }
     }
 
-    const routes = sites.map((site) => buildRoute(site, analysis, modelIndex));
+    const routes = sites.map((site) => buildRoute(site, analysis, modelIndex, inputModel, validatedModel));
+    const reserved = new Set([...modelIndex.byName.keys(), ...modelIndex.components.keys()]);
+    const raw = namespaceComponents(inputModel.components, reserved, "input");
+    const validated = namespaceComponents(validatedModel.components, reserved, "validated_input");
+    for (const route of routes) if (route.requestBody) {
+      route.requestBody = remapSchemaReferences(route.requestBody, validatedBodies.has(route.requestBody) ? validated.names : raw.names);
+    }
     return {
       routes,
       unresolved,
-      components: [...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })),
+      components: [...[...modelIndex.components.entries()].map(([name, schema]) => ({ name, schema })), ...raw.components, ...validated.components],
       securitySchemes: [],
       servers: [...servers].map((url) => ({ url })),
     };
   },
 };
 
+/** Validate rules only when a checked error prevents the handler continuing. */
+function rejectsValidationError(call: TsNode, body: TsNode, analysis: GoAnalysis): boolean {
+  let assignment = call.parent;
+  while (assignment && assignment.type !== "assignment_statement" && assignment.type !== "short_var_declaration" && assignment.id !== body.id) assignment = assignment.parent;
+  if (!assignment || assignment.id === body.id) return false;
+  const name = assignment.namedChildren[0]?.namedChildren[0]?.text;
+  if (!name || name === "_") return false;
+  const nextWrite = findAll(body, n => (n.type === "assignment_statement" || n.type === "short_var_declaration") && n.startIndex > assignment!.startIndex && n.namedChildren[0]?.namedChildren.some(c => c.text === name))
+    .reduce((end,n)=>Math.min(end,n.startIndex),Infinity);
+  return findAll(body, n => n.type === "if_statement").some(statement => {
+    const condition = statement.childForFieldName("condition");
+    const consequence = statement.childForFieldName("consequence");
+    if (!condition || condition.startIndex < call.startIndex || condition.startIndex >= nextWrite || !consequence ||
+        !findAll(consequence,n=>n.type === "return_statement").length) return false;
+    if (condition.text.replace(/\s/g, "") === `${name}!=nil`) return true;
+    if (condition.type !== "call_expression") return false;
+    const helper = resolveGoCall(condition, analysis);
+    if (!helper?.body) return false;
+    const at = positionalArguments(condition).findIndex(arg => arg.text === name);
+    const params = helper.node.childForFieldName("parameters")?.namedChildren.flatMap(p=>p.namedChildren.filter(n=>n.type === "identifier")) ?? [];
+    const errorName = params[at]?.text;
+    if (!errorName) return false;
+    const compact = helper.body.text.replace(/\s/g, "");
+    const returns = findAll(helper.body,n=>n.type === "return_statement");
+    return compact.startsWith(`{if${errorName}==nil{returnfalse}`) && compact.endsWith("returntrue}") && returns.length === 2;
+  });
+}
+
+const validatedBodies = new WeakSet<object>();
+
 function buildRoute(
   site: RouteSite,
   analysis: GoAnalysis,
   modelIndex: GoModelIndex,
+  inputModel: GoModelIndex,
+  validatedModel: GoModelIndex,
 ): RouteCandidate {
   const gaps = new Set<GapCode>();
   const parameters: RouteParameter[] = [];
@@ -457,12 +505,8 @@ function buildRoute(
   const responseStatus = new Map<string, RouteCandidate["responses"][number]>();
   let isSse = false;
 
-  const namedFn = site.handlerName
-    ? analysis.functions.get(site.handlerName)?.[0] ??
-      // Method-value handlers such as `r.Get("/notes", notesHandler.ReadNotes)`
-      // resolve to the receiver method rather than a package-level function.
-      analysis.methods.find((method) => method.name === site.handlerName)
-    : undefined;
+  const namedFn = site.handlerReference && site.handlerReference.type !== "func_literal"
+    ? resolveGoCall(site.handlerReference, analysis) : undefined;
   const inlineBlock = site.handlerNode
     ? (findFirst(site.handlerNode, (c) => c.type === "block") ?? null)
     : null;
@@ -477,6 +521,35 @@ function buildRoute(
         }
       : null);
   const body = fn?.body ?? null;
+  for (const reference of site.middleware ?? []) {
+    const middleware = resolveGoCall(reference, analysis);
+    if (!middleware?.body) continue;
+    const owner = goSourceFile(middleware.node, analysis);
+    if (!owner || !findAll(owner.root,n=>n.type === "import_spec").some(n=>n.childForFieldName("path")?.text === '"net/http"' && (n.childForFieldName("name")?.text ?? "http") === "http")) continue;
+    const returnedHandlers = findAll(middleware.body, n => n.type === "return_statement").flatMap(statement =>
+      findAll(statement, n => n.type === "call_expression" && selectorCall(n)?.receiver.text === "http" && selectorCall(n)?.method === "HandlerFunc"));
+    for (const handler of returnedHandlers) {
+      const closure = positionalArguments(handler)[0];
+      if (closure?.type !== "func_literal") continue;
+      const params = closure.namedChildren.find(n => n.type === "parameter_list");
+      const writer = params?.namedChildren.find(p => p.childForFieldName("type")?.text === "http.ResponseWriter")?.namedChildren[0]?.text;
+      for (const call of findAll(closure, n => n.type === "call_expression")) {
+        let parent = call.parent;
+        let active = true;
+        while (parent && parent.id !== closure.id) {
+          if (parent.type === "func_literal" && (parent.parent?.type !== "call_expression" || parent.parent.parent?.type !== "defer_statement" ||
+              (parent.namedChildren.find(n=>n.type === "parameter_list")?.namedChildren.length ?? 0) > 0)) { active = false; break; }
+          parent = parent.parent;
+        }
+        if (!active) continue;
+        const sel = selectorCall(call), args = positionalArguments(call);
+        if (sel?.receiver.text !== "http" || sel.method !== "Error" || !writer || args[0]?.text !== writer) continue;
+        const status = statusCode(args[2]);
+        if (status) responseStatus.set(status,{statusCode:status,description:"Middleware response",confidence:"medium",content:[{mediaType:"text/plain",schema:{type:"string"}}]});
+      }
+    }
+  }
+
 
   if (body) {
     // Aliases such as `q := r.URL.Query()` — later q.Get("x") calls are query
@@ -531,7 +604,7 @@ function buildRoute(
             name,
             in: "path",
             required: true,
-            schema: { type: "string" },
+            schema: convertedParameterSchema(call, analysis),
             confidence: "high",
           });
         }
@@ -595,14 +668,26 @@ function buildRoute(
           (sel.receiver.type === "identifier" && decoderVars.has(sel.receiver.text)))
       ) {
         const typeNode = referencedType(args[0], body);
+        const variable = args[0]?.text.replace(/^&/, "");
+        const validated = findAll(body, n => n.type === "call_expression").some(call => {
+          const sel = selectorCall(call);
+          if (sel?.method !== "Struct" || positionalArguments(call)[0]?.text !== variable || !rejectsValidationError(call, body, analysis)) return false;
+          const type = goExpressionType(sel.receiver, analysis);
+          const owner = type ? goSourceFile(type, analysis) : undefined;
+          const qualifier = type?.text.replace(/^\*/, "").split(".");
+          return qualifier?.[1] === "Validate" && !!owner && findAll(owner.root, n => n.type === "import_spec").some(n =>
+            /"github\.com\/go-playground\/validator(?:\/v10)?"/.test(n.childForFieldName("path")?.text ?? "") &&
+            (n.childForFieldName("name")?.text ?? "validator") === qualifier[0]);
+        });
         if (typeNode) {
           requestBody = {
             required: true,
             confidence: "high",
             content: [
-              { mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" },
+              { mediaType: "application/json", schema: goTypeToSchema(typeNode, validated ? validatedModel : inputModel), confidence: "high" },
             ],
           };
+          if (validated && requestBody) validatedBodies.add(requestBody);
         } else {
           gaps.add("body-schema-unknown");
         }
@@ -620,12 +705,18 @@ function buildRoute(
             required: true,
             confidence: "high",
             content: [
-              { mediaType: "application/json", schema: goTypeToSchema(typeNode, modelIndex), confidence: "high" },
+              { mediaType: "application/json", schema: goTypeToSchema(typeNode, inputModel), confidence: "high" },
             ],
           };
         } else {
           gaps.add("body-schema-unknown");
         }
+        continue;
+      }
+
+      if (sel.receiver.text === "http" && sel.method === "Error") {
+        const status = statusCode(args[2]) ?? "default";
+        responseStatus.set(status,{statusCode:status,description:"",confidence:"high",content:[{mediaType:"text/plain",schema:{type:"string"}}]});
         continue;
       }
 
@@ -681,30 +772,26 @@ function buildRoute(
     // handler's main flow.
     collectEncodeResponses(body, modelIndex, (status, schema) => {
       const existing = responseStatus.get(status);
-      if (existing?.content) return;
-      responseStatus.set(status, {
+      const response: RouteCandidate["responses"][number] = {
         statusCode: status,
         description: "",
         confidence: schema ? "high" : "medium",
-        ...(schema
-          ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
-          : {}),
-      });
+        content: [{mediaType: "application/json", schema: schema ?? {}}],
+      };
+      responseStatus.set(status, existing ? mergeResponseVariants(existing, response) : response);
       if (!schema) gaps.add("response-schema-unknown");
     });
 
     // go-chi/render idiom: render.Render / render.RenderList / render.Status.
     collectRenderResponses(body, analysis, modelIndex, (status, schema) => {
       const existing = responseStatus.get(status);
-      if (existing?.content) return;
-      responseStatus.set(status, {
+      const response: RouteCandidate["responses"][number] = {
         statusCode: status,
         description: "",
         confidence: schema ? "high" : "medium",
-        ...(schema
-          ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
-          : {}),
-      });
+        content: [{mediaType: "application/json", schema: schema ?? {}}],
+      };
+      responseStatus.set(status, existing ? mergeResponseVariants(existing, response) : response);
       if (!schema) gaps.add("response-schema-unknown");
     });
 
@@ -777,6 +864,10 @@ function responsePayloadSchema(
   index: GoModelIndex,
 ): JsonSchema | null {
   if (!arg) return null;
+  if (index.analysis) {
+    const shared = resolveGoPayloadValue(arg, body, index.analysis, index, index.analysis.vars).schema;
+    if (shared) return shared;
+  }
   if (arg.type === "identifier") {
     const typeNode = resolveLocalType(body, arg.text);
     return typeNode ? goTypeToSchema(typeNode, index) : null;

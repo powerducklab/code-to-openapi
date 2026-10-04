@@ -26,10 +26,15 @@ describe("gin extended handlers and inputs", () => {
     expect(doc.components.schemas.Tag.properties.name).toEqual({ type: "string" });
   });
 
-  it("maps c.PostForm / c.DefaultPostForm to query parameters", async () => {
+  it("places c.PostForm / c.DefaultPostForm in form bodies, not URL parameters", async () => {
     const { doc } = await scan();
-    const params = doc.paths["/api/v1/search"].get.parameters.map((p: any) => p.name).sort();
-    expect(params).toEqual(["page", "q"]);
+    const operation = doc.paths["/api/v1/search"].get;
+    expect(operation.parameters ?? []).toEqual([]);
+    for (const mediaType of ["application/x-www-form-urlencoded", "multipart/form-data"]) {
+      const schema = operation.requestBody.content[mediaType].schema;
+      expect(Object.keys(schema.properties).sort()).toEqual(["page", "q"]);
+      expect(schema.required ?? []).toEqual([]);
+    }
   });
 
   it("emits multipart/form-data bodies for c.FormFile uploads", async () => {

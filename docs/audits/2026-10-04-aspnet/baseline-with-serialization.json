@@ -1,0 +1,2015 @@
+{
+  "openapi": "3.2.0",
+  "info": {
+    "title": "Native Conduit HTTP baseline",
+    "version": "1"
+  },
+  "paths": {
+    "/api/users": {
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "email": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "email",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Users.Create.Command"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/login": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "email": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "email",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Users.Login.Command"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/user": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "email": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "email",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "email": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "token": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "email",
+                        "bio",
+                        "image",
+                        "token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "user"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Users.Edit.Command"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{username}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/profiles/{username}/follow": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "username": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "bio": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "image": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "following": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "bio",
+                        "image",
+                        "following"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles": {
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "comments": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "integer"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "author",
+                        "comments",
+                        "favorited",
+                        "favoritesCount",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Articles.Create.Command"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "articles": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "title": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "author": {
+                            "type": [
+                              "object",
+                              "null"
+                            ],
+                            "properties": {
+                              "username": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "bio": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "image": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "following": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "username",
+                              "bio",
+                              "image",
+                              "following"
+                            ]
+                          },
+                          "comments": {
+                            "type": "array",
+                            "items": {}
+                          },
+                          "favorited": {
+                            "type": "boolean"
+                          },
+                          "favoritesCount": {
+                            "type": "integer"
+                          },
+                          "tagList": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "slug",
+                          "title",
+                          "description",
+                          "author",
+                          "comments",
+                          "favorited",
+                          "favoritesCount",
+                          "tagList",
+                          "createdAt",
+                          "updatedAt"
+                        ]
+                      }
+                    },
+                    "articlesCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "articles",
+                    "articlesCount"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "favorited",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "comments": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "integer"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "author",
+                        "comments",
+                        "favorited",
+                        "favoritesCount",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "comments": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "integer"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "author",
+                        "comments",
+                        "favorited",
+                        "favoritesCount",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Articles.Edit.Model"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "Observed native HTTP response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/feed": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "articles": {
+                      "type": "array",
+                      "items": {}
+                    },
+                    "articlesCount": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "articles",
+                    "articlesCount"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "favorited",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ]
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "tags"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/favorite": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "comments": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "integer"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "author",
+                        "comments",
+                        "favorited",
+                        "favoritesCount",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "article": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "comments": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "favorited": {
+                          "type": "boolean"
+                        },
+                        "favoritesCount": {
+                          "type": "integer"
+                        },
+                        "tagList": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "title",
+                        "description",
+                        "author",
+                        "comments",
+                        "favorited",
+                        "favoritesCount",
+                        "tagList",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "article"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}/comments": {
+      "post": {
+        "responses": {
+          "201": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "comment": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "integer"
+                        },
+                        "body": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "author": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "username": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "bio": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "image": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "following": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "username",
+                            "bio",
+                            "image",
+                            "following"
+                          ]
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "body",
+                        "author",
+                        "createdAt",
+                        "updatedAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "comment"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Conduit.Features.Comments.Create.Model"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Observed native HTTP response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "comments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "body": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "author": {
+                            "type": [
+                              "object",
+                              "null"
+                            ],
+                            "properties": {
+                              "username": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "bio": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "image": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "following": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "username",
+                              "bio",
+                              "image",
+                              "following"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "body",
+                          "author",
+                          "createdAt",
+                          "updatedAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "comments"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/articles/{slug}/comments/{id}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "Observed native HTTP response"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Conduit.Domain.Article": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "author": {
+            "$ref": "#/components/schemas/Conduit.Domain.Person"
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conduit.Domain.Comment"
+            }
+          },
+          "favorited": {
+            "type": "boolean",
+            "readOnly": true
+          },
+          "favoritesCount": {
+            "type": "integer",
+            "format": "int32",
+            "readOnly": true
+          },
+          "tagList": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "readOnly": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Domain.Comment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "author": {
+            "$ref": "#/components/schemas/Conduit.Domain.Person"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Domain.Person": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          },
+          "following": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.ArticleEnvelope": {
+        "type": "object",
+        "properties": {
+          "article": {
+            "$ref": "#/components/schemas/Conduit.Domain.Article"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.ArticlesEnvelope": {
+        "type": "object",
+        "properties": {
+          "articles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conduit.Domain.Article"
+            }
+          },
+          "articlesCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.Create.ArticleData": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "tagList": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.Create.Command": {
+        "type": "object",
+        "properties": {
+          "article": {
+            "$ref": "#/components/schemas/Conduit.Features.Articles.Create.ArticleData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.Edit.ArticleData": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "body": {
+            "type": "string",
+            "nullable": true
+          },
+          "tagList": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Articles.Edit.Model": {
+        "type": "object",
+        "properties": {
+          "article": {
+            "$ref": "#/components/schemas/Conduit.Features.Articles.Edit.ArticleData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Comments.CommentsEnvelope": {
+        "type": "object",
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conduit.Domain.Comment"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Comments.Create.CommentData": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Comments.Create.Model": {
+        "type": "object",
+        "properties": {
+          "comment": {
+            "$ref": "#/components/schemas/Conduit.Features.Comments.Create.CommentData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Profiles.Profile": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          },
+          "following": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Profiles.ProfileEnvelope": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/Conduit.Features.Profiles.Profile"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Tags.TagsEnvelope": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Create.Command": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/Conduit.Features.Users.Create.UserData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Create.UserData": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "password": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Edit.Command": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/Conduit.Features.Users.Edit.UserData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Edit.UserData": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "password": {
+            "type": "string",
+            "nullable": true
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Login.Command": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/Conduit.Features.Users.Login.UserData"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.Login.UserData": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "password": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.User": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          },
+          "token": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Conduit.Features.Users.UserEnvelope": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/Conduit.Features.Users.User"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "Bearer": {
+        "type": "apiKey",
+        "description": "Please insert JWT with Bearer into field",
+        "name": "Authorization",
+        "in": "header"
+      }
+    }
+  }
+}

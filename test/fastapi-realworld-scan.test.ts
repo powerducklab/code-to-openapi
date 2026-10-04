@@ -28,10 +28,9 @@ describe("fastapi generic Pydantic envelopes", () => {
     const product = doc.components.schemas.Product;
     expect(product.properties.tags).toEqual({ type: "array", items: { type: "string" } });
     expect(product.properties.category).toEqual({
-      $ref: "#/components/schemas/Category",
-      nullable: true,
+      anyOf: [{ $ref: "#/components/schemas/Category" }, { type: "null" }],
     });
-    expect(product.required).toEqual(["id", "name", "price"]);
+    expect(product.required).toEqual(["id", "name", "price", "tags", "category"]);
   });
 
   it("specializes nested generic pagination envelopes", async () => {
@@ -59,7 +58,7 @@ describe("fastapi generic Pydantic envelopes", () => {
     expect(params.map((p: any) => p.name).sort()).toEqual(["keyword", "page"]);
     const keyword = params.find((p: any) => p.name === "keyword");
     expect(keyword.in).toBe("query");
-    expect(keyword.schema).toEqual({ type: "string", nullable: true });
+    expect(keyword.schema).toEqual({ type: "string" });
 
     const pathParam = doc.paths["/api/products/{product_id}"].get.parameters[0];
     expect(pathParam).toMatchObject({ name: "product_id", in: "path", required: true });

@@ -34,7 +34,7 @@ describe("Starlette pack", () => {
 
     // Mount("/users", app=users_app) folds the prefix onto nested routes.
     op(ops, "get", "/users/");
-    op(ops, "post", "/users/");
+    expect(op(ops, "post", "/users/").responses.map((r: any) => r.statusCode)).toEqual(['201']);
 
     expect(result.project.servers).toContainEqual({ url: "http://127.0.0.1:8011" });
   });

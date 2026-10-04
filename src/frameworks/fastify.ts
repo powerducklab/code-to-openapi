@@ -71,6 +71,8 @@ interface RegisterEdge {
     optionsNode: any;
     dirNameRoutePrefix: boolean;
     encapsulate: boolean;
+    routeParams: boolean;
+    unsupported: string[];
   };
 }
 
@@ -952,6 +954,8 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
     ) => {
       const { ts } = analysis;
       const spec = edge.autoload!;
+      if (spec.unsupported.length) unresolved.push({ reason: "dynamic-path",
+        message: `Autoload options require additional analysis: ${spec.unsupported.join(", ")}; route coverage/prefixes are not verified.`, origin: { file: model.rel } });
       const dirAbs = resolveAutoloadDir(ts, model.source, spec.dirNode);
       if (!dirAbs) {
         unresolved.push({
@@ -1005,7 +1009,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           if (!plugin) return; // Non-plugin module (schema tables, config): autoload skips.
           const param =
             plugin.node.parameters?.[0]?.name?.getText?.(childModel.source) ?? "fastify";
-          if (plugin.fpWrapped) {
+          if (plugin.fpWrapped || !spec.encapsulate) {
             // fastify-plugin opts out of encapsulation: autoload prefixes and
             // options.prefix are not applied by Fastify; routes carry their
             // own absolute or manually concatenated paths.
@@ -1055,7 +1059,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
         for (const subdir of [...entry.subdirs].sort()) {
           const name = subdir.split(sep).pop()!;
           const nextSegments = spec.dirNameRoutePrefix
-            ? [...segments, autoloadSegmentToPath(name)]
+            ? [...segments, spec.routeParams ? autoloadSegmentToPath(name) : name]
             : segments;
           walk(subdir, nextSegments);
         }
@@ -1163,7 +1167,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
             }
           }
         }
-        const normalized = normalizeFastifyPath(staticUrl);
+        const normalized = normalizeFastifyPath(joinPrefix(prefix, staticUrl));
         if (normalized.dynamic) {
           unresolved.push({
             reason: "dynamic-path",
@@ -1172,7 +1176,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           });
           continue;
         }
-        const fullPath = joinPrefix(prefix, normalized.path);
+        const fullPath = normalized.path;
         const pathParams = new Set(
           [...fullPath.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!),
         );
@@ -1705,7 +1709,11 @@ function collectSites(
                   dirNode,
                   optionsNode: option("options"),
                   dirNameRoutePrefix: boolValue(option("dirNameRoutePrefix"), true),
-                  encapsulate: boolValue(option("encapsulate"), false),
+                  encapsulate: boolValue(option("encapsulate"), true),
+                  routeParams: boolValue(option("routeParams"), false),
+                  unsupported: ["matchFilter", "ignoreFilter", "ignorePattern", "indexPattern", "scriptPattern", "maxDepth", "appendAutoPrefix"]
+                    .filter(key => option(key) !== null)
+                    .concat(option("dirNameRoutePrefix") && typeof literalValue(ts, option("dirNameRoutePrefix")) !== "boolean" ? ["dirNameRoutePrefix callback"] : []),
                 };
               }
             }
@@ -2226,6 +2234,33 @@ function extractRouteSchema(
     return resolved?.node ?? null;
   };
 
+  const sourceOwners = new Map([...models.values()].map(model => [model.source, model]));
+  // Expand schema references before syntactic fluent conversion. This keeps
+  // nested items(User) and imported profile schemas in the owning file's scope.
+  const convertSection = (node: any): JsonSchema | undefined => {
+    if (!node) return undefined;
+    let budget = 10000;
+    const transformed = ts.transform(node, [(context: any) => {
+      const visit = (current: any, seen: Set<any>, depth: number): any => {
+        if (--budget < 0 || depth > 40 || seen.has(current)) return current;
+        const next = new Set(seen).add(current);
+        if (ts.isIdentifier(current) || ts.isPropertyAccessExpression(current)) {
+          const source = current.getSourceFile?.();
+          const owner = sourceOwners.get(source) ?? ownerModel;
+          const resolved = resolveSchemaValueNode(ts, analysis, models, owner, current, new Set());
+          if (resolved && resolved.node !== current) return visit(resolved.node, next, depth + 1);
+        }
+        return ts.visitEachChild(current, (child: any) => {
+          if ((ts.isPropertyAssignment(current) || ts.isPropertyAccessExpression(current)) && child === current.name) return child;
+          return visit(child, next, depth + 1);
+        }, context);
+      };
+      return (root: any) => visit(root, new Set(), 0);
+    }]);
+    try { return schemaValueToJson(ts, transformed.transformed[0]); }
+    finally { transformed.dispose(); }
+  };
+
   const addParams = (
     node: any,
     location: RouteParameter["in"],
@@ -2233,7 +2268,7 @@ function extractRouteSchema(
   ) => {
     const resolved = resolveSection(node);
     const schema = resolved
-      ? (schemaValueToJson(ts, resolved) as JsonSchema | undefined)
+      ? (convertSection(resolved) as JsonSchema | undefined)
       : undefined;
     if (!schema || typeof schema !== "object" || schema.type !== "object") return;
     const required = new Set(
@@ -2267,7 +2302,7 @@ function extractRouteSchema(
   if (bodyNode) {
     const resolved = resolveSection(bodyNode);
     const bodySchema = resolved
-      ? (schemaValueToJson(ts, resolved) as JsonSchema | undefined)
+      ? (convertSection(resolved) as JsonSchema | undefined)
       : undefined;
     if (bodySchema && typeof bodySchema === "object") {
       facts.requestBody = {
@@ -2288,7 +2323,7 @@ function extractRouteSchema(
         ? resolveSection(prop.initializer)
         : resolveSection(prop.name);
       const schema = valueNode
-        ? (schemaValueToJson(ts, valueNode) as JsonSchema | undefined)
+        ? (convertSection(valueNode) as JsonSchema | undefined)
         : undefined;
       if (schema && typeof schema === "object") {
         facts.responses.push({
@@ -2467,7 +2502,7 @@ function analyzeFastifyHandler(
       if (schema && previous && JSON.stringify(previous) !== JSON.stringify(schema)) {
         // Branches sharing a status/media type are alternatives; never discard
         // an earlier response or require mutually exclusive shapes (oneOf).
-        const alternatives = Array.isArray(previous.anyOf) ? previous.anyOf : [previous];
+        const alternatives = Object.keys(previous).length === 1 && Array.isArray(previous.anyOf) ? previous.anyOf : [previous];
         existing.content[0].schema = { anyOf: [...alternatives, schema] };
       } else if (schema && !previous) {
         existing.content[0].schema = schema;
@@ -2891,14 +2926,33 @@ function mergeFacts(schema: Facts, inferred: Facts, pathParams: Set<string>): Fa
   }
 
   const requestBody = schema.requestBody ?? inferred.requestBody;
+  // Handler inference proved a JSON body is read but its shape could not be
+  // recovered. Keep a schema-less application/json media placeholder so the
+  // gap stays attached to a real request body and the AI resolver (or the
+  // user) has a concrete slot to fill, matching the other framework packs.
+  const mergedRequestBody =
+    requestBody ??
+    (inferred.gaps.includes("body-unknown") ||
+    inferred.gaps.includes("body-schema-unknown")
+      ? {
+          required: true,
+          content: [{ mediaType: "application/json" }],
+          confidence: "low" as Confidence,
+        }
+      : undefined);
   // Explicit JSON Schema responses win; otherwise use handler inference.
   const responses = schema.responses.length ? schema.responses : inferred.responses;
 
   // Recompute gaps against the merged evidence instead of trusting either side.
   const gaps = new Set<GapCode>();
-  if (!requestBody) {
+  if (!mergedRequestBody) {
     if (inferred.gaps.includes("body-unknown")) gaps.add("body-unknown");
-    if (inferred.gaps.includes("body-schema-unknown")) gaps.add("body-schema-unknown");
+  }
+  if (
+    mergedRequestBody &&
+    mergedRequestBody.content.some((media) => !media.schema && !media.itemSchema)
+  ) {
+    gaps.add("body-schema-unknown");
   }
   if (responses.length === 0) {
     gaps.add("response-unknown");
@@ -2926,11 +2980,11 @@ function mergeFacts(schema: Facts, inferred: Facts, pathParams: Set<string>): Fa
 
   return {
     parameters,
-    ...(requestBody ? { requestBody } : {}),
+    ...(mergedRequestBody ? { requestBody: mergedRequestBody } : {}),
     responses,
     gaps: [...gaps],
     sse: false,
-    bodyKnown: Boolean(requestBody),
+    bodyKnown: Boolean(mergedRequestBody),
   };
 }
 

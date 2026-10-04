@@ -1,0 +1,182 @@
+{
+  "assertions": 336,
+  "mismatches": 29,
+  "errors": [
+    {
+      "where": "post /benchmark/ok/{id} request application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /benchmark/ok/{id} response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/ok/{id} response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/struct/{id} request application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /benchmark/struct/{id} response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/struct/{id} response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/codegen/{id} request application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /benchmark/codegen/{id} response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/codegen/{id} response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/scoped-validator/{id} request application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /benchmark/scoped-validator/{id} response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/scoped-validator/{id} response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/throttle/{id} request application/json",
+      "field": "/properties/id/required",
+      "expected": false,
+      "actual": true
+    },
+    {
+      "where": "post /benchmark/throttle/{id} response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "post /benchmark/throttle/{id} response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /command-handler-1",
+      "status": "200",
+      "error": "missing response media",
+      "media": "application/json"
+    },
+    {
+      "where": "get /command-handler-1 response 200 application/json",
+      "field": "/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /command-handler-2",
+      "status": "200",
+      "error": "missing response media",
+      "media": "application/json"
+    },
+    {
+      "where": "get /command-handler-2 response 200 application/json",
+      "field": "/type",
+      "expected": "object",
+      "actual": null
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/name/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/phoneNumber/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/firstName/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/lastName/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/phoneNumbers/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/moreNestedQueryObject/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/moreNestedQueryObject/anyOf/0/properties/firstName/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/moreNestedQueryObject/anyOf/0/properties/lastName/required",
+      "expected": true,
+      "actual": false
+    },
+    {
+      "where": "get /benchmark/query-binding response 200 application/json",
+      "field": "/properties/nestedQueryObject/anyOf/0/properties/moreNestedQueryObject/anyOf/0/properties/phoneNumbers/required",
+      "expected": true,
+      "actual": false
+    }
+  ],
+  "baselineIssues": [],
+  "limitation": "Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review."
+}

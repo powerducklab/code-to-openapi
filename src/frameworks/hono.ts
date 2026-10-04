@@ -125,11 +125,11 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
   dependencyHints: ["hono"],
 
   applies(ctx: ScanContext): boolean {
-    const hasDep = ctx.manifest.packages.has("hono");
+    const hasDep = ctx.manifest.packages.has("hono") || ctx.manifest.packages.has("@hono/zod-openapi");
     if (!hasDep) return false;
     // Route-feature dual signal: an actual Hono import / `new Hono()` call.
     return ctx.index.files.some((f) =>
-      /from\s+["']hono["']|require\(["']hono["']\)|new\s+Hono\s*\(/.test(f.content),
+      /from\s+["'](?:hono|@hono\/zod-openapi)["']|require\(["']hono["']\)|new\s+Hono\s*\(/.test(f.content),
     );
   },
 
@@ -175,7 +175,7 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
         const childId = resolveMountChild(analysis, models, model, mount);
         if (!childId) continue;
         edges.push({ parentId: mount.parentId, prefix: mount.prefix, childId });
-        incoming.add(childId);
+        if (childId !== mount.parentId) incoming.add(childId);
       }
     }
 
@@ -183,21 +183,34 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
     // never mounted under another app; unreachable nodes are treated as their
     // own root (standalone entry app) so no routes are dropped.
     const prefixes = new Map<string, string[]>();
-    const roots = [...allNodes.values()].filter((n) => !incoming.has(n.id));
-    const walk = (id: string, prefix: string, seen: Set<string>) => {
-      if (seen.has(id)) return;
-      seen.add(id);
-      const list = prefixes.get(id) ?? [];
-      if (!list.includes(prefix)) list.push(prefix);
-      prefixes.set(id, list);
-      for (const edge of edges.filter((e) => e.parentId === id)) {
-        walk(edge.childId, joinPath(prefix, edge.prefix), seen);
+    const unresolved: ExtractionResult["unresolved"] = [];
+    const outgoing = new Map<string, typeof edges>();
+    for (const edge of edges) outgoing.set(edge.parentId, [...(outgoing.get(edge.parentId) ?? []), edge]);
+    const visited = new Set<string>();
+    const reportedCycles = new Set<string>();
+    const walk = (rootId: string) => {
+      const pending = [{id: rootId, prefix: "", ancestors: new Set<string>()}];
+      while (pending.length) {
+        const {id, prefix, ancestors} = pending.pop()!;
+        if (ancestors.has(id)) {
+          if (!reportedCycles.has(id)) unresolved.push({reason: "path-dynamic", message: "Cyclic Hono application mount; recursive paths require review", origin: {file: allNodes.get(id)?.file ?? "", symbol: allNodes.get(id)?.varName}});
+          reportedCycles.add(id);
+          continue;
+        }
+        const key = `${id}\0${prefix}`;
+        if (visited.has(key)) continue;
+        if (visited.size >= 10000) {
+          if (!unresolved.some(u => u.message.includes("10000"))) unresolved.push({reason: "path-dynamic", message: "Hono mount expansion exceeded 10000 distinct paths; remaining mounts require review", origin: {file: allNodes.get(id)?.file ?? ""}});
+          return;
+        }
+        visited.add(key);
+        prefixes.set(id, [...(prefixes.get(id) ?? []), prefix]);
+        const next = new Set(ancestors).add(id);
+        for (const edge of outgoing.get(id) ?? []) pending.push({id: edge.childId, prefix: joinPath(prefix, edge.prefix), ancestors: next});
       }
     };
-    for (const root of roots) walk(root.id, "", new Set());
-    for (const node of allNodes.values()) {
-      if (!prefixes.has(node.id)) walk(node.id, "", new Set());
-    }
+    for (const root of [...allNodes.values()].filter(n => !incoming.has(n.id))) walk(root.id);
+    for (const node of allNodes.values()) if (!prefixes.has(node.id)) walk(node.id);
 
     const candidates: RouteCandidate[] = [];
     const seenOp = new Map<string, RouteCandidate>();
@@ -286,7 +299,7 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
 
     return {
       routes: [...seenOp.values()],
-      unresolved: [],
+      unresolved,
       components: collectComponents(analysis),
       securitySchemes: [],
       servers: [],
@@ -296,6 +309,54 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
 
 function relId(file: string, varName: string): string {
   return `${file}::${varName}`;
+}
+
+/** Prove an app factory through its actual return values and imported constructor.
+ * No reliance on a function's spelling (createApp may return anything). */
+function isHonoInstance(analysis: TsAnalysis, expression: any, seen = new Set<any>(), depth = 0): boolean {
+  const {ts, checker} = analysis;
+  if (!expression || depth > 12 || seen.has(expression)) return false;
+  const next = new Set(seen).add(expression);
+  const symbolOf = (node: any) => {
+    let symbol = checker.getSymbolAtLocation(node);
+    if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+    return symbol;
+  };
+  if (ts.isNewExpression(expression)) {
+    const ctor = expression.expression;
+    if (!ts.isIdentifier(ctor)) return false;
+    const local = checker.getSymbolAtLocation(ctor);
+    return (local?.declarations ?? []).some((decl: any) => {
+      if (!ts.isImportSpecifier(decl)) return false;
+      const name = decl.propertyName?.text ?? decl.name.text;
+      const module = decl.parent?.parent?.parent?.moduleSpecifier?.text;
+      return (module === 'hono' && name === 'Hono') || (module === '@hono/zod-openapi' && name === 'OpenAPIHono');
+    });
+  }
+  if (ts.isIdentifier(expression)) {
+    const declarations = symbolOf(expression)?.declarations ?? [];
+    const variable = declarations.find((d: any) => ts.isVariableDeclaration(d) && d.initializer);
+    return !!variable && isHonoInstance(analysis, variable.initializer, next, depth + 1);
+  }
+  if (ts.isCallExpression(expression)) {
+    if (ts.isPropertyAccessExpression(expression.expression) && expression.expression.name.text === 'route') {
+      return isHonoInstance(analysis, expression.expression.expression, next, depth + 1);
+    }
+    const declarations = symbolOf(expression.expression)?.declarations ?? [];
+    const fn = declarations.find((d: any) => ts.isFunctionDeclaration(d) && d.body)
+      ?? declarations.find((d: any) => ts.isVariableDeclaration(d) && d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer)))?.initializer;
+    if (!fn?.body || !analysis.isProjectFile(fn.getSourceFile().fileName)) return false;
+    if (!ts.isBlock(fn.body)) return isHonoInstance(analysis, fn.body, next, depth + 1);
+    const returns: any[] = [];
+    const visit = (node: any) => {
+      if (node !== fn.body && ts.isFunctionLike(node)) return;
+      if (ts.isReturnStatement(node)) returns.push(node.expression);
+      ts.forEachChild(node, visit);
+    };
+    visit(fn.body);
+    return returns.length > 0 && returns.every(value => isHonoInstance(analysis, value, next, depth + 1));
+  }
+  return false;
 }
 
 function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
@@ -342,7 +403,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
             }
           }
         }
-      } else if (specifier.startsWith(".")) {
+      } else {
         // import * as routes from "./x"
         if (
           child.importClause?.namedBindings &&
@@ -426,10 +487,8 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
     if (
       ts.isVariableDeclaration(node) &&
       node.initializer &&
-      ts.isNewExpression(node.initializer) &&
       ts.isIdentifier(node.name) &&
-      ts.isIdentifier(node.initializer.expression) &&
-      model.ctorNames.has(node.initializer.expression.text)
+      isHonoInstance(analysis, node.initializer)
     ) {
       model.nodes.set(node.name.text, {
         id: relId(rel, node.name.text),
@@ -453,10 +512,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
           model.exported.set(node.name.text, node.initializer.text);
         }
       } else if (
-        node.initializer &&
-        ts.isNewExpression(node.initializer) &&
-        ts.isIdentifier(node.initializer.expression) &&
-        model.ctorNames.has(node.initializer.expression.text)
+        node.initializer && model.nodes.has(node.name.text)
       ) {
         // export const users = new Hono()
         model.exported.set(node.name.text, node.name.text);
@@ -482,14 +538,18 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
   const { ts } = analysis;
   if (!ts.isPropertyAccessExpression(node.expression)) return;
   const access = node.expression;
-  const rootName = access.expression.getText(model.source);
+  let rootName = access.expression.getText(model.source);
+  if (!model.nodes.has(rootName) && ts.isCallExpression(access.expression)) {
+    let chain = node;
+    while (ts.isPropertyAccessExpression(chain.parent) || ts.isCallExpression(chain.parent)) chain = chain.parent;
+    if (ts.isVariableDeclaration(chain.parent) && ts.isIdentifier(chain.parent.name) && model.nodes.has(chain.parent.name.text)) rootName = chain.parent.name.text;
+  }
   const method = access.name.text;
   const origin = locationAt(ts, model.source, node, model.rel);
 
-  // app.openapi(routeDef, handler)  (@hono/zod-openapi). The receiver may be a
-  // factory-built app (createApp) not registered as a `new Hono()` node, so we
-  // handle it before the nodeVar guard; prefix falls back to "" honestly.
-  if (method === "openapi") {
+  // Only proven Hono instances may register declarative routes. An unrelated
+  // object's openapi() method must not produce a root-level API.
+  if (method === "openapi" && model.nodes.has(rootName)) {
     const arg = node.arguments[0];
     const handlerNode = [...node.arguments]
       .slice(1)
@@ -660,11 +720,12 @@ function extractRouteContract(
 ): RouteContract {
   const { ts } = analysis;
   const resolveBinding = makeBindingResolver(analysis, ts, models, owner);
-  const toSchema = (node: any): import("../core/types.js").JsonSchema | null =>
+  const toSchema = (node: any, mode: "input" | "output" = "input"): import("../core/types.js").JsonSchema | null =>
     convertZodNode(node, {
       ts,
       sourceFile: owner.source,
       resolveSchemaBinding: resolveBinding,
+      mode,
     });
 
   const result: RouteContract = { parameters: [], responses: [] };
@@ -676,7 +737,7 @@ function extractRouteContract(
     if (bodyNode && ts.isObjectLiteralExpression(bodyNode)) {
       const content = objectProperty(ts, bodyNode, "content");
       const requiredProp = objectProperty(ts, bodyNode, "required");
-      const required = requiredProp ? requiredProp.kind === ts.SyntaxKind.TrueKeyword : true;
+      const required = requiredProp?.kind === ts.SyntaxKind.TrueKeyword;
       const mediaContent: { mediaType: string; schema: import("../core/types.js").JsonSchema }[] = [];
       if (content && ts.isObjectLiteralExpression(content)) {
         for (const prop of content.properties) {
@@ -738,7 +799,7 @@ function extractRouteContract(
           }
           const schemaNode = objectProperty(ts, mediaProp.initializer, "schema");
           if (!schemaNode) continue;
-          const schema = toSchema(schemaNode);
+          const schema = toSchema(schemaNode, "output");
           if (schema) {
             mediaContent.push({
               mediaType: mediaProp.name.text,

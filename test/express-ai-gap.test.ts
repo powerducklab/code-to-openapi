@@ -124,6 +124,12 @@ describe("scanProject AI gap resolver", () => {
       expect(call.gaps.length).toBeGreaterThan(0);
     }
 
+    // The report distinguishes attempted and completed AI fills.
+    expect(withAi.report.aiAttempted).toBe(2);
+    expect(withAi.report.aiResolved).toBe(2);
+    expect(withAi.report.aiResolvedRoutes).toHaveLength(2);
+    expect(withAi.report.gaps).toEqual([]);
+
     const converted = await withAi.convert();
     expect(converted.ok).toBe(true);
   });
@@ -142,4 +148,26 @@ it('retains discovered routes and gaps when the model fails',async()=>{
  expect(result.project.operations).toHaveLength(2);
  expect(result.project.operations.some(o=>o.gaps?.length)).toBe(true);
  expect(result.report.diagnostics.some(d=>d.includes('offline'))).toBe(true);
+ expect(result.report.aiAttempted).toBe(2);
+ expect(result.report.aiResolved).toBe(0);
+ expect(result.report.aiResolvedRoutes).toEqual([]);
+});
+
+it("emits determinate ai-start and ai-gap progress events", async () => {
+  const events: Array<{ phase: string; detail?: string }> = [];
+  await scanProject({
+    root: fixtureRoot,
+    includeTests: true,
+    onProgress: (phase, detail) => events.push({ phase, detail }),
+    gapResolver: new StubGapResolver(),
+  });
+  const start = events.find((e) => e.phase === "ai-start");
+  expect(start?.detail).toBe(JSON.stringify({ total: 2 }));
+  const gapEvents = events.filter((e) => e.phase === "ai-gap");
+  expect(gapEvents).toHaveLength(2);
+  for (const event of gapEvents) {
+    const detail = JSON.parse(event.detail ?? "{}");
+    expect(detail.total).toBe(2);
+    expect(["filled", "empty", "partial", "failed"]).toContain(detail.status);
+  }
 });

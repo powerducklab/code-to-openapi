@@ -29,6 +29,7 @@ import type {
   ScanContext,
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { elysiaMounts } from "../lang/typescript/elysiaMounts.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { createBindingResolver } from "../lang/typescript/bindings.js";
 import { convertArkNode } from "../lang/typescript/arktype.js";
@@ -62,6 +63,7 @@ interface FileModel {
   /** imported local name -> module specifier. */
   importSpecifiers: Map<string, string>;
   routes: Array<{
+    registration: any;
     receiver: string;
     method: string;
     rawPath: string;
@@ -146,6 +148,7 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
             if (spec === "elysia" || spec === "@sinclair/typebox") return "typebox";
             if (spec === "zod" || spec === "@hono/zod-openapi") return "zod";
           }
+          return detectKind(node.expression.expression, file, depth + 1);
         }
       }
 
@@ -187,7 +190,8 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
       return "unknown";
     };
 
-    const convertSchema = (node: any, file: any, depth = 0): JsonSchema | null => {
+    const schemaWarnings = new Set<string>();
+    const convertSchema = (node: any, file: any, depth = 0, mode: "input" | "output" = "input"): JsonSchema | null => {
       if (depth > 8 || !node) return null;
       const kind = detectKind(node, file);
       const rc = {
@@ -198,7 +202,7 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
         depth: 0,
       };
       if (kind === "arktype") {
-        return convertArkNode(node, rc);
+        return convertArkNode(node, { ...rc, mode, onUnresolved: message => schemaWarnings.add(`${file.fileName}: ${message}`) });
       }
       if (kind === "typebox") {
         return convertTypeBoxNode(node, rc);
@@ -210,19 +214,22 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
           resolveSchemaBinding: (name: string, from?: any) =>
             resolveBinding(name, from ?? file)?.node ?? null,
           depth: 0,
+          mode,
         });
       }
       return null;
     };
 
+    const mounts = elysiaMounts(analysis);
     const candidates: RouteCandidate[] = [];
     const seenOp = new Map<string, RouteCandidate>();
 
     for (const model of models.values()) {
       for (const route of model.routes) {
+       for (const mountedPrefix of mounts.prefixesFor(route.registration)) {
         // Normalize prefix and route together so `:slug` inside a group
         // prefix becomes `{slug}` as well.
-        const prefixNorm = normalizeColonPath(route.prefix);
+        const prefixNorm = normalizeColonPath(joinPath(mountedPrefix, route.prefix));
         const normalized = normalizeColonPath(route.rawPath);
         const pathParams = new Set<string>([
           ...prefixNorm.params,
@@ -317,12 +324,13 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
         };
         const key = `${candidate.method} ${candidate.fullPath}`;
         if (!seenOp.has(key)) seenOp.set(key, candidate);
+       }
       }
     }
 
     return {
       routes: [...seenOp.values()],
-      unresolved: [],
+      unresolved: [...mounts.unresolved, ...[...schemaWarnings].map(message => ({reason: "body-schema-unknown" as GapCode, message, origin: {file: message.split(": ")[0]!}}))],
       components: collectComponents(analysis),
       securitySchemes: [],
       servers: [],
@@ -469,6 +477,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
       (a: any) => a && a !== handlerNode && ts.isObjectLiteralExpression(a),
     ) ?? null;
   model.routes.push({
+    registration: node,
     receiver,
     method,
     rawPath: pathArg.text,
@@ -518,7 +527,7 @@ function parseOptionsContract(
   sourceFile: any,
   pathParamNames: string[],
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  convertSchema: (node: any, file: any, depth?: number) => JsonSchema | null,
+  convertSchema: (node: any, file: any, depth?: number, mode?: "input" | "output") => JsonSchema | null,
 ): Contract {
   const out: Contract = { parameters: [], responses: [] };
   const seen = new Set<string>();
@@ -590,7 +599,7 @@ function parseOptionsContract(
         if (!ts.isPropertyAssignment(prop)) continue;
         const status = resolveStatusName(ts, prop.name);
         if (!status) continue;
-        const schema = convertSchema(prop.initializer, sourceFile);
+        const schema = convertSchema(prop.initializer, sourceFile, 0, "output");
         if (!schema) continue;
         out.responses.push({
           status,
@@ -599,7 +608,7 @@ function parseOptionsContract(
       }
     } else {
       // Bare schema -> 200.
-      const schema = convertSchema(responseNode, sourceFile);
+      const schema = convertSchema(responseNode, sourceFile, 0, "output");
       if (schema) {
         out.responses.push({
           status: "200",

@@ -50,7 +50,7 @@ describe("nestjs + TypeScript golden project", () => {
     const importOp = doc.paths["/api/users/import"].post;
     expect(importOp.responses["200"].content["application/json"].schema).toEqual({
       type: "object",
-      properties: { imported: { type: "boolean" } },
+      properties: { imported: { type: "boolean", const: true } },
       required: ["imported"],
     });
 

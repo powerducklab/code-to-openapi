@@ -18,14 +18,14 @@ describe("axum real-world generic envelopes", () => {
     const { doc } = await scan();
 
     const single = doc.paths["/api/products/{id}"].get.responses["200"].content["application/json"].schema;
-    expect(single.properties.data).toEqual({ $ref: "#/components/schemas/Product" });
-    expect(single.properties.code).toEqual({ type: "integer" });
+    expect(single.properties.data).toEqual({ $ref: "#/components/schemas/serialized_Product" });
+    expect(single.properties.code).toEqual({ type: "integer", format: "int32" });
 
     const list = doc.paths["/api/products"].get.responses["200"].content["application/json"].schema;
     const page = list.properties.data;
     expect(page.properties.items).toEqual({
       type: "array",
-      items: { $ref: "#/components/schemas/Product" },
+      items: { $ref: "#/components/schemas/serialized_Product" },
     });
     expect(page.properties.total).toEqual({ type: "integer", format: "int64" });
   });
