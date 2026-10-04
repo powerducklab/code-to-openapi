@@ -841,7 +841,9 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
     const pathEntries = pathArguments(ts, node.arguments[0]);
     // `app.options('*', cors())` is a CORS preflight catch-all, not a business
     // operation; do not emit it as an API route.
-    if (method === "options" && node.arguments[0]?.text === "*") return;
+    const rawPath = node.arguments[0]?.text?.trim();
+    const normalizedPath = rawPath ? rawPath.replace(/^(['"])(.*)\1$/, "$2") : rawPath;
+    if (method === "options" && normalizedPath === "*") return;
     for (const entry of pathEntries) {
       if (!entry) {
         model.unresolved.push({
