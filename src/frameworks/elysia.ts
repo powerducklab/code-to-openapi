@@ -321,6 +321,7 @@ export const elysiaPack: FrameworkPack<TsAnalysis> = {
           confidence,
           gaps: [...gaps],
           components: [],
+          ...(facts.handlerSource ? { handlerSource: facts.handlerSource } : {}),
         };
         const key = `${candidate.method} ${candidate.fullPath}`;
         if (!seenOp.has(key)) seenOp.set(key, candidate);
@@ -651,6 +652,7 @@ interface HandlerResult {
   requestBody?: { required: boolean; content: any[]; confidence: "high" | "medium" | "low" };
   responses: any[];
   gaps: GapCode[];
+  handlerSource?: string;
 }
 
 function analyzeElysiaHandler(
@@ -778,12 +780,22 @@ function analyzeElysiaHandler(
 
   if (!hasResponseSite) gaps.add("response-unknown");
 
+  let handlerSource: string | undefined;
+  try {
+    const sf = analysis.sourceByPath.get(handlerFile);
+    const text: string = sf ? handler.getText(sf) : handler.getText();
+    handlerSource = text.length > 8192 ? `${text.slice(0, 8192)}\n// ... truncated` : text;
+  } catch {
+    // Source text is best-effort for AI review; ignore.
+  }
+
   void handlerFile;
   return {
     parameters,
     ...(requestBody ? { requestBody } : {}),
     responses: responses.all(),
     gaps: [...gaps],
+    handlerSource,
   };
 }
 

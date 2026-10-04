@@ -159,6 +159,11 @@ function callName(node: TsNode | null): string | null {
   return null;
 }
 
+/** Bounds the source slice handed to AI gap review for one handler/viewset. */
+function sliceHandlerSource(text: string): string {
+  return text.length > 8192 ? `${text.slice(0, 8192)}\n# ... truncated` : text;
+}
+
 function baseTail(base: TsNode): string {
   const text = base.text.trim();
   const tail = text.split(".").pop() ?? text;
@@ -1011,6 +1016,7 @@ function buildViewsetRoute(
     confidence,
     gaps: [...gaps],
     components: [],
+    handlerSource: sliceHandlerSource(input.viewset.node.text),
   };
 }
 
@@ -1072,6 +1078,7 @@ function buildActionRoute(
     confidence: "medium",
     gaps: [...gaps],
     components: [],
+    handlerSource: sliceHandlerSource(input.fn.node.text),
   };
 }
 
@@ -1133,6 +1140,7 @@ function buildClassMethodRoute(
     confidence: gaps.size ? "medium" : "high",
     gaps: [...gaps],
     components: [],
+    handlerSource: sliceHandlerSource(input.cls.node.text),
   };
 }
 
@@ -1191,5 +1199,6 @@ function buildFunctionViewRoute(
     confidence: "medium",
     gaps: [...gaps],
     components: [],
+    handlerSource: sliceHandlerSource(input.fn.node.text),
   };
 }
