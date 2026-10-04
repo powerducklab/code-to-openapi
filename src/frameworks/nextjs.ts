@@ -481,6 +481,31 @@ function analyzeAppHandler(
       hasResponseSite = true;
       responses.record(statusFromOpts(ts, node.arguments?.[1]) ?? "200", "image/png", { type: "string", format: "binary" }, "high");
     }
+
+    // NextResponse.redirect(url, status?) / Response.redirect(url, status?) —
+    // an empty redirect; the Location target may be dynamic but the status and
+    // empty body are deterministic (307 for NextResponse, 302 for native Response).
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "redirect" &&
+      ts.isIdentifier(node.expression.expression)
+    ) {
+      const ctor = node.expression.expression;
+      const isNext = importedFrom(analysis, ctor, "NextResponse", ["next/server"]);
+      const isNative = ctor.text === "Response";
+      if (isNext || isNative) {
+        hasResponseSite = true;
+        const second = node.arguments?.[1];
+        const status =
+          (second && typeof second === "object" && ts.isObjectLiteralExpression(second)
+            ? statusFromOpts(ts, second)
+            : second && ts.isNumericLiteral(second)
+              ? second.text
+              : undefined) ?? (isNext ? "307" : "302");
+        responses.recordEmpty(status, "high");
+      }
+    }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(source) === reqName && node.expression.name.text === "text") textBodyReferenced = true;
 
     // Bare request.json() reference (untyped body).
