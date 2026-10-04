@@ -36,6 +36,79 @@ interface CollectedField {
 }
 
 /**
+ * Detect numeric conversions applied to a forwarded query object's members.
+ * When a service helper does `Number(query.offset)`, `parseInt(query.limit)`,
+ * the corresponding wire contract is `number` even though the parameter symbol
+ * is typed `any` or as the framework's string-typed query bag. `Number()` and
+ * `parseInt` accept floats and fall back to NaN for empty/invalid input, so the
+ * schema stays `number` (not `integer`), matching how upstream documents model it.
+ * Returns the member names proven to be converted; anything unproven stays string.
+ */
+function numericForwardedQueryFields(
+  analysis: TsAnalysis,
+  method: any,
+  parameter: any,
+): Map<string, JsonSchema> {
+  const { ts, checker } = analysis;
+  const numeric = new Map<string, JsonSchema>();
+  const visited = new Set<any>();
+  const walk = (fn: any, param: any, depth: number): void => {
+    if (!fn.body || depth > 12 || visited.has(param)) return;
+    visited.add(param);
+    const symbol = checker.getSymbolAtLocation(param.name);
+    if (!symbol) return;
+    const aliases = new Set([symbol]);
+    const isQuery = (n: any): boolean =>
+      ts.isIdentifier(n) && aliases.has(checker.getSymbolAtLocation(n));
+    const visit = (n: any): void => {
+      if (n !== fn.body && ts.isFunctionLike(n)) return;
+      if (
+        ts.isVariableDeclaration(n) &&
+        n.initializer &&
+        isQuery(n.initializer) &&
+        (n.parent.flags & ts.NodeFlags.Const) &&
+        ts.isIdentifier(n.name)
+      ) {
+        aliases.add(checker.getSymbolAtLocation(n.name));
+      }
+      if (
+        ts.isCallExpression(n) &&
+        (ts.isIdentifier(n.expression) || ts.isPropertyAccessExpression(n.expression)) &&
+        ["Number", "parseInt", "parseFloat"].includes(
+          ts.isIdentifier(n.expression) ? n.expression.text : n.expression.name.text,
+        ) &&
+        n.arguments.length >= 1
+      ) {
+        const arg = n.arguments[0];
+        const member =
+          ts.isPropertyAccessExpression(arg) && isQuery(arg.expression)
+            ? arg.name.text
+            : ts.isElementAccessExpression(arg) &&
+                isQuery(arg.expression) &&
+                ts.isStringLiteralLike(arg.argumentExpression)
+              ? arg.argumentExpression.text
+              : undefined;
+        if (member) numeric.set(member, { type: "number" });
+      }
+      if (ts.isCallExpression(n)) {
+        const target = localImplementation(analysis, n);
+        if (target) {
+          n.arguments.forEach((arg: any, index: number) => {
+            if (isQuery(arg) && target.parameters[index]) {
+              walk(target, target.parameters[index], depth + 1);
+            }
+          });
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(fn.body);
+  };
+  walk(method, parameter, 0);
+  return numeric;
+}
+
+/**
  * A monkey-patched Express Response method, e.g.
  *   response.customSuccess = function (status, message, data = null) {
  *     return this.status(status).json({ message, data });
@@ -984,13 +1057,56 @@ export function analyzeHandler(
       }
     }
 
+    // Numeric conversion wrappers: `Number(req.query.x)`, `parseInt(req.query.x)`.
+    // The wrapped property access is a query/path parameter; the value is produced
+    // through an explicit numeric conversion, so the wire contract is number, not
+    // the framework's default string-typed ParsedQs. `Number()` accepts floats and
+    // falls back to NaN/0 for empty or invalid input; upstream documents model this
+    // as `number` (not integer), so the schema stays number.
+    if (
+      ts.isCallExpression(node) &&
+      (ts.isIdentifier(node.expression) || ts.isPropertyAccessExpression(node.expression)) &&
+      ["Number", "parseInt", "parseFloat"].includes(
+        ts.isIdentifier(node.expression) ? node.expression.text : node.expression.name.text,
+      ) &&
+      node.arguments.length >= 1
+    ) {
+      const arg = node.arguments[0];
+      const member =
+        ts.isPropertyAccessExpression(arg) && rootIdentifier(ts, arg) === reqName
+          ? arg.name.text
+          : ts.isElementAccessExpression(arg) &&
+              rootIdentifier(ts, arg.expression) === reqName &&
+              ts.isStringLiteralLike(arg.argumentExpression)
+            ? arg.argumentExpression.text
+            : undefined;
+      if (member) {
+        const numericSchema: JsonSchema = { type: "number" };
+        if (/^req\.query(\.|\[|$)/.test(arg.getText(file))) {
+          const existing = queryFields.find((f) => f.name === member);
+          if (existing) existing.schema = numericSchema;
+          else queryFields.push({ name: member, schema: numericSchema });
+        } else if (/^req\.params(\.|\[|$)/.test(arg.getText(file))) {
+          const existing = parameters.find((p) => p.in === "path" && p.name === member);
+          if (existing) existing.schema = numericSchema;
+          else addParam("path", member, numericSchema, "high");
+        }
+      }
+    }
+
     // Follow forwarded query objects by resolved parameter symbols, including service helpers.
     if (ts.isCallExpression(node)) {
       const target = localImplementation(analysis, node);
       if (target) node.arguments.forEach((arg: any, index: number) => {
         if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === reqName && arg.name.text === "query" && target.parameters[index]) {
-          for (const name of localObjectFields(analysis, target, target.parameters[index])) queryFields.push({name, schema: {type: "string"}});
-          gaps.add("query-unknown");
+          const forwarded = localObjectFields(analysis, target, target.parameters[index]);
+          if (forwarded.length) {
+            const numeric = numericForwardedQueryFields(analysis, target, target.parameters[index]);
+            for (const name of forwarded) {
+              queryFields.push({ name, schema: numeric.get(name) ?? { type: "string" } });
+            }
+            if (!numeric.size) gaps.add("query-unknown");
+          }
         }
       });
     }

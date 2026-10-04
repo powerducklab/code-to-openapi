@@ -4,6 +4,15 @@ import {typeToSchema} from './typeSchema.js';
 import {resolveStaticValue} from './staticValue.js';
 import {prismaProjection} from './prismaProjection.js';
 
+/** Method names that never mutate their receiver; a call like `arr.map(fn)`
+ * returns a fresh value, so the receiver is not escaping/mutated by the call. */
+const PURE_READONLY_CALLS = new Set([
+  "map", "filter", "flatMap", "flat", "slice", "concat", "join", "indexOf",
+  "lastIndexOf", "find", "findIndex", "some", "every", "reduce", "reduceRight",
+  "includes", "keys", "values", "entries", "at", "findLast", "findLastIndex",
+  "toSorted", "toReversed", "toSpliced", "with",
+]);
+
 /** Follow only resolved local implementations. External libraries remain opaque. */
 export function localImplementation(analysis: TsAnalysis, call: any): any | undefined {
  const {ts,checker}=analysis;
@@ -38,7 +47,10 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
    if(ts.isBinaryExpression(n)&&n.operatorToken.kind>=ts.SyntaxKind.FirstAssignment&&n.operatorToken.kind<=ts.SyntaxKind.LastAssignment&&rooted(n.left))unsafe=true;
    if(ts.isDeleteExpression(n)&&rooted(n.expression))unsafe=true;
    if((ts.isPostfixUnaryExpression(n)||ts.isPrefixUnaryExpression(n))&&[ts.SyntaxKind.PlusPlusToken,ts.SyntaxKind.MinusMinusToken].includes(n.operator)&&rooted(n.operand))unsafe=true;
-   if(ts.isCallExpression(n)&&(rooted(n.expression)||n.arguments.some((a:any)=>a!==method&&ts.isIdentifier(a)&&rooted(a))))unsafe=true;
+   // Passing the value as an argument to a call is not itself a mutation:
+   // mappers and helpers read their inputs. Only a call that mutates the
+   // receiver (non-readonly method call) or an explicit write marks it unsafe.
+   if(ts.isCallExpression(n)&&(!ts.isPropertyAccessExpression(n.expression)||!PURE_READONLY_CALLS.has(n.expression.name.text))&&rooted(n.expression))unsafe=true;
    if(ts.isVariableDeclaration(n)&&n!==decl&&n.initializer&&ts.isIdentifier(n.initializer)&&rooted(n.initializer))unsafe=true;
    ts.forEachChild(n,visit);
   };visit(scope);mutations.set(decl,unsafe);return unsafe;
@@ -66,18 +78,41 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     const name=node.expression.name.text, receiver=node.expression.expression;
     // Only the native Array.map declaration establishes an array result.
     // An unrelated object's `map` method, async callback, or opaque callback
-    // must not be treated as a JSON element projection.
-    if(name==='map' && (checker.isArrayType(checker.getTypeAtLocation(receiver)) || checker.isTupleType(checker.getTypeAtLocation(receiver)))){
+    // must not be treated as a JSON element projection. The receiver is a real
+    // array when the type checker proves it, or when the value's inferred
+    // schema is an array (e.g. an awaited Prisma findMany with a relation shape).
+    const receiverType = checker.getTypeAtLocation(receiver);
+    const receiverSchema = infer(receiver, next, depth + 1);
+    const receiverIsArray =
+      checker.isArrayType(receiverType) ||
+      checker.isTupleType(receiverType) ||
+      (!!receiverSchema && receiverSchema.type === "array");
+    if(name==='map' && receiverIsArray){
      const signature=checker.getResolvedSignature(node)?.declaration;
      const callback=node.arguments[0]&&(resolveStaticValue(analysis,node.arguments[0])??node.arguments[0]);
-     if(signature && !analysis.isProjectFile(signature.getSourceFile().fileName) && /lib\.[^/\\]+\.d\.ts$/.test(signature.getSourceFile().fileName) && callback?.body && ts.isFunctionLike(callback) && !(callback.modifiers??[]).some((modifier:any)=>modifier.kind===ts.SyntaxKind.AsyncKeyword)){
-      const source=fallback(receiver);const shape=source&&resolve(source);const element=shape?.items as JsonSchema|undefined;
+     // The receiver is a real array when the type checker proves it (strict
+     // lib.d.ts signature) OR when the value's inferred schema is an array
+     // (e.g. an awaited Prisma findMany typed `any`). In the schema-proven case
+     // the native declaration may be unresolvable, so the callback being a
+     // local synchronous function is the only further requirement.
+     const nativeMap =
+       !!signature && !analysis.isProjectFile(signature.getSourceFile().fileName) &&
+       /lib\.[^/\\]+\.d\.ts$/.test(signature.getSourceFile().fileName);
+     const schemaProvenArray = !!receiverSchema && receiverSchema.type === "array";
+     if((nativeMap||schemaProvenArray) && callback?.body && ts.isFunctionLike(callback) && !(callback.modifiers??[]).some((modifier:any)=>modifier.kind===ts.SyntaxKind.AsyncKeyword)){
+      const source=receiverSchema&&receiverSchema.type==='array'?receiverSchema:fallback(receiver);const shape=source&&resolve(source);const element=shape?.items as JsonSchema|undefined;
       const saved=new Map(bindings);
       callback.parameters.forEach((param:any,index:number)=>{
        const symbol=checker.getSymbolAtLocation(param.name);
+       // The map element is an input projection. Passing it to a mapper or
+       // reading it is not a mutation; only an explicit write inside the
+       // callback (caught by isMutable) invalidates the element type.
        if(symbol&&ts.isIdentifier(param.name))bindings.set(symbol,isMutable(param)?{'x-code-to-openapi-unresolved-mutation':true}:index===0?element??{}:index===1?{type:'integer',minimum:0}:shape??{});
       });
-      try{onEvidence?.();return {type:'array',items:returns(callback,next,depth+1)??{}};}
+      try{
+       const proj={type:'array',items:returns(callback,next,depth+1)??{}};
+       onEvidence?.();return proj;
+      }
       finally{bindings.clear();for(const [key,value] of saved)bindings.set(key,value);}
      }
     }
@@ -118,6 +153,31 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     if(isMutable(decl)){onEvidence?.();return {description:'Mutable or escaping value requires serialization review'};}
     if(decl.parent.flags&ts.NodeFlags.Const)return infer(decl.initializer,next,depth+1)??fallback(node);
    }
+   // `const { _count, ...rest } = await db.user.findMany(...)`: the rest
+   // binding carries every key the destructuring did not name. Resolve the
+   // source object and drop the destructured keys so `{...rest}` keeps only the
+   // returned relation/scalar fields the projection proved.
+   if(decl&&decl.kind===ts.SyntaxKind.RestElement&&decl.parent&&ts.isObjectBindingPattern(decl.parent)){
+    const binding=decl.parent;
+    const vd=binding.parent;
+    if(vd&&ts.isVariableDeclaration(vd)&&vd.initializer){
+     const omitted=new Set<string>();
+     for(const el of binding.elements){
+      if(el===decl)continue;
+      if(ts.isBindingElement(el)&&(ts.isIdentifier(el.name)||ts.isStringLiteralLike(el.name)))omitted.add(el.name.text);
+     }
+     const source=infer(vd.initializer,next,depth+1);
+     const shape=source&&resolve(source);
+     if(shape?.type==='object'&&shape.properties){
+      const properties:Record<string,JsonSchema>={};
+      for(const [key,value] of Object.entries(shape.properties as Record<string,JsonSchema>)){
+       if(!omitted.has(key))properties[key]=value;
+      }
+      const required=(shape.required as string[]??[]).filter((key)=>!omitted.has(key));
+      return {type:'object',properties,...(required.length?{required}:{})};
+     }
+    }
+   }
   }
   if(ts.isObjectLiteralExpression(node)){
    const properties:Record<string,JsonSchema>={};const required:string[]=[];let unknownSpread=false;
@@ -129,7 +189,11 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
      const objects=branches.filter((s):s is JsonSchema=>!!s&&s.type==='object');
      if(objects.length===1&&objects[0]!.properties){
       Object.assign(properties,objects[0]!.properties);
-      if(branches.length===1)required.push(...(objects[0]!.required as string[]??[]));
+      // Merge the required set of the single resolved object branch. A `null`
+      // branch (e.g. Prisma findUnique -> anyOf[object, null]) does not change
+      // which object keys are required when the value is present, so it is not
+      // a reason to drop them.
+      required.push(...(objects[0]!.required as string[]??[]));
      }else unknownSpread=true;
      continue;
     }

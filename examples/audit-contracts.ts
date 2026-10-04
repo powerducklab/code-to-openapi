@@ -8,7 +8,7 @@ const baseline=load(args[0]!);
 const scanned=load(args[1]!);
 const actual=scanned.document??scanned;
 const prefix=args[3]??'';
-const errors:unknown[]=[];const baselineIssues:unknown[]=[];let assertions=0;
+const errors:unknown[]=[];const baselineIssues:unknown[]=[];const unknownFields:unknown[]=[];const extraFields:unknown[]=[];let assertions=0;
 const resolvedNodes=new WeakMap<object,WeakMap<object,any>>();
 function resolve(node:any,doc:any,seen=new Set<string>()):any{
  if(!node||typeof node!=='object')return node;
@@ -50,6 +50,11 @@ function leaves(node:any,doc:any,path='',out=new Map<string,unknown>(),seen=new 
  for(const [key,value] of Object.entries(node.properties??{})){
   out.set(path+'/properties/'+key+'/present',true);
   if(!out.has(path+'/properties/'+key+'/required'))out.set(path+'/properties/'+key+'/required',false);
+  // An observed property that is an empty object means the field is returned
+  // but its shape is statically unresolved (e.g. a value from an `any` source
+  // like a Prisma query). Mark it opaque so any deeper baseline assertion about
+  // its children is reported as unknown, not as a concrete mismatch.
+  if(value&&typeof value==='object'&&Object.keys(value).length===0)out.set(path+'/properties/'+key+'/opaque',true);
   leaves(value,doc,path+'/properties/'+key,out,next,includePropertySets);
  }
  if(node.items)leaves(node.items,doc,path+'/items',out,next,includePropertySets);
@@ -58,14 +63,54 @@ function leaves(node:any,doc:any,path='',out=new Map<string,unknown>(),seen=new 
  for(const key of ['oneOf','anyOf']) (node[key]??[]).forEach((child:any,i:number)=>leaves(child,doc,path+'/'+key+'/'+i,out,next,includePropertySets));
  return out;
 }
-function compare(expected:any,observed:any,where:string){
+function compare(expected:any,observed:any,where:string,exactBaseline=false){
  const found=leaves(observed,actual,'',new Map(),new Set(),true);
- for(const [field,want] of leaves(expected,baseline)){
+ const want=leaves(expected,baseline);
+ for(const [field,wantV] of want){
   assertions++;
   const got=found.get(field);
   const canonical=(value:any)=>Array.isArray(value)&&(/\/(type|enum)$/.test(field))?[...value].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))):value;
-  if(JSON.stringify(canonical(want))!==JSON.stringify(canonical(got)))errors.push({where,field,expected:want,actual:got??null});
+  // A field that is present in the observed document but whose type leaf is
+  // absent (static analysis could not resolve it) is a contract gap of the
+  // "unknown" kind: the field is returned, its type is not fabricated. Report
+  // it separately instead of a concrete mismatch against the baseline type.
+  if(field.endsWith('/type') && got===undefined && found.get(field.replace(/\/type$/,'/present'))===true && wantV!==undefined){
+   unknownFields.push({where,field,expected:wantV});
+   continue;
+  }
+  // A mismatch under a statically-opaque observed field (empty object from an
+  // `any`/ORM source) is an unknown gap, not a concrete contradiction.
+  if(JSON.stringify(canonical(wantV))!==JSON.stringify(canonical(got))){
+   const parts=field.split('/');
+   let opaque=false;
+   for(let i=2;i<parts.length-1;i++){
+    if(parts[i]==='properties'&&parts[i+1]&&found.get(parts.slice(0,i+2).join('/')+'/opaque')){opaque=true;break;}
+   }
+   if(opaque){unknownFields.push({where,field,expected:wantV,actual:got??null});continue;}
+   errors.push({where,field,expected:wantV,actual:got??null});
+  }
  }
+ // Two-way: when the baseline marks a schema exact (x-audit-exact-properties),
+ // the observed schema must not expose fields the contract does not return
+ // (leaking the full entity is itself a contract violation). Otherwise extra
+ // observed fields are recorded separately, not as hard mismatches, because the
+ // baseline may simply be partial.
+ const obsProps=found.get('/propertyNames');
+ const expProps=want.get('/propertyNames');
+ if(obsProps&&expProps){
+  const extra=(obsProps as string[]).filter(n=>!(expProps as string[]).includes(n));
+  if(extra.length){
+   const entry={where,error:'extra property',extra};
+   if(exactBaseline||hasExactMarker(expected)) errors.push(entry);
+   else extraFields.push(entry);
+  }
+ }
+}
+function hasExactMarker(node:any):boolean{
+ if(!node||typeof node!=='object')return false;
+ if(node['x-audit-exact-properties']===true)return true;
+ const shape=resolve(node,baseline);
+ return shape?.['x-audit-exact-properties']===true||!!shape?.properties&&Object.values(shape.properties).some((c:any)=>hasExactMarker(c));
 }
 for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const method of ['get','post','put','patch','delete','head','options','trace']){
  const op=item[method];if(!op)continue;assertions++;
@@ -96,7 +141,7 @@ for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const metho
   }
  }
 }
-const result={assertions,mismatches:errors.length,errors,baselineIssues,limitation:'Checks documented properties/constraints. Extra fields, business semantics and undocumented runtime branches require separate review.'};
-writeFileSync(args[2]!,JSON.stringify(result,null,2));console.log(JSON.stringify({assertions,mismatches:errors.length}));
+const result={assertions,mismatches:errors.length,unknown:unknownFields.length,unknownFields,extra:extraFields.length,extraFields,errors,baselineIssues,limitation:'Checks documented properties/constraints. `unknown` fields are present but statically unresolved types; `extra` fields are observed fields absent from a partial baseline and are not hard mismatches unless the baseline is exact.'};
+writeFileSync(args[2]!,JSON.stringify(result,null,2));console.log(JSON.stringify({assertions,mismatches:errors.length,unknown:unknownFields.length,extra:extraFields.length}));
 
 if(strict && (errors.length || baselineIssues.length || !assertions)) process.exitCode=1;

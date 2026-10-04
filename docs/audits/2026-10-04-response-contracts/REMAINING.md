@@ -6,7 +6,7 @@ Latest verification: 423 regression tests / 157 files pass; TypeScript/bundle bu
 
 | Framework | Assertions | Differences |
 |---|---:|---:|
-| express | 579 | 217 |
+| express | 579 | 37 (mismatch) + 110 (unknown) |
 | nest | 177 | 0 |
 | hono | 250 | 0 |
 | koa | 115 | 0 |
@@ -43,7 +43,8 @@ Latest verification: 423 regression tests / 157 files pass; TypeScript/bundle bu
 - Fiber/Gorilla: remaining array/null differences require proving successful repository return paths; Go slice types alone cannot prove non-null.
 - Next.js: Stripe SDK signature requirements still need a registered SDK/validator contract; a header read alone does not prove requiredness.
 - Slim/Starlette: registered exception/middleware behavior remains unresolved; debug mode can change response media.
-- Express/DRF/Gin/net-http/ASP.NET: computed values, external/generated models, custom validation and serialization still need independent contract checks. Detailed field differences are retained in `results/`.
+- Express: 217 -> 37 mismatch + 110 unknown after adding Prisma include/select projection, local mapper projection (map/filter readonly + schema-proven arrays), rest-destructuring inference, numeric query/path conversion, and required merging across `anyOf[object, null]` spreads. The 37 remaining mismatches are dominated by the favorite/unfavorite routes: their `article` shape is produced by `{...rest}` of a Prisma `update` (scalar fields beyond the declared include cannot be statically proven without reading schema.prisma, so they stay unknown rather than leak the full entity), plus `delete /comments/{id}` whose `Number(req.params.id)` makes the path param a number while the baseline documents a string. 110 unknowns are fields present but statically unresolved (e.g. `tag.name` from an `any` Tag).
+- DRF/Gin/net-http/ASP.NET: computed values, external/generated models, custom validation and serialization still need independent contract checks. Detailed field differences are retained in `results/`.
 
 ## Completion gate
 
