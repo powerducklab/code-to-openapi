@@ -1,0 +1,143 @@
+{
+  "generatedAt": "2026-10-05",
+  "batch": 3,
+  "purpose": "Third fresh generality batch: another new set of real open-source apps pinned to a commit, scanned with an empty ledger and no project-specific rules. Each scanRoot points at one coherent application. Expected route counts were verified by reading each project's route registrations directly from source (router registrations, viewset registrations, method-router chains), never from the scanner output. The batch deliberately spans six languages and eight frameworks and exercises real ORM/DTO data flow, method-router services, autoload plugins, viewset routers, dynamic choices and store-derived responses.",
+  "scoring": {
+    "gate": 0.96,
+    "axes": [
+      "routeRecall",
+      "routePrecision",
+      "requestCompleteness",
+      "responseCompleteness",
+      "parameterCompleteness",
+      "constraintAccuracy"
+    ],
+    "unknownCountsAsIncorrect": true,
+    "notes": "Deterministic = provable from source. AiReview = a contract the deterministic pass honestly cannot prove from source (here: the Elysia guard POST /name returns a value read from runtime store state); it is routed to the interactive AI gap review where the user accepts/edits/rejects each fragment (accepted fragments carry x-ai-inferred, rejected fragments are never merged). It is reported separately, never silently merged and never hard-coded. Dynamic enum values whose base type is known (DRF language/style choices) keep their deterministic type plus an x-dynamic-enum marker and do not invalidate the schema."
+  },
+  "projects": [
+    {
+      "key": "fiber-todo",
+      "framework": "fiber",
+      "repo": "gofiber/recipes",
+      "commit": "47a33121aee2607fcfa49696db0a0d358d844a72",
+      "scanRoot": "todo-app-with-auth-gorm",
+      "baseline": "source-verified per-function Group prefixes: AuthRoutes registers POST /auth/signup and POST /auth/login; TodoRoutes registers POST /todo/create, GET /todo/list, GET /todo/:todoID, PATCH /todo/:todoID, PATCH /todo/:todoID/check, DELETE /todo/:todoID. Local group variables in different functions must not leak prefixes.",
+      "expectedRoutes": 8,
+      "falseRoutes": 0
+    },
+    {
+      "key": "fiber-hello",
+      "framework": "fiber",
+      "repo": "gofiber/recipes",
+      "commit": "47a33121aee2607fcfa49696db0a0d358d844a72",
+      "scanRoot": "hello-world",
+      "baseline": "single app.Get(\"/\", hello) registration",
+      "expectedRoutes": 1,
+      "falseRoutes": 0
+    },
+    {
+      "key": "actix-todo",
+      "framework": "actix",
+      "repo": "actix/examples",
+      "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6",
+      "scanRoot": "basics/todo",
+      "baseline": "three web::resource registrations: GET /, POST /todo, POST /todo/{id}",
+      "expectedRoutes": 3,
+      "falseRoutes": 0
+    },
+    {
+      "key": "actix-json",
+      "framework": "actix",
+      "repo": "actix/examples",
+      "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6",
+      "scanRoot": "json/json",
+      "baseline": "four POST web::resource routes (/, /extractor, /extractor2, /manual) all taking/returning MyObj; /manual deserializes web::Bytes via serde_json::from_slice::<MyObj>",
+      "expectedRoutes": 4,
+      "falseRoutes": 0
+    },
+    {
+      "key": "actix-form",
+      "framework": "actix",
+      "repo": "actix/examples",
+      "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6",
+      "scanRoot": "forms/form",
+      "baseline": "GET / plus POST /post1, /post2, /post3; the three POST handlers bind web::Form<MyParams> as application/x-www-form-urlencoded",
+      "expectedRoutes": 4,
+      "falseRoutes": 0
+    },
+    {
+      "key": "axum-kv",
+      "framework": "axum",
+      "repo": "tokio-rs/axum",
+      "commit": "90f299cb721bf930ba26c0f373b8b3d2e8295ec7",
+      "scanRoot": "examples/key-value-store",
+      "baseline": "GET and POST /{key} (the latter via post_service on a layered/with_state handler), GET /keys, and an /admin nest with DELETE /admin/keys and DELETE /admin/key/{key}; GET /{key} returns bytes::Bytes",
+      "expectedRoutes": 5,
+      "falseRoutes": 0
+    },
+    {
+      "key": "echo-crud",
+      "framework": "echo",
+      "repo": "labstack/echox",
+      "commit": "a2a381d345df33a83a07eb4a3b38307b447f9e15",
+      "scanRoot": "cookbook/crud",
+      "baseline": "newServer() registers GET/POST /users and GET/PUT/DELETE /users/:id; handlers take *echo.Context (echo v5), return c.JSON of a user from a package map / bindUser and a make([]user) list, DELETE returns 204",
+      "expectedRoutes": 5,
+      "falseRoutes": 0
+    },
+    {
+      "key": "echo-hello",
+      "framework": "echo",
+      "repo": "labstack/echox",
+      "commit": "a2a381d345df33a83a07eb4a3b38307b447f9e15",
+      "scanRoot": "cookbook/hello-world",
+      "baseline": "single e.GET(\"/\", inline closure) registration",
+      "expectedRoutes": 1,
+      "falseRoutes": 0
+    },
+    {
+      "key": "fastify-starter",
+      "framework": "fastify",
+      "repo": "jellydn/fastify-starter",
+      "commit": "2e898ec07c0147fd39e183f34fe471c59b8a4557",
+      "scanRoot": "",
+      "baseline": "@fastify/autoload discovers routes/root.ts (GET /, GET /health/check), routes/example/index.ts (GET /example) and routes/user/index.ts (POST /user/login); autoload dir uses a bare join() and forwarded options carry no prefix",
+      "expectedRoutes": 4,
+      "falseRoutes": 0
+    },
+    {
+      "key": "febench",
+      "framework": "fastendpoints",
+      "frameworkNote": "FastEndpoints benchmark CRUD endpoints (C#)",
+      "repo": "FastEndpoints/FastEndpoints",
+      "commit": "db7ae9d2155456c61ce1556c7a609951ba2702a4",
+      "scanRoot": "Benchmark/FastEndpointsBench",
+      "baseline": "ten Endpoint subclasses each exposing one route: POST /benchmark/codegen/{id}, GET command-handler-1, GET command-handler-2, GET /empty-request, POST /benchmark/ok/{id}, GET /object-request, GET /benchmark/query-binding, POST /benchmark/scoped-validator/{id}, POST /benchmark/struct/{id}, POST /benchmark/throttle/{id}",
+      "expectedRoutes": 10,
+      "falseRoutes": 0
+    },
+    {
+      "key": "elysia-guard",
+      "framework": "elysia",
+      "frameworkNote": "isolated single-file copy of the upstream example/guard.ts with only the import path changed to 'elysia' and a package.json added",
+      "repo": "elysiajs/elysia",
+      "commit": "e037eca710e7ad193be09cc6615ab0dbe54af914",
+      "scanRoot": "example/guard.ts (isolated)",
+      "baseline": "GET /, and inside .guard(config, callback) a GET /profile and POST /name; POST /name returns a value read from runtime store state and is the designated interactive-AI-review exemplar (one response-schema-unknown, never hard-coded)",
+      "expectedRoutes": 3,
+      "falseRoutes": 0
+    },
+    {
+      "key": "drf-tutorial",
+      "framework": "drf",
+      "frameworkNote": "Django REST Framework official tutorial (viewsets, external auth.User)",
+      "repo": "encode/rest-framework-tutorial",
+      "commit": "c338449d616f613fdcbfa4ea368cdf163a0f183d",
+      "scanRoot": "",
+      "baseline": "DefaultRouter registers SnippetViewSet (list/create/retrieve/update/partial_update/destroy + the @action GET /snippets/{pk}/highlight) and ReadOnlyModelViewSet UserViewSet (list/retrieve): 9 operations. language/style choices are computed at runtime (get_all_lexers/get_all_styles) and keep a typed string with x-dynamic-enum rather than failing the serializer",
+      "expectedRoutes": 9,
+      "falseRoutes": 0
+    }
+  ]
+}
