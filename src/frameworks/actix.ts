@@ -550,6 +550,21 @@ function collectParameters(
       continue;
     }
 
+    // web::Form<T> binds an application/x-www-form-urlencoded body to T.
+    if (base === "Form") {
+      const schema = inner ? rustTypeToSchema(inner, model) : {};
+      if (inner && Object.keys(schema).length) {
+        requestBody = {
+          required: true,
+          content: [{ mediaType: "application/x-www-form-urlencoded", schema }],
+          confidence: "high",
+        };
+      } else {
+        gaps.push("body-schema-unknown");
+      }
+      continue;
+    }
+
     // Unknown extractors are left out rather than guessed.
   }
 
