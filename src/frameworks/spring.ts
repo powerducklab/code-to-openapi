@@ -176,11 +176,13 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
           const annotations = listAnnotations(method);
           const mapping = annotations.find((a) => MAPPING_ANNOTATIONS.has(a.name));
           if (!mapping) continue;
+          // A method writes a response body only under @RestController, or a
+          // class/method-level @ResponseBody. A traditional @Controller method
+          // without it resolves a server-rendered view (HTML), not JSON.
           const responseBody =
             isRest ||
-            Boolean(findAnnotation(method, new Set(["ResponseBody"]))) ||
-            mapping.name !== "RequestMapping";
-          if (!responseBody) continue;
+            Boolean(classAnnotation(cls, "ResponseBody")) ||
+            Boolean(findAnnotation(method, new Set(["ResponseBody"])));
 
           const { verb, subPath } = resolveMapping(mapping.node, mapping.name, model, contractFile);
           if (subPath === null) {
@@ -226,14 +228,25 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
             (returnType === null && /text\/event-stream/.test(method.text));
 
           const throwing = hasOnlyThrowingExit(implementation ?? method);
-          if (throwing) gaps.push("response-unknown");
-          const responses: DiscoveredResponse[] = throwing ? [{statusCode:"default",description:"Exception response requires advice resolution",confidence:"low"}] : isSse
-            ? collectSseResponse(implementation ?? method, returnType, model, gaps, contractFile)
-            : collectJsonResponse(implementation ?? method, mapping.node, verb, returnType, model, gaps, contractFile, fieldTypes);
+          let responses: DiscoveredResponse[];
+          let extensions: Record<string, unknown> | undefined;
+          if (!responseBody) {
+            // Traditional Spring MVC: the method resolves a server-rendered
+            // view (String view name, ModelAndView, or "redirect:/forward:").
+            responses = collectMvcViewResponse(implementation ?? method, returnType, throwing);
+          } else {
+            if (throwing) gaps.push("response-unknown");
+            responses = throwing
+              ? [{ statusCode: "default", description: "Exception response requires advice resolution", confidence: "low" }]
+              : isSse
+                ? collectSseResponse(implementation ?? method, returnType, model, gaps, contractFile)
+                : collectJsonResponse(implementation ?? method, mapping.node, verb, returnType, model, gaps, contractFile, fieldTypes);
+            extensions = isSse ? { "x-protocol": "sse" } : undefined;
+          }
 
           // Swagger/OpenAPI annotations on generated interfaces are explicit
           // response contracts, including error DTOs absent from the return type.
-          if (!isSse) {
+          if (responseBody && !isSse) {
             for (const declared of annotatedResponses(method, model, contractFile)) {
               if (throwing && /^2\d\d$/.test(declared.statusCode)) continue;
               const existing = responses.find(response => response.statusCode === declared.statusCode);
@@ -242,8 +255,6 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
               } else responses.push(declared);
             }
           }
-
-          const extensions = isSse ? { "x-protocol": "sse" } : undefined;
 
           candidates.push({
             method: verb,
@@ -643,6 +654,59 @@ function isBinaryReturn(node: TsNode | null): boolean {
     /(^|[.\s<])Resource(\s*[>,)]|$)/.test(text) ||
     /byte\s*\[\s*]/.test(text)
   );
+}
+
+/**
+ * Resolve the response of a traditional Spring MVC controller method that
+ * resolves a server-rendered view (no @ResponseBody). A String return is a
+ * view name ("redirect:.."/"forward:.." issue a 302), ModelAndView/View render
+ * HTML 200, and a method that always throws surfaces the container error page.
+ */
+function collectMvcViewResponse(
+  method: TsNode,
+  returnType: TsNode | null,
+  throwing: boolean,
+): DiscoveredResponse[] {
+  const html = (statusCode: string, confidence: Confidence): DiscoveredResponse => ({
+    statusCode,
+    description: "",
+    confidence,
+    content: [{ mediaType: "text/html", schema: { type: "string" } }],
+  });
+
+  if (throwing) {
+    return [{ ...html("500", "low"), description: "Exception renders the container error page" }];
+  }
+
+  const typeText = returnType?.text ?? "";
+  const constructsView =
+    /ModelAndView|View\b/.test(typeText) ||
+    Boolean(findFirst(method, (n) =>
+      n.type === "object_creation_expression" && /ModelAndView|\bView$/.test(n.text)));
+
+  const returns = findAll(method, (n) => n.type === "return_statement");
+  let sawRedirect = false;
+  let sawViewName = false;
+  for (const ret of returns) {
+    const lit = findFirst(ret, (n) => n.type === "string_literal");
+    const text = lit?.text.replace(/^["']|["']$/g, "") ?? "";
+    if (/^(redirect|forward):/.test(text)) sawRedirect = true;
+    else if (text) sawViewName = true;
+  }
+
+  if (constructsView) return [html("200", "high")];
+
+  // String view names: a redirect-only handler returns 302; a handler that may
+  // also render a view documents both outcomes.
+  if (returns.length > 0 && (sawRedirect || sawViewName || /String/.test(typeText))) {
+    const out: DiscoveredResponse[] = [];
+    if (!sawRedirect || sawViewName) out.push(html("200", "medium"));
+    if (sawRedirect) out.push({ statusCode: "302", description: "Redirect", confidence: "medium" });
+    return out.length ? out : [html("200", "low")];
+  }
+
+  // void / implicit view-name resolution still renders HTML.
+  return [html("200", "low")];
 }
 
 function collectJsonResponse(
