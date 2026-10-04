@@ -124,6 +124,12 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
         const prefix = groupPrefixChain(call);
         const fullPath = normalizeRoute(prefix + rawPath);
 
+        // Skip the framework-agnostic CORS pre-flight catch-all such as
+        // `$app->options('/{routes:.*}', ...)`; it is not a documented API op.
+        if (method === "options" && /\{\s*\w*\s*:\s*\.(\*|\+)\s*\}/.test(rawPath)) {
+          continue;
+        }
+
         // Resolve the handler: a closure/arrow function, or an invokable
         // class-string (`ListUsersAction::class`) whose __invoke method we
         // index directly.
@@ -260,6 +266,19 @@ interface BuildArgs {
   closure: TsNode | null;
 }
 
+// True when a response schema carries provable structure (a component
+// reference, typed primitive/array, or an object with properties), as opposed
+// to an empty untyped object.
+function concretePhpSchema(schema: JsonSchema | undefined): boolean {
+  if (!schema || typeof schema !== "object") return false;
+  if (typeof schema.$ref === "string") return true;
+  if (schema.type && schema.type !== "object") return true;
+  if (schema.type === "array") return concretePhpSchema(schema.items as JsonSchema | undefined);
+  if (schema.properties && Object.keys(schema.properties).length > 0) return true;
+  if (schema.oneOf || schema.anyOf || schema.allOf) return true;
+  return false;
+}
+
 function buildRoute(args: BuildArgs): RouteCandidate | null {
   const { analysis, model, rel, call, verb, path, closure } = args;
   const declaredPathParams = new Set([...path.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!));
@@ -298,12 +317,21 @@ function buildRoute(args: BuildArgs): RouteCandidate | null {
 
   if (args.actionClass) {
     const flow = slimActionResponse(args.actionClass, model);
-    if (!flow && !gaps.includes('response-unknown')) gaps.push('response-unknown');
-    if (flow) {
+    if (!flow) {
+      if (!gaps.includes('response-unknown')) gaps.push('response-unknown');
+    } else {
+      // A proven success-path response is kept even when an error branch left
+      // the flow uncertain: uncertainty downgrades confidence instead of
+      // discarding the contract. An empty body still reports schema-unknown.
       responses = [flow.response];
-      if (!flow.uncertain) {
-        for (let index = gaps.length - 1; index >= 0; index--) if (gaps[index] === 'response-unknown') gaps.splice(index, 1);
-      } else if (!gaps.includes('response-unknown')) gaps.push('response-unknown');
+      for (let index = gaps.length - 1; index >= 0; index--) {
+        if (gaps[index] === 'response-unknown') gaps.splice(index, 1);
+      }
+      const schema = flow.response.content?.[0]?.schema;
+      if (!concretePhpSchema(schema)) {
+        if (!gaps.includes('response-schema-unknown')) gaps.push('response-schema-unknown');
+      }
+      if (flow.uncertain) flow.response.confidence = 'medium';
     }
   }
 
@@ -453,8 +481,14 @@ function collectResponses(
           content: [{ mediaType: "application/json", schema: assigned }],
         };
       } else {
-        gaps.push("response-unknown");
-        response = { statusCode: "200", description: "", confidence: "low" };
+        const streamed = inferStreamedBody(closure, sig, model);
+        if (streamed) {
+          response = streamed;
+          if (!concretePhpSchema(response.content?.[0]?.schema)) gaps.push("response-schema-unknown");
+        } else {
+          gaps.push("response-unknown");
+          response = { statusCode: "200", description: "", confidence: "low" };
+        }
       }
     }
     if (response) responses.push(response);
@@ -533,6 +567,51 @@ function interpretResponse(
     return { statusCode: "200", description: "", confidence: "low" };
   }
 
+  return null;
+}
+
+// Detect a PSR-7 streamed body written before `return $response`:
+// `$response->getBody()->write($payload)`. Returns the response contract for
+// literal text or json_encode() output, or a generic */* 200 otherwise.
+function inferStreamedBody(
+  closure: TsNode,
+  sig: ClosureSignature,
+  model: PhpModelIndex,
+): DiscoveredResponse | null {
+  for (const call of findAll(closure, (n) => n.type === "member_call_expression")) {
+    const name = call.namedChildren.find((c) => c.type === "name")?.text;
+    if (name !== "write") continue;
+    // Receiver chain must be `<responseVar>->getBody()`.
+    const receiver = call.namedChildren.find((c) => c.type === "member_call_expression");
+    const receiverMethod = receiver?.namedChildren.find((c) => c.type === "name")?.text;
+    const bodyReceiver = receiver?.namedChildren.find((c) => c.type === "variable_name");
+    if (receiverMethod !== "getBody" || bodyReceiver?.text !== sig.responseVar) continue;
+    const args = call.namedChildren.find((c) => c.type === "arguments");
+    const payload = args ? childrenOfType(args, "argument")[0]?.namedChildren[0] : undefined;
+    if (!payload) continue;
+    if (payload.type === "string") {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "text/plain", schema: { type: "string" } }],
+      };
+    }
+    // json_encode($data, ...)
+    if (payload.type === "function_call_expression" && payload.namedChildren[0]?.text === "json_encode") {
+      const inner = payload.namedChildren
+        .find((c) => c.type === "arguments")
+        ?.namedChildren.find((c) => c.type === "argument")?.namedChildren[0];
+      const schema = inner ? inferValueSchema(inner, model, closure) : undefined;
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: schema && Object.keys(schema).length ? "high" : "medium",
+        content: [{ mediaType: "application/json", schema: schema && Object.keys(schema).length ? schema : {} }],
+      };
+    }
+    return { statusCode: "200", description: "", confidence: "low", content: [{ mediaType: "*/*", schema: {} }] };
+  }
   return null;
 }
 

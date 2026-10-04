@@ -20,7 +20,7 @@ Route::get('/unknown',function($opaque){return response()->json(['id'=>$opaque->
  }finally{await rm(root,{recursive:true,force:true});}
 });
 
-it('preserves Slim empty/trailing paths and strips nested regex placeholder constraints',async()=>{
+it('preserves Slim empty/trailing paths, strips nested regex constraints, and drops CORS catch-all',async()=>{
  const root=await mkdtemp(join(tmpdir(),'slim-path-'));
  try{
   await writeFile(join(root,'composer.json'),JSON.stringify({require:{'slim/slim':'^4'}}));
@@ -33,6 +33,6 @@ $app->group('/users',function($group){
 $app->options('/{routes:.*}',function($req,$res){return $res;});
 `);
   const result=await scanProject({root});const doc=(await result.convert()).document as any;
-  expect(Object.keys(doc.paths).sort()).toEqual(['/users','/users/','/users/{id}','/{routes}']);
+  expect(Object.keys(doc.paths).sort()).toEqual(['/users','/users/','/users/{id}']);
  }finally{await rm(root,{recursive:true,force:true});}
 });
