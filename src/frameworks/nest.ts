@@ -536,6 +536,24 @@ function collectResponses(
   const responses: DiscoveredResponse[] = [];
   const status = defaultStatus(verb, httpCode);
 
+  // A controller method that never returns a value (no `return <expr>`, or an
+  // explicit void/undefined type) deterministically produces an empty success
+  // body in Nest. That is a concrete empty response, not an unknown contract.
+  const explicitVoid =
+    method.type &&
+    /\b(void|undefined|never)\b/.test(method.type.getText ? method.type.getText() : String(method.type.text ?? ""));
+  let returnExpressionCount = 0;
+  const countReturns = (n: any) => {
+    if (n !== method.body && ts.isFunctionLike(n)) return;
+    if (ts.isReturnStatement(n) && n.expression) returnExpressionCount += 1;
+    ts.forEachChild(n, countReturns);
+  };
+  if (method.body) countReturns(method.body);
+  if (!explicitVoid && returnExpressionCount === 0) {
+    responses.push({ statusCode: status, description: "", confidence: "high" });
+    return responses;
+  }
+
   let schema: JsonSchema | undefined = implementationSchema;
   if (!schema && method.type) {
     const { node } = unwrapTypeReference(ts, method.type);
