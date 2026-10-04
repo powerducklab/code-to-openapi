@@ -308,6 +308,8 @@ function analyzeAppHandler(
   const reqName = handler.parameters?.[0]?.name?.getText?.(source) ?? "request";
   // Variables holding the parsed request payload: `const json = await req.json()`.
   const jsonVars = new Set<string>();
+  // Variables bound from request headers/query, e.g. const sig = req.headers.get("stripe-signature").
+  const paramBindings = new Map<string, { location: "header" | "query"; name: string }>();
 
   const bindingResolver = createBindingResolver({
     ts,
@@ -408,10 +410,19 @@ function analyzeAppHandler(
       ts.isStringLiteralLike(node.arguments[0])
     ) {
       const receiver = node.expression.expression.getText(source);
+      // Track the variable a header/query value is bound to, so a later
+      // `if (!sig) return 4xx` guard can prove it is required.
+      const bindingVar = (() => {
+        let ancestor: any = node.parent;
+        while (ancestor && !ts.isVariableDeclaration(ancestor)) ancestor = ancestor.parent;
+        return ancestor && ts.isIdentifier(ancestor.name) ? ancestor.name.text : null;
+      })();
       if (/\bsearchParams$/.test(receiver)) {
         addParam(parameters, seen, "query", node.arguments[0].text, { type: "string" }, "low", false);
+        if (bindingVar) paramBindings.set(bindingVar, { location: "query", name: node.arguments[0].text });
       } else if (receiver === `${reqName}.headers` || (ts.isCallExpression(node.expression.expression) && importedFrom(analysis, node.expression.expression.expression, "headers", ["next/headers"]))) {
         addParam(parameters, seen, "header", node.arguments[0].text.toLowerCase(), { type: "string" }, "low", false);
+        if (bindingVar) paramBindings.set(bindingVar, { location: "header", name: node.arguments[0].text.toLowerCase() });
       }
     }
 
@@ -483,6 +494,37 @@ function analyzeAppHandler(
   for (const name of opts.pathParams) {
     if (!parameters.some((p) => p.in === "path" && p.name === name)) {
       addParam(parameters, seen, "path", name, { type: "string" }, "low");
+    }
+  }
+
+  // Prove a header/query param is required from an early-exit guard, e.g.
+  // `if (!sig || !secret) return new Response(.., { status: 400 })`.
+  if (handler.body && paramBindings.size) {
+    const exitsEarly = (thenNode: any): boolean => {
+      const stmts = ts.isBlock(thenNode) ? thenNode.statements : [thenNode];
+      const first = stmts[0];
+      return !!first && (ts.isReturnStatement(first) || ts.isThrowStatement(first));
+    };
+    const requiredKeys = new Set<string>();
+    const visitGuard = (n: any) => {
+      if (ts.isIfStatement(n) && exitsEarly(n.thenStatement)) {
+        const condText = n.expression.getText(source);
+        for (const [varName, binding] of paramBindings) {
+          const negated =
+            new RegExp(`(?:^|[^\\w.!])!\\s*${varName}\\b`).test(condText) ||
+            new RegExp(`\\b${varName}\\s*[!=]==?\\s*(?:null|undefined)\\b`).test(condText) ||
+            new RegExp(`\\b(?:null|undefined)\\s*[!=]==?\\s*${varName}\\b`).test(condText);
+          if (negated) requiredKeys.add(`${binding.location}:${binding.name}`);
+        }
+      }
+      ts.forEachChild(n, visitGuard);
+    };
+    visitGuard(handler.body);
+    for (const p of parameters) {
+      if (requiredKeys.has(`${p.in}:${p.name}`)) {
+        p.required = true;
+        p.confidence = "high";
+      }
     }
   }
 
