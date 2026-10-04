@@ -38,6 +38,7 @@ import {
   localGoTypeToSchema as fiberTypeSchema,
   type GoModelIndex,
 } from "../lang/go/schema.js";
+import { resolveGoPackageFunction } from "../lang/go/symbols.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   findAll,
@@ -513,17 +514,20 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
           fn = { name: "<anonymous>", file: site.origin.file, node: handlerNode, body: block, receiver: null };
         }
       } else if (handlerNode) {
-        const name =
-          handlerNode.type === "identifier"
-            ? handlerNode.text
-            : handlerNode.type === "selector_expression"
-              ? (handlerNode.namedChildren[1]?.type === "field_identifier"
-                  ? handlerNode.namedChildren[1].text
-                  : null)
-              : null;
+        let name: string | null = null;
+        let qualifier: string | undefined;
+        if (handlerNode.type === "identifier") {
+          name = handlerNode.text;
+        } else if (handlerNode.type === "selector_expression") {
+          const field = handlerNode.namedChildren[1];
+          const receiver = handlerNode.namedChildren[0];
+          name = field?.type === "field_identifier" ? field.text : null;
+          if (receiver?.type === "identifier") qualifier = receiver.text;
+        }
         if (name) {
+          const owner = analysis.files.get(site.origin.file);
           fn =
-            (analysis.functions.get(name) ?? [])[0] ??
+            resolveGoPackageFunction(analysis, owner, qualifier, name) ??
             analysis.methods.find((m) => m.name === name) ??
             null;
         }

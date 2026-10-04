@@ -31,6 +31,7 @@ import type {
 } from "../core/types.js";
 import type { DiscoveredUnresolved } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
+import { resolveGoPackageFunction } from "../lang/go/symbols.js";
 import { buildGoModelIndex } from "../lang/go/schema.js";
 import { analyzeStdHTTPHandler, selectorCall } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
@@ -253,17 +254,20 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
           fn = { name: "<anonymous>", file: site.origin.file, node: handlerNode, body: block, receiver: null };
         }
       } else if (handlerNode) {
-        const name =
-          handlerNode.type === "identifier"
-            ? handlerNode.text
-            : handlerNode.type === "selector_expression"
-              ? (handlerNode.namedChildren[1]?.type === "field_identifier"
-                  ? handlerNode.namedChildren[1].text
-                  : null)
-              : null;
+        let name: string | null = null;
+        let qualifier: string | undefined;
+        if (handlerNode.type === "identifier") {
+          name = handlerNode.text;
+        } else if (handlerNode.type === "selector_expression") {
+          const field = handlerNode.namedChildren[1];
+          const receiver = handlerNode.namedChildren[0];
+          name = field?.type === "field_identifier" ? field.text : null;
+          if (receiver?.type === "identifier") qualifier = receiver.text;
+        }
         if (name) {
+          const owner = analysis.files.get(site.origin.file);
           fn =
-            (analysis.functions.get(name) ?? [])[0] ??
+            resolveGoPackageFunction(analysis, owner, qualifier, name) ??
             analysis.methods.find((m) => m.name === name) ??
             null;
         }

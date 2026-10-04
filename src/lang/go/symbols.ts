@@ -91,8 +91,28 @@ export function goExpressionType(node:TsNode,analysis:GoAnalysis,depth=0):TsNode
  const lists=owner.namedChildren.filter(n=>n.type==='parameter_list'&&n.id!==owner?.childForFieldName('result')?.id);
  return lists.flatMap(list=>list.namedChildren).find(p=>p.namedChildren.some(c=>c.type==='identifier'&&c.text===node.text))?.childForFieldName('type')??undefined;
 }
-export function resolveGoCall(call:TsNode,analysis:GoAnalysis,depth=0):GoFunction|undefined {
- if(depth>12)return;
+/**
+ * Resolve a package-level function referenced as `pkg.Func` (or bare `Func`)
+ * in a route registration file. The qualifier disambiguates same-named
+ * functions across packages (e.g. services.CreateTodo vs dal.CreateTodo);
+ * falls back to the first same-named candidate only when the package cannot
+ * be resolved uniquely.
+ */
+export function resolveGoPackageFunction(
+  analysis: GoAnalysis,
+  owner: GoFile | undefined,
+  qualifier: string | undefined,
+  name: string,
+): GoFunction | undefined {
+  const candidates = analysis.functions.get(name) ?? [];
+  if (candidates.length === 0) return undefined;
+  if (!qualifier || !owner) return candidates[0];
+  const paths = new Set(packageFiles(owner, qualifier, analysis).map((file) => file.path));
+  if (paths.size === 0) return candidates[0];
+  const filtered = candidates.filter((fn) => paths.has(fn.file));
+  return filtered.length === 1 ? filtered[0] : (filtered[0] ?? candidates[0]);
+}
+export function resolveGoCall(call:TsNode,analysis:GoAnalysis,depth=0):GoFunction|undefined { if(depth>12)return;
  const callee=call.type==='call_expression'?call.namedChildren[0]:call,owner=goSourceFile(call,analysis);if(!callee||!owner)return;
  let candidates:GoFunction[]=[];
  if(callee.type==='identifier'){
