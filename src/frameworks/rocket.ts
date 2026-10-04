@@ -381,7 +381,14 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
   if (/^(?:Option<)?(?:Value|serde_json::Value)>?$/.test(ret)) {
     const schema = jsonMacroSchema(fn, model);
     const response = responses.find(r => r.statusCode === "200");
-    if (schema && response) response.content = [{ mediaType: "application/json", schema }];
+    if (schema && response) {
+      response.content = [{ mediaType: "application/json", schema }];
+      response.confidence = "high";
+      // The literal json! macro is deterministic response evidence, so the
+      // conservative Value fallback gap is closed rather than left dangling.
+      const gapIndex = gaps.indexOf("response-unknown");
+      if (gapIndex >= 0) gaps.splice(gapIndex, 1);
+    }
   }
   narrowConstructedOptionFields(fn, model, responses);
   return responses;
