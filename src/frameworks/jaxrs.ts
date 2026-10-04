@@ -660,10 +660,25 @@ function collectBuiltResponses(
         mediaType = args[0]?.type === "string_literal" ? args[0].text.slice(1,-1) : ({TEXT_PLAIN:"text/plain",APPLICATION_JSON:"application/json",APPLICATION_XML:"application/xml",TEXT_HTML:"text/html",APPLICATION_OCTET_STREAM:"application/octet-stream"} as Record<string,string>)[args[0]?.text.split('.').at(-1) ?? ''];
       }
     }
-    const entity = entityArg ? entityArgToSchema(entityArg, localVars, model, rel) : undefined;
+    const entity = entityArg ? entityArgToSchema(entityArg, localVars, model, rel, method) : undefined;
     out.push({status,...(entity?{entity}:{}),...(mediaType?{mediaType}:{})});
   }
   return out;
+}
+
+/** Declared type of an instance field on the method's enclosing class. */
+function classFieldType(method: TsNode, name: string): TsNode | undefined {
+  let owner: TsNode | null | undefined = method;
+  while (owner && owner.type !== "class_body") owner = owner.parent;
+  if (!owner) return undefined;
+  for (const field of childrenOfType(owner, "field_declaration")) {
+    const typeNode = field.namedChildren.find((c) =>
+      ["type_identifier", "generic_type", "scoped_type_identifier", "scoped_identifier"].includes(c.type),
+    );
+    const names = childrenOfType(field, "variable_declarator").map((d) => d.namedChildren.find((c) => c.type === "identifier")?.text);
+    if (typeNode && names.includes(name)) return typeNode;
+  }
+  return undefined;
 }
 
 function parseStatusArg(arg: TsNode | undefined): string | null {
@@ -685,9 +700,17 @@ function entityArgToSchema(
   localVars: Map<string, TsNode>,
   model: JavaModelIndex,
   rel: string,
+  method: TsNode,
 ): JsonSchema | undefined {
   if (arg.type === "identifier") {
-    const typeNode = localVars.get(arg.text);
+    const typeNode = localVars.get(arg.text) ?? classFieldType(method, arg.text);
+    if (typeNode) return javaTypeToSchema(typeNode, model, 0, undefined, rel);
+    return undefined;
+  }
+  // this.field — resolve against the enclosing class's declared fields.
+  if (arg.type === "field_access" && arg.namedChildren[0]?.text === "this") {
+    const name = arg.namedChildren[1]?.text;
+    const typeNode = name ? classFieldType(method, name) : undefined;
     if (typeNode) return javaTypeToSchema(typeNode, model, 0, undefined, rel);
     return undefined;
   }
