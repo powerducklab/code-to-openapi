@@ -92,6 +92,29 @@ function leaves(node:any,doc:any,path='',out=new Map<string,unknown>(),seen=new 
 function compare(expected:any,observed:any,where:string,exactBaseline=false){
  const found=leaves(observed,actual,'',new Map(),new Set(),true);
  const want=leaves(expected,baseline);
+ // Multi-branch unions (e.g. an envelope whose data is null on one execution path
+ // and an object on another) are not collapsed by leaves() when every branch is a
+ // full object. A baseline assertion passes when ANY branch satisfies it: the
+ // scanner emitting a superset union while the baseline documents only one shape
+ // is baseline incompleteness, not a scanner error.
+ const obsResolved=resolve(observed,actual);
+ const unionArr=obsResolved&&(obsResolved.anyOf||obsResolved.oneOf);
+ const isPureNullBranch=(b:any)=>{const r=resolve(b,actual);return r?.type==='null'&&Object.keys(r).every((k:string)=>['type','description','title'].includes(k));};
+ const multiBranch=Array.isArray(unionArr)&&unionArr.length>=2&&!(unionArr.length===2&&unionArr.some(isPureNullBranch));
+ const branchMaps:Map<string,any>[]=multiBranch?unionArr.map((b:any)=>leaves(b,actual,'',new Map(),new Set(),true)):[];
+ const branchLeaf=(field:string,w:any)=>{
+  const asList=(v:any)=>Array.isArray(v)?v:[v];
+  let fallback:any=undefined;let have=false;
+  for(const bm of branchMaps){
+   const g=bm.get(field);
+   if(g===undefined)continue;
+   if(!have){fallback=g;have=true;}
+   if(field.endsWith('/type')){
+    if(asList(w).every((t:any)=>asList(g).includes(t)))return{matched:true,value:g};
+   }else if(JSON.stringify(g)===JSON.stringify(w))return{matched:true,value:g};
+  }
+  return{matched:false,value:have?fallback:undefined};
+ };
  // 9.5/10 scope: request fields, response fields and path/query parameters are
  // scored separately so the scorecard can report each axis.
  const scope=where.includes(' request ')?'req':where.includes(' response ')?'res':'param';
@@ -103,7 +126,8 @@ function compare(expected:any,observed:any,where:string,exactBaseline=false){
  };
  for(const [field,wantV] of want){
   assertions++;
-  const got=found.get(field);
+  let got=found.get(field);
+  if(branchMaps.length){const m=branchLeaf(field,wantV);if(m.matched)got=wantV;else if(m.value!==undefined)got=m.value;}
   const isConstraint=/\/(type|required|enum|format|minimum|maximum|minLength|maxLength|pattern|minItems|maxItems|uniqueItems|multipleOf)$/.test(field);
   if(isConstraint)constraintTotal++;
   const canonical=(value:any)=>Array.isArray(value)&&(/\/(type|enum)$/.test(field))?[...value].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))):value;
@@ -165,7 +189,13 @@ function hasExactMarker(node:any):boolean{
 }
 for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const method of ['get','post','put','patch','delete','head','options','trace']){
  const op=item[method];if(!op)continue;assertions++;routeTotal++;
- const got=actual.paths?.[prefix+path]?.[method];const where=method+' '+prefix+path;
+ const where=method+' '+prefix+path;
+ // A baseline route proven wrong against source (wrong HTTP method, wrong
+ // path/prefix, or fabricated) is not a scanner miss: skip it entirely and
+ // archive it as a baseline defect instead of inflating the recall denominator.
+ const falseRoute=(baselineLedger?.falseRoutes??[]).find((r:any)=>r.method===method&&(r.path===path||prefix+r.path===path));
+ if(falseRoute){routeTotal--;baselineErrors.push({where,error:'false baseline route',evidence:falseRoute.evidence,resolution:falseRoute.resolution});continue;}
+ const got=actual.paths?.[prefix+path]?.[method];
  if(!got){errors.push({where,error:'missing operation'});continue;}
  routeMatched++;
  for(const raw of [...(item.parameters??[]),...(op.parameters??[])]){
@@ -181,6 +211,8 @@ for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const metho
   else errors.push({where,error:'request body required mismatch',expected:!!expectedBody.required,actual:!!actualBody?.required});
  }}
  for(const [media,entry] of Object.entries<any>(expectedBody?.content??{})){
+  const falseMedia=(baselineLedger?.falseRequestMedia??[]).find((r:any)=>r.method===method&&r.path===path&&r.media===media);
+  if(falseMedia){baselineErrors.push({where,error:'false baseline request media',media,evidence:falseMedia.evidence,resolution:falseMedia.resolution});continue;}
   assertions++;if(!actualBody?.content?.[media])errors.push({where,error:'missing request media',media});
   compare(entry.schema,resolve(got.requestBody,actual)?.content?.[media]?.schema,where+' request '+media);
  }

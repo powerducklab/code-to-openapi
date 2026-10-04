@@ -331,11 +331,24 @@ export function resolveLocalType(
   )) {
     for (const spec of declaration.namedChildren.filter((c) => c.type === "var_spec")) {
       const names = spec.namedChildren.filter((c) => c.type === "identifier");
-      const typeNode = spec.namedChildren.find(
+      const explicitType = spec.namedChildren.find(
         (c) => !names.includes(c) && c.type !== "expression_list",
       );
-      if (names.some((n) => n.text === variableName) && typeNode) {
-        return typeNode;
+      if (!names.some((n) => n.text === variableName)) continue;
+      if (explicitType) return explicitType;
+      // `var form = EditForm{...}` inside a var block infers the type from the
+      // composite literal / new() call on the right-hand side.
+      const exprList = spec.namedChildren.find((c) => c.type === "expression_list");
+      const idx = names.findIndex((n) => n.text === variableName);
+      const value = exprList?.namedChildren[idx];
+      const composite = value ? findFirstNamed(value, "composite_literal") : undefined;
+      if (composite) return composite.namedChildren[0] ?? null;
+      if (
+        value?.type === "call_expression" &&
+        value.namedChildren[0]?.type === "identifier" &&
+        value.namedChildren[0]?.text === "new"
+      ) {
+        return value.namedChildren.find((c) => c.type === "type_identifier") ?? null;
       }
     }
   }

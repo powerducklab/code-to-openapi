@@ -27,12 +27,14 @@ import { formTag, receiverTypeName } from "../lang/go/index.js";
 import {
   buildGoModelIndex,
   ensureGoComponent,
+  followCallToSchema,
   goTypeToSchema,
   goConstructedTypeToSchema,
   resolveGoPayloadValue,
   resolveLocalType,
   type GoModelIndex,
 } from "../lang/go/schema.js";
+import { convertedParameterSchema } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   childrenOfType,
@@ -326,7 +328,7 @@ function analyzeHandler(
             name,
             in: "path",
             required: true,
-            schema: { type: "string" },
+            schema: convertedParameterSchema(call, analysis),
             confidence: "high",
           });
         }
@@ -340,7 +342,7 @@ function analyzeHandler(
             name,
             in: "query",
             required: false,
-            schema: { type: "string" },
+            schema: convertedParameterSchema(call, analysis),
             confidence: "high",
           });
         }
@@ -675,6 +677,27 @@ function resolveWrapperResponse(
     } else {
       schema = literalSchema(payloadExpr, modelIndex);
     }
+    // The envelope is a shared component whose generic payload (Response.Data
+    // interface{}) differs per call site (nil on errors, a map/model on success).
+    // When the concrete argument is provable, emit an inline envelope so each
+    // response carries its real data shape; otherwise keep the shared $ref and
+    // honestly leave data unresolved.
+    if (composite) {
+      const dataSchema = resolveEnvelopePayload(composite, paramNames, callArgs, modelIndex, _handlerFn, analysis);
+      if (dataSchema) {
+        schema = {
+          type: "object",
+          properties: {
+            code: { type: "integer" },
+            msg: { type: "string" },
+            data: dataSchema,
+          },
+          // Response has no omitempty tags, so all three keys are always present;
+          // the data value itself may be null on error branches.
+          required: ["code", "msg", "data"],
+        };
+      }
+    }
   }
 
   addResponse(resolvedStatus, {
@@ -685,6 +708,143 @@ function resolveWrapperResponse(
       ? { content: [{ mediaType: "application/json", schema, confidence: "high" }] }
       : {}),
   });
+}
+
+/**
+ * Map a wrapper envelope field whose value is a wrapper parameter (e.g.
+ * `Data: data`) back to the concrete argument passed at the call site and
+ * derive its schema. Returns null when the payload cannot be statically proven.
+ */
+function resolveEnvelopePayload(
+  envelopeComposite: TsNode,
+  paramNames: string[],
+  callArgs: TsNode[],
+  modelIndex: GoModelIndex,
+  handlerFn: GoFunction,
+  analysis: GoAnalysis,
+): JsonSchema | null {
+  const body = envelopeComposite.namedChildren[1];
+  if (!body) return null;
+  for (const element of childrenOfType(body, "keyed_element")) {
+    const keyNode = unwrapElement(element.namedChildren[0]);
+    const valNode = unwrapElement(element.namedChildren[1]);
+    if (!keyNode || !valNode) continue;
+    const keyText = keyNode.type === "identifier" ? keyNode.text : literalString(keyNode);
+    if (keyText !== "Data" && keyText !== "data") continue;
+    if (valNode.type !== "identifier") return null;
+    const idx = paramNames.indexOf(valNode.text);
+    if (idx < 0) return null;
+    const arg = callArgs[idx];
+    if (!arg) return null;
+    return callSiteValueSchema(arg, modelIndex, handlerFn, analysis);
+  }
+  return null;
+}
+
+/** Schema for a concrete value supplied at a wrapper call site. */
+function callSiteValueSchema(
+  node: TsNode,
+  modelIndex: GoModelIndex,
+  handlerFn: GoFunction,
+  analysis: GoAnalysis,
+  depth = 0,
+): JsonSchema | null {
+  if (depth > 6) return null;
+  if (node.type === "nil") return { type: "null" };
+  if (node.type === "unary_expression") return callSiteValueSchema(node.namedChildren[0], modelIndex, handlerFn, analysis, depth + 1);
+  if (node.type === "composite_literal") {
+    // A map literal whose values are local values (tags, count): resolve each.
+    const schema = literalSchema(node, modelIndex, depth + 1);
+    const value = node.namedChildren[1];
+    if (schema && (schema as any).properties && value) {
+      for (const element of childrenOfType(value, "keyed_element")) {
+        const keyNode = unwrapElement(element.namedChildren[0]);
+        const valNode = unwrapElement(element.namedChildren[1]);
+        const keyText = keyNode && (keyNode.type === "identifier" ? keyNode.text : literalString(keyNode));
+        if (!keyText || !valNode) continue;
+        if (valNode.type === "identifier" && handlerFn.body) {
+          const local = localIdentifierSchema(valNode.text, handlerFn, modelIndex, analysis);
+          if (local) (schema as any).properties[keyText] = local;
+        }
+      }
+    }
+    return schema;
+  }
+  if (node.type === "identifier" && handlerFn.body) {
+    return localIdentifierSchema(node.text, handlerFn, modelIndex, analysis);
+  }
+  return literalSchema(node, modelIndex, depth + 1);
+}
+
+/** Resolve a handler-local identifier (var/short decl) to a concrete schema. */
+function localIdentifierSchema(
+  name: string,
+  handlerFn: GoFunction,
+  modelIndex: GoModelIndex,
+  analysis: GoAnalysis,
+): JsonSchema | null {
+  const body = handlerFn.body;
+  if (!body) return null;
+  const typeNode = resolveLocalType(body, name);
+  if (typeNode) {
+    const schema = goTypeToSchema(typeNode, modelIndex);
+    return schema && Object.keys(schema).length ? schema : null;
+  }
+  // x, err := svc.Method(): follow the cross-function/method return type.
+  for (const decl of findAll(body, (n) => n.type === "short_var_declaration")) {
+    const lists = decl.namedChildren.filter((n) => n.type === "expression_list");
+    const left = lists[0];
+    const right = lists[1];
+    if (!left || !right) continue;
+    const index = left.namedChildren.findIndex((c) => c.text === name);
+    if (index < 0) continue;
+    const call = right.namedChildren.find((c) => c.type === "call_expression");
+    if (!call) continue;
+    const resolved = followCallToSchema(call, analysis, modelIndex, new Map());
+    if (resolved.schema) return resolved.schema;
+  }
+  // m := make(map[K]V) followed by m["key"] = value assignments: reconstruct the
+  // object shape from the indexed stores into the local map.
+  const mapProps = mapAssignmentProperties(name, body, modelIndex, handlerFn, analysis);
+  if (mapProps) return mapProps;
+  return null;
+}
+
+/** Resolve a map built via `make(map...)` plus subsequent `m["k"] = v` stores. */
+function mapAssignmentProperties(
+  name: string,
+  body: TsNode,
+  modelIndex: GoModelIndex,
+  handlerFn: GoFunction,
+  analysis: GoAnalysis,
+): JsonSchema | null {
+  let declaredMap = false;
+  for (const decl of findAll(body, (n) => n.type === "short_var_declaration" || n.type === "var_spec")) {
+    const lists = decl.namedChildren.filter((n) => n.type === "expression_list");
+    const left = decl.type === "short_var_declaration" ? lists[0] : decl;
+    const right = lists[1];
+    if (!left) continue;
+    if (!left.namedChildren.some((c) => c.type === "identifier" && c.text === name)) continue;
+    const hasMapType = /map\[/i.test(decl.text) ||
+      right?.namedChildren.some((c) => c.type === "map_type" || (c.type === "call_expression" && /make\s*\(\s*map/i.test(c.text)));
+    if (hasMapType) declaredMap = true;
+  }
+  if (!declaredMap) return null;
+  const properties: Record<string, JsonSchema> = {};
+  for (const assignment of findAll(body, (n) => n.type === "assignment_statement")) {
+    const indexExpr = assignment.namedChildren.find((c) => c.type === "index_expression");
+    if (!indexExpr) continue;
+    const operand = indexExpr.namedChildren[0];
+    const keyNode = indexExpr.namedChildren[1];
+    if (operand?.type !== "identifier" || operand.text !== name) continue;
+    const key = keyNode ? literalString(keyNode) : null;
+    if (!key) continue;
+    const value = assignment.namedChildren.find((c) => c.type !== "index_expression");
+    if (!value) continue;
+    const schema = callSiteValueSchema(value, modelIndex, handlerFn, analysis);
+    if (schema) properties[key] = schema;
+  }
+  return Object.keys(properties).length ? { type: "object", properties } : { type: "object" };
 }
 
 /**

@@ -273,6 +273,19 @@ function jsonWriterHelper(call: TsNode, body: TsNode, analysis: GoAnalysis, dept
 
 /** Infer wire parameter types only from a verified standard-library conversion. */
 export function convertedParameterSchema(call: TsNode, analysis: GoAnalysis, depth = 0): JsonSchema {
+  // Chained numeric coercion helpers such as beego's `com.StrTo(c.Param("id")).MustInt()`
+  // wrap the source call in a selector + call. The Must* method name is an explicit
+  // conversion and does not depend on a strconv import.
+  let ancestor: TsNode | null | undefined = call;
+  for (let i = 0; i < 5 && ancestor; i++) {
+    if (ancestor.type === "call_expression") {
+      const chained = selectorCall(ancestor);
+      if (chained?.method === "MustInt" || chained?.method === "MustInt64" || chained?.method === "ParseInt") return { type: "integer" };
+      if (chained?.method === "MustFloat64" || chained?.method === "ParseFloat") return { type: "number" };
+      if (chained?.method === "MustBool" || chained?.method === "ParseBool") return { type: "boolean" };
+    }
+    ancestor = ancestor.parent;
+  }
   const outer = call.parent?.parent;
   const converter = outer?.type === "call_expression" ? selectorCall(outer) : null;
   const owner = goSourceFile(call, analysis);

@@ -224,5 +224,135 @@
         "resolution": "The baseline marks these request bodies optional; [FromBody] defaults to required in ASP.NET Core. The scanner's requestBody.required=true is correct."
       }
     ]
+  },
+  "gin": {
+    "falseRoutes": [
+      {
+        "method": "get",
+        "path": "/auth",
+        "evidence": "routers/router.go:30 registers r.POST(\"/auth\", api.GetAuth); the baseline documents GET, which does not exist.",
+        "resolution": "The scanner emits post /auth, matching the source registration. The baseline HTTP method is wrong."
+      },
+      {
+        "method": "post",
+        "path": "/api/v1/tags/export",
+        "evidence": "routers/router.go:46 registers r.POST(\"/tags/export\", ...) on the root router r, not on the apiv1 group, so the path is /tags/export with no /api/v1 prefix.",
+        "resolution": "The baseline adds an incorrect /api/v1 prefix. The scanner emits post /tags/export as registered."
+      },
+      {
+        "method": "post",
+        "path": "/api/v1/tags/import",
+        "evidence": "routers/router.go:48 registers r.POST(\"/tags/import\", ...) on the root router r, not on the apiv1 group, so the path is /tags/import with no /api/v1 prefix.",
+        "resolution": "The baseline adds an incorrect /api/v1 prefix. The scanner emits post /tags/import as registered."
+      }
+    ],
+    "missingRoutes": [
+      {
+        "method": "post",
+        "path": "/auth",
+        "evidence": "routers/router.go:30 r.POST(\"/auth\", api.GetAuth).",
+        "resolution": "Real route the baseline misdocuments as GET (see falseRoutes)."
+      },
+      {
+        "method": "post",
+        "path": "/tags/export",
+        "evidence": "routers/router.go:46 r.POST(\"/tags/export\") on the root router.",
+        "resolution": "Real route the baseline misdocuments under /api/v1."
+      },
+      {
+        "method": "post",
+        "path": "/tags/import",
+        "evidence": "routers/router.go:48 r.POST(\"/tags/import\") on the root router.",
+        "resolution": "Real route the baseline misdocuments under /api/v1."
+      },
+      {
+        "method": "get",
+        "path": "/swagger/{any}",
+        "evidence": "routers/router.go registers the gin-swagger handler r.GET(\"/swagger/*any\", ...).",
+        "resolution": "Real swagger UI route omitted by the baseline."
+      },
+      {
+        "method": "post",
+        "path": "/api/v1/articles/poster/generate",
+        "evidence": "routers/api/v1/article.go registers the poster generation route under the apiv1 group.",
+        "resolution": "Real route omitted by the baseline."
+      },
+      {
+        "method": "post",
+        "path": "/upload",
+        "evidence": "routers/router.go registers r.POST(\"/upload\", ...) for image upload.",
+        "resolution": "Real upload route omitted by the baseline."
+      }
+    ],
+    "falseMismatches": [
+      {
+        "whereContains": "response",
+        "fieldContains": "/required",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "pkg/app/response.go defines the unified envelope Gin.Response serializing Response{Code int `json:\"code\"`; Msg string `json:\"msg\"`; Data interface{} `json:\"data\"`} with NO omitempty, so all three keys are always present.",
+        "resolution": "The baseline marks envelope keys optional across the board; without omitempty Go always emits them. The scanner's required=true is correct."
+      },
+      {
+        "whereContains": "post /api/v1/tags",
+        "fieldContains": "/requestBodyRequired",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "AddTag calls app.BindAndValid(c,&form) whose first statement c.Bind(form) returns an EOF error on an empty body and immediately yields HTTP 400; the form also declares valid:\"Required\" fields. The request body is mandatory.",
+        "resolution": "Baseline marks the body optional (required=false); source proves it is required."
+      },
+      {
+        "whereContains": "put /api/v1/articles/{id}",
+        "fieldContains": "/requestBodyRequired",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "EditArticle calls app.BindAndValid(c,&form); c.Bind on an empty body returns an EOF error and yields HTTP 400. The request body is mandatory.",
+        "resolution": "Baseline marks the body optional (required=false); source proves it is required."
+      },
+      {
+        "fieldContains": "data/type",
+        "baseline": "object",
+        "scanner": "null",
+        "evidence": "These responses call appG.Response(status, code, nil) with an explicit nil third argument: every error branch (400/500) and the write operations (AddArticle/EditArticle/DeleteArticle, AddTag/EditTag/DeleteTag) return success without a payload. pkg/app/response.go marshals Response.Data = nil as JSON null. The swaggo baseline renders the generic Response.Data interface{} as object for every status via the @Success/@Failure {object} app.Response template, regardless of the actual nil argument.",
+        "resolution": "Source proves data is JSON null on these execution paths; the scanner's null is correct and must not be turned into a fabricated object. Query success paths that pass a real map/model correctly emit data as object."
+      }
+    ],
+    "falseRequestMedia": [
+      {
+        "method": "get",
+        "path": "/api/v1/articles",
+        "media": "application/json",
+        "evidence": "GetArticles reads filters via c.PostForm(\"state\")/c.PostForm(\"tag_id\"); a GET request carries no JSON body. The bound form struct declares only `form:\"...\"` tags (no `json` tags) and the handler binds through app.BindAndValid -> c.Bind. gin's JSONBinding uses encoding/json, which without json tags maps the exported Go field names (e.g. TagID) and cannot populate the snake_case form names (e.g. tag_id); only FormBinding/MultipartBinding read the `form` tags. The real contract media is therefore application/x-www-form-urlencoded (and multipart), not application/json. The baseline application/json body is generated by swaggo's `@Param ... body` annotation convention and contradicts the source.",
+        "resolution": "Scanner correctly emits no JSON body; form/query filters are the real inputs."
+      },
+      {
+        "method": "post",
+        "path": "/api/v1/articles",
+        "media": "application/json",
+        "evidence": "The bound form struct declares only `form:\"...\"` tags (no `json` tags) and the handler binds through app.BindAndValid -> c.Bind. gin's JSONBinding uses encoding/json, which without json tags maps the exported Go field names (e.g. TagID) and cannot populate the snake_case form names (e.g. tag_id); only FormBinding/MultipartBinding read the `form` tags. The real contract media is therefore application/x-www-form-urlencoded (and multipart), not application/json. The baseline application/json body is generated by swaggo's `@Param ... body` annotation convention and contradicts the source.",
+        "resolution": "Scanner correctly emits application/x-www-form-urlencoded from the AddArticleForm `form` tags."
+      },
+      {
+        "method": "put",
+        "path": "/api/v1/articles/{id}",
+        "media": "application/json",
+        "evidence": "The bound form struct declares only `form:\"...\"` tags (no `json` tags) and the handler binds through app.BindAndValid -> c.Bind. gin's JSONBinding uses encoding/json, which without json tags maps the exported Go field names (e.g. TagID) and cannot populate the snake_case form names (e.g. tag_id); only FormBinding/MultipartBinding read the `form` tags. The real contract media is therefore application/x-www-form-urlencoded (and multipart), not application/json. The baseline application/json body is generated by swaggo's `@Param ... body` annotation convention and contradicts the source.",
+        "resolution": "Scanner correctly emits application/x-www-form-urlencoded from the EditArticleForm `form` tags."
+      },
+      {
+        "method": "post",
+        "path": "/api/v1/tags",
+        "media": "application/json",
+        "evidence": "The bound form struct declares only `form:\"...\"` tags (no `json` tags) and the handler binds through app.BindAndValid -> c.Bind. gin's JSONBinding uses encoding/json, which without json tags maps the exported Go field names (e.g. TagID) and cannot populate the snake_case form names (e.g. tag_id); only FormBinding/MultipartBinding read the `form` tags. The real contract media is therefore application/x-www-form-urlencoded (and multipart), not application/json. The baseline application/json body is generated by swaggo's `@Param ... body` annotation convention and contradicts the source.",
+        "resolution": "Scanner correctly emits application/x-www-form-urlencoded from the AddTagForm `form` tags."
+      },
+      {
+        "method": "put",
+        "path": "/api/v1/tags/{id}",
+        "media": "application/json",
+        "evidence": "The bound form struct declares only `form:\"...\"` tags (no `json` tags) and the handler binds through app.BindAndValid -> c.Bind. gin's JSONBinding uses encoding/json, which without json tags maps the exported Go field names (e.g. TagID) and cannot populate the snake_case form names (e.g. tag_id); only FormBinding/MultipartBinding read the `form` tags. The real contract media is therefore application/x-www-form-urlencoded (and multipart), not application/json. The baseline application/json body is generated by swaggo's `@Param ... body` annotation convention and contradicts the source.",
+        "resolution": "Scanner correctly emits application/x-www-form-urlencoded from the EditTagForm `form` tags."
+      }
+    ]
   }
 }
