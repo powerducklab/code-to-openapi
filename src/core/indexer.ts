@@ -106,7 +106,7 @@ function isConditionalBuildOutput(absolute: string, name: string): boolean {
 }
 
 const TEST_FILE =
-  /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|Test\.java$|Tests\.cs$|Test\.php$|(?:^|[/\\])(?:tests?|__tests__|scripts?|examples?|fixtures?|e2e)[/\\]/i;
+  /(?:\.test|\.spec|\.stories)\.[a-z]+$|_test\.go$|(?:^|[/\\])test_[^/\\]+\.py$|Test\.java$|Tests\.cs$|Test\.php$|(?:^|[/\\])(?:tests?|__tests__|scripts?|fixtures?|e2e)[/\\]|^examples?[/\\]/i;
 
 const EXTENSION_LANGUAGE: Record<string, string> = {
   ".ts": "typescript",

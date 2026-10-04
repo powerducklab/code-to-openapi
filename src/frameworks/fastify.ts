@@ -432,15 +432,41 @@ function resolveAutoloadDir(ts: any, sourceFile: any, dirNode: any): string | nu
     }
     return false;
   };
-  if (
-    ts.isCallExpression(dirNode) &&
-    ts.isPropertyAccessExpression(dirNode.expression) &&
-    ["join", "resolve"].includes(dirNode.expression.name.text)
-  ) {
+  const isJoinResolveCall = (node: any): boolean => {
+    if (!ts.isCallExpression(node)) return false;
+    if (ts.isPropertyAccessExpression(node.expression)) {
+      return ["join", "resolve"].includes(node.expression.name.text);
+    }
+    // A bare `join(...)` / `resolve(...)` imported from "node:path" / "path".
+    return (
+      ts.isIdentifier(node.expression) &&
+      ["join", "resolve"].includes(node.expression.text)
+    );
+  };
+  if (isJoinResolveCall(dirNode)) {
     for (const arg of dirNode.arguments) {
       if (!collect(arg)) return null;
     }
     return join(sourceDir, ...segments);
+  }
+  // fileURLToPath(new URL("./routes", import.meta.url))
+  if (
+    ts.isCallExpression(dirNode) &&
+    ts.isIdentifier(dirNode.expression) &&
+    dirNode.expression.text === "fileURLToPath"
+  ) {
+    const urlArg = dirNode.arguments[0];
+    if (
+      urlArg &&
+      ts.isNewExpression(urlArg) &&
+      ts.isIdentifier(urlArg.expression) &&
+      urlArg.expression.text === "URL"
+    ) {
+      const rel = urlArg.arguments?.[0];
+      if (rel && ts.isStringLiteralLike(rel)) {
+        return join(sourceDir, rel.text);
+      }
+    }
   }
   // __dirname + "/routes"
   if (
@@ -943,8 +969,16 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           }
         });
         if (obj) return prefixOf(obj);
+        // The options come from another module whose shape we cannot prove;
+        // a prefix could be set there, so stay unresolved.
+        return null;
       }
-      return null;
+      // The identifier is neither a local object nor an import: it is the
+      // enclosing plugin's forwarded options parameter (the fastify-generator
+      // `options: opts` pattern). With no provable `prefix`, Fastify applies
+      // no extra options prefix, so treat it as the empty default rather than
+      // flagging a runtime prefix we have no evidence for.
+      return "";
     };
 
     /**
