@@ -70,9 +70,20 @@ def main():
             baseline = BASE / project['baseline']
             row['baselineSha256'] = hashlib.sha256(baseline.read_bytes()).hexdigest()
             report = output / f'{framework}-result.json'
-            execute(['node', '--import', 'tsx', 'examples/audit-contracts.ts', str(baseline), str(target), str(report), project.get('pathPrefix', '')])
+            ledger = BASE / 'docs/audits/2026-10-04-response-contracts/baseline-errors.json'
+            compare_cmd = ['node', '--import', 'tsx', 'examples/audit-contracts.ts', str(baseline), str(target), str(report), project.get('pathPrefix', '')]
+            if ledger.exists():
+                compare_cmd += [str(ledger), framework]
+            execute(compare_cmd)
             contract = json.loads(report.read_text())
-            row.update(assertions=contract['assertions'], mismatches=contract['mismatches'])
+            sc = contract.get('scorecard', {})
+            row.update(assertions=contract['assertions'], mismatches=contract['mismatches'],
+                       unknown=contract.get('unknown', 0), baselineErrors=len(contract.get('baselineErrors', [])),
+                       overall=sc.get('overall'), pass95=sc.get('pass95'),
+                       routeRecall=sc.get('routeRecall'), routePrecision=sc.get('routePrecision'),
+                       responseCompleteness=sc.get('responseCompleteness'),
+                       requestCompleteness=sc.get('requestCompleteness'),
+                       unresolvedRatio=sc.get('unresolvedRatio'))
         except Exception as error:
             row['error'] = str(error)
         row['elapsedSeconds'] = round(time.monotonic() - start, 2)

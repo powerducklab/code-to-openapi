@@ -532,13 +532,229 @@ function deriveStructFromExpr(
   return null;
 }
 
+/** Unwrap pointer/type layers to the underlying named struct identifier. */
+function namedStructOf(node: TsNode | undefined | null): string | null {
+  let t = node;
+  while (t && t.type === "pointer_type") t = t.namedChildren[0];
+  return t?.type === "type_identifier" ? t.text : null;
+}
+
+/** Split a dotted/bracketed JSON path into navigation segments. */
+function toPathSegments(path: string): string[] {
+  const segments: string[] = [];
+  for (const part of path.split(".")) {
+    const elements = part.split("[]");
+    elements.forEach((element, index) => {
+      if (element) segments.push(element);
+      if (index < elements.length - 1) segments.push("[]");
+    });
+  }
+  return segments;
+}
+
+/** Deep-inline a component reference so a constructor can specialize fields. */
+function inlineSchema(schema: JsonSchema, index: GoModelIndex, depth = 0, stack = new Set<string>()): JsonSchema {
+  if (depth > 6) return {};
+  let current = schema;
+  if (current.$ref) {
+    const name = String(current.$ref).split("/").pop()!;
+    if (stack.has(name)) return {};
+    const component = index.components.get(name)
+      ?? (index.byName.get(name) ? buildStructSchema(index.byName.get(name)!, index, 0, new Set(stack)) : undefined);
+    if (!component) return {};
+    const next = new Set(stack).add(name);
+    return inlineSchema(structuredClone(component), index, depth, next);
+  }
+  current = structuredClone(current);
+  if (current.properties) {
+    const props = current.properties as Record<string, JsonSchema>;
+    const inlined: Record<string, JsonSchema> = {};
+    for (const key of Object.keys(props)) {
+      inlined[key] = inlineSchema(props[key]!, index, depth + 1, stack);
+    }
+    current.properties = inlined;
+  }
+  if (current.items) current.items = inlineSchema(current.items as JsonSchema, index, depth + 1, stack);
+  return current;
+}
+
+/** Remove null from the schema at each proven constructor path. */
+function narrowNonNullPaths(schema: JsonSchema, segments: string[], index: GoModelIndex, depth = 0): JsonSchema {
+  if (schema.$ref) {
+    const inlined = inlineSchema(schema, index, depth);
+    if (inlined.$ref) return schema;
+    schema = inlined;
+  }
+  if (depth > 8 || segments.length === 0) return nonNullGoSchema(schema);
+  const [head, ...rest] = segments;
+  if (head === "[]") {
+    if (schema.items) return { ...schema, items: narrowNonNullPaths(schema.items as JsonSchema, rest, index, depth + 1) };
+    return schema;
+  }
+  const properties = schema.properties as Record<string, JsonSchema> | undefined;
+  const property = properties?.[head];
+  if (property) {
+    return { ...schema, properties: { ...properties, [head]: narrowNonNullPaths(property, rest, index, depth + 1) } };
+  }
+  return schema;
+}
+
+/**
+ * Prove non-nil fields of a constructor's returned struct by reading its body.
+ * Handles `r := new(T)` / `r := &T{}`, `r.Field = make(...)` / composite
+ * literals, and `for { e := new(E); e.Sub = make(...); r.Items = append(r.Items, e) }`,
+ * which proves both the slice and every appended element (and the element's
+ * initialized fields) are non-nil on the success path. Returns JSON paths.
+ */
+function constructorNonNullPaths(
+  fn: GoFunction,
+  rootTypeName: string,
+  analysis: GoAnalysis,
+  index: GoModelIndex,
+): Set<string> {
+  const paths = new Set<string>();
+  if (!fn.body) return paths;
+  const body = fn.body;
+  const shadowed = (name: string) => analysis.functions.has(name) || analysis.vars.has(name);
+
+  const nonNilInit = (node: TsNode | undefined): { kind: "array" | "object"; typeName: string | null } | null => {
+    if (!node) return null;
+    if (node.type === "call_expression" && !shadowed(node.namedChildren[0]?.text ?? "")) {
+      const callee = node.namedChildren[0]?.text;
+      const args = positionalArguments(node);
+      if (callee === "make" && args[0] && ["slice_type", "array_type", "map_type"].includes(args[0]!.type)) {
+        return { kind: args[0]!.type === "map_type" ? "object" : "array", typeName: null };
+      }
+      if (callee === "new" && args[0]?.type === "type_identifier") return { kind: "object", typeName: args[0]!.text };
+      return null;
+    }
+    if (node.type === "unary_expression" && node.text.trimStart().startsWith("&") && node.namedChildren[0]?.type === "composite_literal") {
+      const t = namedStructOf(node.namedChildren[0]!.namedChildren[0]);
+      return t ? { kind: "object", typeName: t } : null;
+    }
+    if (node.type === "composite_literal") {
+      const typeNode = node.namedChildren[0];
+      if (typeNode?.type === "slice_type" || typeNode?.type === "array_type") return { kind: "array", typeName: null };
+      const t = namedStructOf(typeNode);
+      return t ? { kind: "object", typeName: t } : null;
+    }
+    return null;
+  };
+
+  // Identify the returned receiver variable (`r`).
+  let receiver: string | null = null;
+  for (const decl of findAll(body, node => node.type === "short_var_declaration")) {
+    const lists = decl.namedChildren.filter(child => child.type === "expression_list");
+    const left = lists[0];
+    const right = lists.at(-1);
+    if (!left || !right) continue;
+    left.namedChildren.forEach((id, position) => {
+      if (id.type !== "identifier") return;
+      const init = nonNilInit(right.namedChildren[position]);
+      if (init?.kind === "object" && init.typeName === rootTypeName) receiver = id.text;
+    });
+  }
+  if (!receiver) return paths;
+
+  const rootStruct = index.byName.get(rootTypeName);
+  if (!rootStruct) return paths;
+  const fieldJson = (structName: string | null, goName: string): string | null => {
+    const def = structName ? index.byName.get(structName) : rootStruct;
+    const field = def?.fields.find(entry => entry.goName === goName || entry.goName.endsWith(`.${goName}`));
+    return field ? fieldName(field) : null;
+  };
+  const sliceElementStruct = (structName: string | null, goName: string): string | null => {
+    const def = structName ? index.byName.get(structName) : rootStruct;
+    const field = def?.fields.find(entry => entry.goName === goName || entry.goName.endsWith(`.${goName}`));
+    if (!field) return null;
+    let typeNode: TsNode | undefined = field.typeNode;
+    if (typeNode.type === "slice_type" || typeNode.type === "array_type") typeNode = typeNode.namedChildren.at(-1);
+    return namedStructOf(typeNode);
+  };
+
+  // Locals proven to hold freshly allocated objects: `e := new(E)` / `e := &E{}`.
+  const objectLocals = new Map<string, string>();
+  for (const decl of findAll(body, node => node.type === "short_var_declaration")) {
+    const lists = decl.namedChildren.filter(child => child.type === "expression_list");
+    const left = lists[0];
+    const right = lists.at(-1);
+    if (!left || !right) continue;
+    left.namedChildren.forEach((id, position) => {
+      if (id.type !== "identifier") return;
+      const init = nonNilInit(right.namedChildren[position]);
+      if (init?.kind === "object" && init.typeName) objectLocals.set(id.text, init.typeName);
+    });
+  }
+
+  const selectorOf = (node: TsNode): { base: string; field: string } | null => {
+    if (node.type !== "selector_expression") return null;
+    const operand = node.namedChildren[0];
+    const fieldNode = node.namedChildren[1];
+    if (operand?.type !== "identifier" || !fieldNode) return null;
+    return { base: operand.text, field: fieldNode.text };
+  };
+
+  // element var -> { parent Go field, element struct }
+  const appended = new Map<string, { parentField: string; elementStruct: string }>();
+  const assignments = findAll(body, node => node.type === "assignment_statement");
+
+  // Pass 1: direct receiver field construction and append bindings.
+  for (const assignment of assignments) {
+    const sides = assignment.namedChildren.filter(child => child.type === "expression_list");
+    const lefts = sides[0]?.namedChildren ?? [];
+    const rights = sides[1]?.namedChildren ?? [];
+    lefts.forEach((left, position) => {
+      const target = selectorOf(left);
+      const value = rights[position];
+      if (!target || target.base !== receiver || !value) return;
+      if (value.type === "call_expression" && value.namedChildren[0]?.text === "append" && !shadowed("append")) {
+        const args = positionalArguments(value);
+        const sliceTarget = args[0] ? selectorOf(args[0]) : null;
+        const element = args[1];
+        if (sliceTarget && sliceTarget.base === receiver) {
+          const jsonField = fieldJson(null, sliceTarget.field);
+          if (jsonField) paths.add(jsonField);
+          if (jsonField && element?.type === "identifier") {
+            const elementStruct = sliceElementStruct(null, sliceTarget.field);
+            if (elementStruct && objectLocals.get(element.text) === elementStruct) {
+              paths.add(`${jsonField}[]`);
+              appended.set(element.text, { parentField: jsonField, elementStruct });
+            }
+          }
+        }
+      } else if (nonNilInit(value)) {
+        const jsonField = fieldJson(null, target.field);
+        if (jsonField) paths.add(jsonField);
+      }
+    });
+  }
+
+  // Pass 2: field construction on proven appended elements (`e.Sub = make(...)`).
+  for (const assignment of assignments) {
+    const sides = assignment.namedChildren.filter(child => child.type === "expression_list");
+    const lefts = sides[0]?.namedChildren ?? [];
+    const rights = sides[1]?.namedChildren ?? [];
+    lefts.forEach((left, position) => {
+      const target = selectorOf(left);
+      if (!target) return;
+      const binding = appended.get(target.base);
+      if (!binding) return;
+      const value = rights[position];
+      if (!value || !nonNilInit(value)) return;
+      const subField = fieldJson(binding.elementStruct, target.field);
+      if (subField) paths.add(`${binding.parentField}[].${subField}`);
+    });
+  }
+
+  return paths;
+}
+
 /**
  * Follow a constructor/service function's declared return type, and when that
  * type is opaque (e.g. `render.Renderer` or `[]render.Renderer`) follow the
  * function body to learn the concrete struct it builds. Also extracts a
  * statically provable HTTP status from an `HTTPStatusCode: <code>` literal.
- */
-export function followCallToSchema(
+ */export function followCallToSchema(
   call: TsNode,
   analysis: GoAnalysis,
   index: GoModelIndex,
@@ -577,6 +793,25 @@ export function followCallToSchema(
     // Opaque declared return (interface): follow the body for the concrete type.
     const concrete = bodyFollowConcreteStruct(fn, index, analysis, vars, depth + 1);
     schema = concrete ?? schema;
+  }
+  // Constructor field narrowing: prove non-nil slices/objects from make()/new()
+  // assignments in the constructor body instead of trusting the declared
+  // pointer/slice nullability. Only applied to a named struct return.
+  if (schema) {
+    const rootTypeName = namedStructOf(resultType);
+    if (rootTypeName && fn.body && (schema.$ref || schema.type === "object" || Array.isArray(schema.type))) {
+      const nonNullPaths = constructorNonNullPaths(fn, rootTypeName, analysis, index);
+      if (nonNullPaths.size) {
+        let specialized = inlineSchema(schema, index);
+        if (specialized.$ref) specialized = {};
+        if (specialized.type === "object" || Array.isArray(specialized.type)) {
+          for (const path of nonNullPaths) {
+            specialized = narrowNonNullPaths(specialized, toPathSegments(path), index);
+          }
+          schema = specialized;
+        }
+      }
+    }
   }
   return { schema, status: extractStatus(fn.body) };
 }

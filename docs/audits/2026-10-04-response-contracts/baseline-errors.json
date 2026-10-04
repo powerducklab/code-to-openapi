@@ -20,5 +20,18 @@
         "resolution": "The baseline types the path id as string, but the handler coerces it to a number before use. Runtime-proven contract wins (same rule as the Spring boundary cases)."
       }
     ]
+  },
+  "jaxrs": {
+    "missingRoutes": [],
+    "falseMismatches": [
+      {
+        "whereContains": "/example_model request",
+        "fieldContains": "/type",
+        "baseline": "object",
+        "scanner": ["object", "null"],
+        "evidence": "docs/audits/2026-10-04-java-native/jaxrs-empty-body.json: native POST and DELETE probes with an empty body (\"\") and literal `null` both return HTTP 200, proving the request body is nullable/optional.",
+        "resolution": "The baseline narrows the request body to a non-null object; runtime evidence proves null and an empty body are accepted. The scanner's [object, null] is correct and must not be narrowed."
+      }
+    ]
   }
 }
