@@ -18,12 +18,19 @@ export function prismaProjection(analysis:TsAnalysis,node:any):JsonSchema|undefi
  const {ts}=analysis;
  if(!ts.isCallExpression(node)||!ts.isPropertyAccessExpression(node.expression))return;
  const method=node.expression.name.text;
- if(!['findUnique','findFirst','findUniqueOrThrow','findFirstOrThrow','create','update','upsert','findMany','count'].includes(method))return;
+ if(!['findUnique','findFirst','findUniqueOrThrow','findFirstOrThrow','create','update','upsert','delete','findMany','count','deleteMany','updateMany','createMany'].includes(method))return;
  const delegate=node.expression.expression;
  if(!ts.isPropertyAccessExpression(delegate))return;
+ const isPrismaClientModule=(spec:string|undefined):boolean=>{
+  if(!spec)return false;
+  if(spec==='@prisma/client'||spec==='@prisma/client/default')return true;
+  return /(?:^|[\\/])generated[\\/]client(?:[\\/]|$)/.test(spec)
+   ||/(?:^|[\\/])\.prisma[\\/]client(?:[\\/]|$)/.test(spec)
+   ||/(?:^|[\\/])prisma[\\/]client(?:[\\/]|$)/.test(spec);
+ };
  const importedClient=(name:any)=>{
   const symbol=analysis.checker.getSymbolAtLocation(name);
-  return (symbol?.declarations??[]).some((d:any)=>ts.isImportSpecifier(d)&&(d.propertyName?.text??d.name.text)==='PrismaClient'&&d.parent?.parent?.parent?.moduleSpecifier?.text==='@prisma/client');
+  return (symbol?.declarations??[]).some((d:any)=>ts.isImportSpecifier(d)&&(d.propertyName?.text??d.name.text)==='PrismaClient'&&isPrismaClientModule(d.parent?.parent?.parent?.moduleSpecifier?.text));
  };
  const isClient=(value:any,seen=new Set<any>(),depth=0):boolean=>{
   if(!value||depth>12||seen.has(value))return false;
@@ -40,8 +47,9 @@ export function prismaProjection(analysis:TsAnalysis,node:any):JsonSchema|undefi
   });
  };
  if(!isClient(delegate.expression))return;
- // Aggregate count returns a number regardless of selection.
+ // Aggregate count and batch mutations return a numeric count regardless of selection.
  if(method==='count')return {type:'number'};
+ if(['deleteMany','updateMany','createMany'].includes(method))return {type:'object',properties:{count:{type:'number'}},required:['count']};
 
  const sourceFile=node.getSourceFile()?.fileName;
  const schema=loadPrismaSchema(sourceFile);
@@ -103,7 +111,7 @@ export function prismaProjection(analysis:TsAnalysis,node:any):JsonSchema|undefi
     const mf=model.fieldByName.get(fname);
     if(field.initializer.kind===ts.SyntaxKind.FalseKeyword)continue;
     if(field.initializer.kind===ts.SyntaxKind.TrueKeyword){
-     if(mf)add(fname,relationFull(mf,schema,0),true);
+     if(mf)add(fname,relationFull(mf,schema),true);
      continue;
     }
     const nested=nestedSelection(field.initializer,mf,schema,ts,0);
@@ -143,41 +151,26 @@ export function prismaProjection(analysis:TsAnalysis,node:any):JsonSchema|undefi
  return object;
 }
 
-/** Full relation for `include: { rel: true }`, expanded to a bounded depth. */
-function relationFull(field:PrismaField,schema:PrismaSchema,depth:number):JsonSchema{
+/**
+ * Shape for `include: { rel: true }`. A bare `true` returns the related model's
+ * SCALAR fields only; Prisma does not cascade relations unless the caller writes
+ * a nested `include`/`select` (handled by nestedSelection). Scalar-only keeps the
+ * result concrete and never fabricates untyped relation placeholders.
+ */
+function relationFull(field:PrismaField,schema:PrismaSchema):JsonSchema{
  const target=schema.models.get(field.type);
  if(!target)return field.list?{type:'array',items:{}}:{};
- if(depth>=1){
-  // Bound recursion: mark the model but do not re-expand its relations.
-  const shallow=shallowModel(target,schema);
-  return field.list?{type:'array',items:shallow}:shallow;
- }
- const props:Record<string,JsonSchema>={};
- const required:string[]=[];
- for(const tf of target.fields){
-  if(tf.kind==='relation'){
-   props[tf.name]=relationFull(tf,schema,depth+1);
-  } else {
-   props[tf.name]=prismaFieldSchema(tf,schema);
-  }
-  // Included relation keys are present in the payload; optionality only makes
-  // the value nullable (encoded in the type), not the key missing.
-  required.push(tf.name);
- }
- const obj:JsonSchema={type:'object',properties:props,required,['x-prisma-model' as any]:target.name};
+ const obj=shallowModel(target,schema);
  return field.list?{type:'array',items:obj}:obj;
 }
 
-/** Scalar-only shape of a model; relation keys stay open to stop cycles. */
+/** Scalar-only shape of a model; relation keys are omitted to stop cycles. */
 function shallowModel(model:PrismaModel,schema:PrismaSchema):JsonSchema{
  const props:Record<string,JsonSchema>={};
  const required:string[]=[];
  for(const tf of model.fields){
-  if(tf.kind==='relation'){
-   props[tf.name]=tf.list?{type:'array',items:{['x-prisma-model' as any]:tf.type}}:{['x-prisma-model' as any]:tf.type};
-  } else {
-   props[tf.name]=prismaFieldSchema(tf,schema);
-  }
+  if(tf.kind==='relation')continue;
+  props[tf.name]=prismaFieldSchema(tf,schema);
   required.push(tf.name);
  }
  return {type:'object',properties:props,required,['x-prisma-model' as any]:model.name};

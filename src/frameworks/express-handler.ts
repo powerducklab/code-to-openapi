@@ -1052,10 +1052,20 @@ export function analyzeHandler(
     accessNode: any,
     target: CollectedField[],
     marksBody = false,
+    fallbackSchema?: JsonSchema,
   ) {
     const declaration = accessNode.parent;
     const pattern = declaration?.name;
     if (!ts.isVariableDeclaration(declaration) || !ts.isObjectBindingPattern(pattern)) return;
+    const bindingDefault = (init: any): JsonSchema | undefined => {
+      if (!init) return undefined;
+      if (ts.isNumericLiteral(init)) return { type: "number" };
+      if (ts.isStringLiteralLike(init)) return { type: "string" };
+      if (init.kind === ts.SyntaxKind.TrueKeyword || init.kind === ts.SyntaxKind.FalseKeyword) return { type: "boolean" };
+      if (ts.isArrayLiteralExpression(init)) return { type: "array", items: {} };
+      if (ts.isObjectLiteralExpression(init)) return { type: "object" };
+      return undefined;
+    };
     for (const element of pattern.elements) {
       if (!ts.isBindingElement(element) || !ts.isIdentifier(element.name)) continue;
       let schema: JsonSchema | undefined;
@@ -1069,6 +1079,10 @@ export function analyzeHandler(
       } catch {
         // no type info
       }
+      // Without trusted types, honor a binding default then the location
+      // fallback (path/query values are always strings on the wire). JSON
+      // request bodies pass no fallback, so an untyped body field stays unknown.
+      if (!schema) schema = bindingDefault(element.initializer) ?? fallbackSchema;
       target.push({ name: element.name.text, schema });
       if (marksBody) bodyReferenced = true;
     }
@@ -1117,7 +1131,7 @@ export function analyzeHandler(
           if (/^req\.params(\.|\[|$)/.test(fullText)) {
             if (fullText === "req.params" && destructured) {
               const pathFields: CollectedField[] = [];
-              collectDestructure(node, pathFields);
+              collectDestructure(node, pathFields, false, { type: "string" });
               for (const field of pathFields) {
                 addParam("path", field.name, field.schema, field.schema ? "high" : "low");
               }
@@ -1126,7 +1140,7 @@ export function analyzeHandler(
             }
           } else if (/^req\.query(\.|\[|$)/.test(fullText)) {
             if (fullText === "req.query" && destructured) {
-              collectDestructure(node, queryFields);
+              collectDestructure(node, queryFields, false, { type: "string" });
             } else if (member && member !== "query") {
               queryFields.push({ name: member, schema });
             }
