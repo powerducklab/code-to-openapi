@@ -222,6 +222,154 @@ function lowerFirst(value: string): string {
   return value.length ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
+/**
+ * The vendored c_sharp grammar fails to parse an explicit lambda return type
+ * (`async Task<Results<Ok<T>, NotFound>> (int id) => { ... }`), which turns the
+ * whole enclosing endpoint call into an ERROR node and drops the route. Strip
+ * the return type before parsing so the invocation and lambda parse normally,
+ * and preserve the type for block-bodied lambdas as a marker statement
+ * (`string __lrt = @"<type>";`) that response inference can read back.
+ */
+export const LRT_MARKER = "__lrt";
+
+export function normalizeLambdaReturnTypes(source: string): string {
+  const isWs = (ch: string | undefined) => ch !== undefined && /\s/.test(ch);
+  const arrows: number[] = [];
+  // Lightweight lexer: find `=>` arrows while skipping strings and comments.
+  for (let i = 0; i < source.length - 1; i++) {
+    const ch = source[i];
+    if (ch === '"') {
+      i++;
+      while (i < source.length) {
+        if (source[i] === '"') {
+          if (source[i + 1] === '"') { i += 2; continue; }
+          break;
+        }
+        if (source[i] === "\\") i++;
+        i++;
+      }
+      continue;
+    }
+    if (ch === "'") {
+      i++;
+      while (i < source.length && source[i] !== "'") i++;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      i += 2;
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    if (ch === "=" && source[i + 1] === ">") arrows.push(i);
+  }
+
+  interface Edit {
+    typeStart: number;
+    typeEnd: number; // exclusive (the '(' of the parameter list)
+    injectPos: number | null; // position right after a block body '{'
+    rawType: string;
+  }
+  const edits: Edit[] = [];
+
+  for (const arrow of arrows) {
+    // Locate the parameter list immediately before the arrow.
+    let p = arrow - 1;
+    while (isWs(source[p])) p--;
+    if (source[p] !== ")") continue;
+    let depth = 1;
+    let q = p - 1;
+    for (; q >= 0; q--) {
+      if (source[q] === ")") depth++;
+      else if (source[q] === "(") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (depth !== 0) continue;
+    const openParen = q;
+
+    // Distinguish an expression-bodied method (`public Type Name(...) =>`)
+    // from a lambda with an explicit return type (`Type (...) =>`). For a
+    // method the token right before '(' is the method name, itself preceded by
+    // the return type (an identifier or `>`). A lambda's return type directly
+    // abuts '(' and is preceded by a boundary or by the `async` keyword.
+    let wp = openParen;
+    while (isWs(source[wp - 1])) wp--;
+    if (/[A-Za-z0-9_]/.test(source[wp - 1] ?? "")) {
+      let nameStart = wp;
+      while (/[A-Za-z0-9_]/.test(source[nameStart - 1] ?? "")) nameStart--;
+      let cb = nameStart - 1;
+      while (isWs(source[cb])) cb--;
+      let wordEnd = cb;
+      while (/[A-Za-z0-9_]/.test(source[wordEnd - 1] ?? "")) wordEnd--;
+      const precedingWord = source.slice(wordEnd, cb + 1);
+      const precedingChar = source[cb];
+      if (precedingWord !== "async" && /[\w>)\]]/.test(precedingChar ?? "")) {
+        continue; // A type precedes the name: this is a method, not a lambda.
+      }
+    }
+
+    // Scan backward over the explicit return type, respecting generic depth.
+    let k = openParen;
+    while (isWs(source[k - 1])) k--;
+    let angleDepth = 0;
+    let t = k;
+    for (; t > 0; t--) {
+      const c = source[t - 1];
+      if (c === ">") { angleDepth++; continue; }
+      if (c === "<") {
+        if (angleDepth === 0) break;
+        angleDepth--;
+        continue;
+      }
+      if (angleDepth > 0) {
+        // Inside generics: commas, spaces, names and nested types are part of
+        // the type argument list.
+        if (/[\w\s.\[\]?,]/.test(c)) continue;
+        break;
+      }
+      if (/[,;=}{)]/.test(c)) break;
+      if (/[\w\s.\[\]?]/.test(c)) continue;
+      break;
+    }
+    const typeStart = t;
+    const rawType = source.slice(typeStart, k).replace(/^\s*async\s+/, "").trim();
+    if (!rawType || !/[A-Za-z_]/.test(rawType)) continue;
+    // The token before the type must be an argument/declaration boundary; this
+    // excludes expression-bodied methods (`public string M(...) =>`).
+    let b = typeStart - 1;
+    while (isWs(source[b])) b--;
+    const boundary = source[b];
+    if (boundary !== undefined && !/[,;=}{(]/.test(boundary)) continue;
+
+    // Block body? Find the '{' following the arrow to host the marker.
+    let injectPos: number | null = null;
+    let z = arrow + 2;
+    while (isWs(source[z])) z++;
+    if (source[z] === "{") injectPos = z + 1;
+
+    edits.push({ typeStart, typeEnd: openParen, injectPos, rawType });
+  }
+
+  if (!edits.length) return source;
+
+  // Apply from the end so earlier offsets stay valid.
+  let result = source;
+  for (let i = edits.length - 1; i >= 0; i--) {
+    const e = edits[i]!;
+    const marker = e.injectPos !== null ? `string ${LRT_MARKER} = @"${e.rawType}";` : "";
+    if (e.injectPos !== null) result = result.slice(0, e.injectPos) + marker + result.slice(e.injectPos);
+    result = result.slice(0, e.typeStart) + result.slice(e.typeEnd);
+  }
+  return result;
+}
+
 export const createCSharpAnalysis: LanguagePack<CSharpAnalysis>["analyze"] = async (
   ctx: ScanContext,
 ) => {
@@ -231,7 +379,7 @@ export const createCSharpAnalysis: LanguagePack<CSharpAnalysis>["analyze"] = asy
   const declarations:CsTypeDef[]=[];
 
   const parser = async (source: string) => {
-    let normalized = source;
+    let normalized = normalizeLambdaReturnTypes(source);
     let root = await parseSource("c_sharp", normalized);
     // Older WASM grammars can consume the next declaration as the body of
     // a modern semicolon-only class. Repair only an AST-recognized class's

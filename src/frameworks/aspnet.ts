@@ -29,6 +29,7 @@ import type {
   SourceLocation,
 } from "../core/types.js";
 import type { CSharpAnalysis } from "../lang/csharp/index.js";
+import { LRT_MARKER } from "../lang/csharp/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
@@ -79,6 +80,17 @@ const RESULT_STATUS_METHODS: Record<string, string> = {
   ValidationProblem: "400",
 };
 
+const SUCCESS_RESULT_STATUS: Record<string, string> = {
+  Ok: "200",
+  Created: "201",
+  CreatedAtRoute: "201",
+  CreatedAtAction: "201",
+  CreatedAtUri: "201",
+  Accepted: "202",
+  AcceptedAtRoute: "202",
+  AcceptedAtAction: "202",
+};
+
 const RESULT_METHOD_NAMES = new Set([
   "Ok",
   "Created",
@@ -113,13 +125,54 @@ const INJECTED_PARAMETER_TYPES = new Set([
   "IMediator",
   "ISender",
   "IScheduler",
+  "IDbConnection",
+  "DbConnection",
+  "SqlConnection",
+  "SqliteConnection",
+  "NpgsqlConnection",
+  "MySqlConnection",
+  "OracleConnection",
 ]);
 
-function isInjectedService(typeNode: TsNode | undefined): boolean {
+function isInjectedService(typeNode: TsNode | undefined, model?: CsModelIndex): boolean {
   if (!typeNode) return false;
+  // Generic DI wrappers from MinimalApis.Extensions are value binders, not services.
   const text = typeNode.text.replace(/<.*>/, "");
   if (INJECTED_PARAMETER_TYPES.has(text)) return true;
-  return /(?:DbContext|Service|Client|Repository|Handler|Store|Cache|Bus)$/.test(text);
+  if (/(?:DbContext|Service|Client|Repository|Handler|Store|Cache|Bus|Db)$/.test(text)) return true;
+  // A type deriving from DbContext (e.g. TodoDb) is always DI-injected.
+  if (model) {
+    const genericName =
+      typeNode.type === "generic_name"
+        ? typeNode.namedChildren.find((c) => c.type === "identifier")?.text
+        : undefined;
+    const base = genericName ?? text;
+    const def = model.byName.get(base);
+    if (def?.baseList && /DbContext/.test(def.baseList.text)) return true;
+  }
+  return false;
+}
+
+/**
+ * MinimalApis.Extensions value-binder wrappers whose inner type is the request
+ * body: Body<T>, Bind<T>, ModelBinder<T>. Returns the inner type node when matched.
+ */
+function bodyWrapperInner(typeNode: TsNode): TsNode | undefined {
+  if (typeNode.type !== "generic_name") return undefined;
+  const name = typeNode.namedChildren.find((c) => c.type === "identifier")?.text;
+  if (name !== "Body" && name !== "Bind" && name !== "ModelBinder" && name !== "ValidatedWrapper" && name !== "Validated") {
+    return undefined;
+  }
+  const args = typeNode.namedChildren.find((c) => c.type === "type_argument_list");
+  const first = args?.namedChildren.find(
+    (c) =>
+      c.type === "predefined_type" ||
+      c.type === "identifier" ||
+      c.type === "generic_name" ||
+      c.type === "array_type" ||
+      c.type === "nullable_type",
+  );
+  return first;
 }
 
 /** FileResult and its derived types always stream a binary response body. */
@@ -674,8 +727,31 @@ function extractMinimalApis(
     // static method declaration so its parameters/return shape drive the op.
     const lambda = findFirst(handlerArg, (n) => n.type === "lambda_expression") ?? null;
     let handlerMethod: TsNode | null = null;
-    if (!lambda && handlerArg.type === "identifier") {
-      handlerMethod = findMethodByName(root, handlerArg.text);
+    const bareIdentifier =
+      handlerArg.type === "identifier"
+        ? handlerArg
+        : findFirst(handlerArg, (n) => n.type === "identifier" && n.parent?.type === "argument");
+    if (!lambda && bareIdentifier && !findFirst(handlerArg, (n) => n.type === "member_access_expression")) {
+      handlerMethod = findMethodByName(root, bareIdentifier.text);
+    } else if (!lambda) {
+      // Selector method group, e.g. MapGet("/x", Endpoints.HelloWorldFunc).
+      const selectorAccess =
+        handlerArg.type === "member_access_expression"
+          ? handlerArg
+          : findFirst(handlerArg, (n) => n.type === "member_access_expression");
+      const owner = selectorAccess?.namedChildren[0];
+      const selector = selectorAccess?.namedChildren[selectorAccess.namedChildren.length - 1];
+      if (owner?.type === "identifier" && selector?.type === "identifier") {
+        const clsNode = model.byName.get(owner.text)?.node;
+        if (clsNode) {
+          handlerMethod =
+            findFirst(
+              clsNode,
+              (c) => c.type === "method_declaration" && c.childForFieldName("name")?.text === selector.text,
+            ) ?? null;
+        }
+        if (!handlerMethod) handlerMethod = findSelectorMethod(root, owner.text, selector.text);
+      }
     }
     const handlerSource = lambda ?? handlerMethod ?? handlerArg;
     const paramsNode = handlerSource.namedChildren.find((c) => c.type === "parameter_list");
@@ -791,8 +867,28 @@ function collectGroupVarPrefixes(root: TsNode): Map<string, string> {
 
 // Find a method declaration in the current file by name (method-group handler).
 function findMethodByName(root: TsNode, name: string): TsNode | null {
-  for (const m of findAll(root, (n) => n.type === "method_declaration")) {
-    if (m.childForFieldName("name")?.text === name) return m;
+  for (const m of findAll(
+    root,
+    (n) => n.type === "method_declaration" || n.type === "local_function_statement" || n.type === "local_function",
+  )) {
+    const decl =
+      m.type === "local_function_statement"
+        ? (findFirst(m, (c) => c.type === "local_function") ?? m)
+        : m;
+    if (decl.childForFieldName("name")?.text === name || m.childForFieldName("name")?.text === name) return m;
+  }
+  return null;
+}
+
+/** Resolve a `Class.Method` selector method group to its declaration. */
+function findSelectorMethod(root: TsNode, className: string, methodName: string): TsNode | null {
+  for (const cls of findAll(root, (n) =>
+    n.type === "class_declaration" || n.type === "record_declaration" || n.type === "struct_declaration")) {
+    if (cls.childForFieldName("name")?.text !== className) continue;
+    const method = cls.namedChildren.find(
+      (c) => c.type === "method_declaration" && c.childForFieldName("name")?.text === methodName,
+    );
+    if (method) return method;
   }
   return null;
 }
@@ -811,11 +907,398 @@ function routeTextFromArg(arg: TsNode | undefined): string | null {
   return literal.text.replace(/^[@$]?"/, "").replace(/"$/, "");
 }
 
+/** Split a generic argument list on top-level commas (respecting nesting). */
+function splitTopCommas(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "<" || ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ">" || ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * Build a JSON Schema from a C# type expressed as text (e.g. "Todo",
+ * "List<Todo>", "Results<Ok<Todo>, NotFound>"). Used for contracts only
+ * available as preserved type text, never for runtime values.
+ */
+function schemaFromCsTypeText(raw: string, model: CsModelIndex): JsonSchema | undefined {
+  let t = raw.trim().replace(/\s+/g, " ");
+  if (!t) return undefined;
+  if (t.endsWith("?")) t = t.slice(0, -1).trim();
+  if (t === "void" || t === "Task" || t === "ValueTask") return undefined;
+
+  if (t.endsWith("[]")) {
+    const inner = schemaFromCsTypeText(t.slice(0, -2).trim(), model);
+    return { type: "array", items: inner ?? {} };
+  }
+
+  const generic = /^([A-Za-z_][\w.]*)\s*<(.*)>$/.exec(t);
+  if (generic) {
+    const name = generic[1]!.split(".").pop()!;
+    const args = splitTopCommas(generic[2]!).map((a) => schemaFromCsTypeText(a, model));
+    if (COLLECTION_TYPE_NAMES.has(name)) return { type: "array", items: args[0] ?? {} };
+    if (name === "Dictionary" || name === "IDictionary") {
+      return { type: "object", ...(args[1] ? { additionalProperties: args[1] } : {}) };
+    }
+    if (WRAPPER_TYPE_NAMES.has(name)) return args[0];
+    if (model.byName.has(name)) {
+      ensureCsComponent(name, model);
+      return { $ref: `#/components/schemas/${model.componentNames?.get(name) ?? name}` };
+    }
+    return undefined;
+  }
+
+  const simple = t.split(".").pop()!;
+  if (simple === "string" || simple === "char" || simple === "Guid" || simple === "string?") {
+    return { type: "string", ...(simple === "Guid" ? { format: "uuid" } : {}) };
+  }
+  if (simple === "bool" || simple === "Boolean") return { type: "boolean" };
+  if (new Set(["int", "long", "short", "byte", "uint", "ulong", "ushort", "sbyte"]).has(simple)) {
+    return { type: "integer", ...(simple === "long" || simple === "ulong" ? { format: "int64" } : {}) };
+  }
+  if (new Set(["double", "float", "decimal", "Double", "Single"]).has(simple)) return { type: "number" };
+  if (new Set(["DateTime", "DateTimeOffset", "DateOnly"]).has(simple)) return { type: "string", format: "date-time" };
+  if (simple === "TimeOnly" || simple === "TimeSpan") return { type: "string", format: "time" };
+  if (simple === "object" || simple === "JsonElement" || simple === "JsonDocument") return { type: "object" };
+  if (simple === "byte" || /Stream$/.test(simple)) return { type: "string", format: "binary" };
+  if (model.byName.has(simple)) {
+    ensureCsComponent(simple, model);
+    return { $ref: `#/components/schemas/${model.componentNames?.get(simple) ?? simple}` };
+  }
+  return undefined;
+}
+
+const COLLECTION_TYPE_NAMES = new Set([
+  "List", "IList", "ICollection", "IEnumerable", "Collection", "IReadOnlyList",
+  "IReadOnlyCollection", "HashSet", "ISet", "Array",
+]);
+const WRAPPER_TYPE_NAMES = new Set(["Task", "ValueTask", "ActionResult", "Nullable"]);
+
+/** Typed result type name -> HTTP status code (Microsoft.AspNetCore.Http.HttpResults). */
+const TYPED_RESULT_STATUS: Record<string, string> = {
+  Ok: "200",
+  Created: "201",
+  CreatedAtRoute: "201",
+  CreatedAtAction: "201",
+  Accepted: "202",
+  NoContent: "204",
+  BadRequest: "400",
+  ValidationProblem: "400",
+  ProblemHttpResult: "400",
+  UnauthorizedHttpResult: "401",
+  Unauthorized: "401",
+  ForbidHttpResult: "403",
+  Forbidden: "403",
+  NotFound: "404",
+  Conflict: "409",
+  UnprocessableEntity: "422",
+  UnprocessableEntityHttpResult: "422",
+  TooManyDocuments: "429",
+};
+
+const BINARY_RESULT_TYPES = /^(FileContent|FileStream|PhysicalFile|VirtualFile|File|Content)HttpResult$/;
+
+/** Parse `Name<A, B>` into its name and top-level raw type arguments. */
+function splitGeneric(text: string): { name: string; args: string[] } | null {
+  const m = /^([A-Za-z_][\w.]*)\s*<(.*)>$/.exec(text.trim());
+  if (!m) return { name: text.trim().split(".").pop()!, args: [] };
+  return { name: m[1]!.split(".").pop()!, args: splitTopCommas(m[2]!) };
+}
+
+/**
+ * Expand a preserved explicit lambda return type into typed-result responses,
+ * e.g. Task<Results<Ok<Todo>, NotFound>> -> 200 Todo + 404.
+ */
+function responsesFromDeclaredReturnType(
+  lambda: TsNode,
+  model: CsModelIndex,
+): DiscoveredResponse[] | null {
+  let typeText: string | null = null;
+  for (const decl of findAll(lambda, (n) => n.type === "variable_declarator" || n.type === "assignment_expression")) {
+    const isMarker = findFirst(
+      decl,
+      (n) => n.type === "identifier" && n.text === LRT_MARKER,
+    );
+    if (!isMarker) continue;
+    const lit = findFirst(
+      decl,
+      (n) =>
+        n.type === "string_literal" ||
+        n.type === "verbatim_string_literal" ||
+        n.type === "raw_string_literal",
+    );
+    if (lit) typeText = lit.text.replace(/^@?\$?"?/, "").replace(/"\$?$/, "");
+  }
+  if (!typeText) return null;
+
+  // Unwrap Task<> / ValueTask<> / ActionResult<>.
+  let inner = typeText.trim();
+  for (;;) {
+    const g = /^(Task|ValueTask|ActionResult)\s*<(.*)>$/.exec(inner);
+    if (!g) break;
+    inner = g[2]!.trim();
+  }
+
+  const json = (statusCode: string, schema: JsonSchema | undefined, confidence: Confidence): DiscoveredResponse => ({
+    statusCode,
+    description: "",
+    confidence,
+    ...(schema ? { content: [{ mediaType: "application/json", schema }] } : {}),
+  });
+
+  const resultForType = (raw: string): DiscoveredResponse | null => {
+    const { name, args } = splitGeneric(raw)!;
+    if (BINARY_RESULT_TYPES.test(name)) {
+      return {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } }],
+      };
+    }
+    if (name === "EmptyHttpResult" || name === "NoContent") {
+      return { statusCode: TYPED_RESULT_STATUS[name] ?? "204", description: "", confidence: "high" };
+    }
+    if (name === "RedirectHttpResult" || name === "Redirect") {
+      return { statusCode: "302", description: "", confidence: "high" };
+    }
+    if (name === "StreamHttpResult") {
+      return {
+        statusCode: "200",
+        description: "Streamed response",
+        confidence: "medium",
+        content: [{ mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } }],
+      };
+    }
+    if (TYPED_RESULT_STATUS[name]) {
+      // Created* payload is the last type argument; Ok<T>/BadRequest<T> the first.
+      const payloadArg = /Created|Accepted/.test(name) ? args[args.length - 1] : args[0];
+      const schema = payloadArg ? schemaFromCsTypeText(payloadArg, model) : undefined;
+      return json(TYPED_RESULT_STATUS[name]!, schema, schema ? "high" : "medium");
+    }
+    if (name === "Results") {
+      return null; // expanded by caller
+    }
+    // A concrete DTO return (Task<Todo>, Todo) is a 200 JSON body.
+    const dto = schemaFromCsTypeText(raw, model);
+    if (dto) return json("200", dto, "medium");
+    return null;
+  };
+
+  const resultsUnion = /^Results\s*<(.*)>$/.exec(inner);
+  const typeList = resultsUnion ? splitTopCommas(resultsUnion[1]!) : [inner];
+  const out: DiscoveredResponse[] = [];
+  for (const t of typeList) {
+    const r = resultForType(t.trim());
+    if (r && !out.some((e) => e.statusCode === r.statusCode)) out.push(r);
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Infer a 200 response for a lambda that returns a value directly (no Results.*
+ * call): string -> text/plain; anonymous object / DTO / array -> JSON.
+ */
+function inferDirectReturn(lambda: TsNode, model: CsModelIndex): DiscoveredResponse | null {
+  // Expression-bodied lambda: the value after `=>`; otherwise return statements.
+  const exprs: TsNode[] = [];
+  for (const ret of findAll(lambda, (n) => n.type === "return_statement")) {
+    const v = ret.namedChildren.find((c) => !/^;?$/.test(c.type));
+    if (v) exprs.push(v);
+  }
+  if (!exprs.length) {
+    // Expression lambda: named children are parameter_list then the body expr.
+    const last = lambda.namedChildren[lambda.namedChildren.length - 1];
+    if (last && last.type !== "block" && last.type !== "parameter_list") exprs.push(last);
+  }
+
+  let sawString = false;
+  for (const expr of exprs) {
+    // The return value itself is a string literal (possibly interpolated):
+    // always a text response regardless of embedded calls/formatters.
+    if (
+      expr.type === "string_literal" ||
+      expr.type === "interpolated_string_expression" ||
+      expr.type === "verbatim_string_literal" ||
+      expr.type === "raw_string_literal"
+    ) {
+      sawString = true;
+      continue;
+    }
+    const hasString = findFirst(
+      expr,
+      (n) => n.type === "string_literal" || n.type === "interpolated_string_expression",
+    );
+    const hasDataCall = findFirst(
+      expr,
+      (n) =>
+        n.type === "invocation_expression" &&
+        !/Results|TypedResults/.test(n.text.slice(0, 40)) &&
+        !/^\s*nameof\s*\(/.test(n.text) &&
+        !/\.\s*ToString\s*\(\s*\)/.test(n.text),
+    );
+    if (hasString && !hasDataCall) sawString = true;
+  }
+
+  // Prefer an explicit object/array creation or anonymous object.
+  const creation =
+    findFirst(lambda, (n) => n.type === "anonymous_object_creation_expression") ??
+    findFirst(lambda, (n) => n.type === "object_creation_expression") ??
+    findFirst(lambda, (n) => n.type === "array_creation_expression") ??
+    findFirst(lambda, (n) => n.type === "implicit_array_creation_expression") ??
+    null;
+  if (creation) {
+    const schema = inferExpressionSchema(creation, model, lambda);
+    if (schema && Object.keys(schema).length) {
+      return { statusCode: "200", description: "", confidence: "medium", content: [{ mediaType: "application/json", schema }] };
+    }
+  }
+  if (sawString) {
+    return { statusCode: "200", description: "", confidence: "medium", content: [{ mediaType: "text/plain", schema: { type: "string" } }] };
+  }
+  // Data-access calls: EF Core DbSet ToListAsync/FindAsync, JsonDocument.Parse.
+  for (const expr of exprs) {
+    const data = inferDataCallSchema(expr, lambda, model);
+    if (data) {
+      return { statusCode: "200", description: "", confidence: "medium", content: [{ mediaType: "application/json", schema: data }] };
+    }
+  }
+  return null;
+}
+
+/** Map a lambda's parameter names to their declared type short name. */
+function lambdaParamTypes(lambda: TsNode): Map<string, string> {
+  const map = new Map<string, string>();
+  const params = lambda.namedChildren.find((c) => c.type === "parameter_list");
+  if (!params) return map;
+  for (const param of childrenOfType(params, "parameter")) {
+    const typeNode = param.namedChildren.find(
+      (c) =>
+        c.type === "predefined_type" ||
+        c.type === "identifier" ||
+        c.type === "generic_name" ||
+        c.type === "qualified_name",
+    );
+    const nameNode = param.namedChildren.filter((c) => c.type === "identifier").pop();
+    if (typeNode && nameNode) map.set(nameNode.text, typeNode.text.replace(/<.*>/, ""));
+  }
+  return map;
+}
+
+/** Resolve a `db.Todos` DbSet/collection property to its element type name. */
+function resolveCollectionElementType(
+  ownerType: string,
+  property: string,
+  model: CsModelIndex,
+): string | undefined {
+  const def = model.byName.get(ownerType.split(".").pop()!);
+  const wanted = property.toLowerCase();
+  const field = def?.fields.find((f) => f.name.toLowerCase() === wanted);
+  if (!field) return undefined;
+  const m = /(?:DbSet|List|IList|ICollection|IEnumerable|Collection|HashSet)\s*<\s*([A-Za-z_][\w.?]*)\s*>/.exec(
+    field.typeNode.text,
+  );
+  return m?.[1]?.replace(/\?$/, "");
+}
+
+/**
+ * Infer the schema of a data-access return expression, covering EF Core
+ * DbSet terminal methods and JSON parsing. Only provable shapes are returned;
+ * anything else stays unresolved for AI gap review.
+ */
+function inferDataCallSchema(
+  node: TsNode,
+  lambda: TsNode,
+  model: CsModelIndex,
+): JsonSchema | undefined {
+  const invocations =
+    node.type === "invocation_expression"
+      ? [node, ...findAll(node, (n) => n.type === "invocation_expression")]
+      : findAll(node, (n) => n.type === "invocation_expression");
+  const outer = invocations[0];
+  if (!outer) return undefined;
+
+  const outerAccess = outer.namedChildren.find((c) => c.type === "member_access_expression");
+  const method = (outerAccess?.namedChildren[outerAccess.namedChildren.length - 1]?.text ?? "").replace(
+    /<.*>$/,
+    "",
+  );
+
+  // Any receiver's ToString() yields a plain string at runtime.
+  if (method === "ToString" && /\(\s*\)$/.test(outer.text.slice(outer.text.indexOf("ToString")))) {
+    return { type: "string" };
+  }
+
+  // JsonDocument.Parse / JsonSerializer.Deserialize<T>: free-form JSON.
+  if (/Parse|Deserialize/.test(method)) {
+    const receiver = outerAccess?.namedChildren[0];
+    const receiverText = receiver?.text ?? "";
+    if (/JsonDocument|JsonElement|JsonNode|JsonSerializer/.test(receiverText)) {
+      const generic = /Deserialize(?:Async)?\s*<\s*([A-Za-z_][\w.?]*)\s*>/.exec(outer.text);
+      if (generic) return schemaFromCsTypeText(generic[1]!, model);
+      return { type: "object" };
+    }
+  }
+
+  const collectionMethods =
+    /(?:ToListAsync|ToArrayAsync|ToList|ToArray|AsAsyncEnumerable|QueryAsync|Query|ReadAsync)$/;
+  const singleMethods =
+    /(?:FindAsync|Find|FirstAsync|FirstOrDefaultAsync|First|FirstOrDefault|SingleAsync|SingleOrDefaultAsync|Single|SingleOrDefault|LastAsync|LastOrDefault|Last|QueryFirstAsync|QueryFirst|QueryFirstOrDefaultAsync|QueryFirstOrDefault|QuerySingleAsync|QuerySingle|QuerySingleOrDefaultAsync|QuerySingleOrDefault|ExecuteScalarAsync|ExecuteScalar)$/;
+  const countMethods =
+    /(?:CountAsync|LongCountAsync|Count|LongCount|ExecuteDeleteAsync|ExecuteUpdateAsync|ExecuteSqlRawAsync|ExecuteSqlInterpolatedAsync|ExecuteAsync|Execute)$/;
+  const anyMethods = /(?:AnyAsync|Any|AllAsync|All)$/;
+  if (!collectionMethods.test(method) && !singleMethods.test(method) && !countMethods.test(method) && !anyMethods.test(method)) {
+    return undefined;
+  }
+
+  // Dapper/EF expose the row type as the method's own generic argument,
+  // e.g. db.QueryAsync<Todo>(sql) or context.Set<Todo>().ToListAsync().
+  const genericArg = /<\s*([A-Za-z_][\w.?]*(?:<[^>]*>)?)\s*>/.exec(
+    outerAccess?.text ?? "",
+  )?.[1];
+
+  // Locate the `param.DbSet` root of the chain.
+  const paramTypes = lambdaParamTypes(lambda);
+  let elementName = genericArg?.replace(/\?$/, "");
+  for (const ma of findAll(outer, (n) => n.type === "member_access_expression")) {
+    const obj = ma.namedChildren[0];
+    const prop = ma.namedChildren[ma.namedChildren.length - 1];
+    if (obj?.type === "identifier" && prop?.type === "identifier" && paramTypes.has(obj.text)) {
+      elementName = resolveCollectionElementType(paramTypes.get(obj.text)!, prop.text, model);
+      if (elementName) break;
+    }
+  }
+
+  if (countMethods.test(method)) return { type: "integer" };
+  if (anyMethods.test(method)) return { type: "boolean" };
+  if (singleMethods.test(method)) return elementName ? schemaFromCsTypeText(elementName, model) : undefined;
+  if (collectionMethods.test(method)) {
+    const items = elementName ? schemaFromCsTypeText(elementName, model) : {};
+    return { type: "array", items: items ?? {} };
+  }
+  return undefined;
+}
+
 function inferMinimalResponses(
   lambda: TsNode,
   model: CsModelIndex,
   gaps: GapCode[],
 ): DiscoveredResponse[] {
+  // An explicit lambda return type (`Task<Results<Ok<T>, NotFound>>`) is the
+  // authoritative static contract; it was preserved as a marker statement by
+  // the C# normalizer. Prefer it over body inspection.
+  const declared = responsesFromDeclaredReturnType(lambda, model);
+  if (declared) return declared;
+
   const resultCalls = findAll(lambda, (n) => {
     if (n.type !== "invocation_expression") return false;
     const access = n.namedChildren.find((c) => c.type === "member_access_expression");
@@ -824,24 +1307,9 @@ function inferMinimalResponses(
   });
 
   if (!resultCalls.length) {
-    // Expression lambda returning `new Product()` directly.
-    const creation = findFirst(lambda, (n) => n.type === "object_creation_expression");
-    if (creation) {
-      const typeNode = creation.namedChildren.find(
-        (c) => c.type === "identifier" || c.type === "generic_name",
-      );
-      const schema = typeNode ? csTypeToSchema(typeNode, model) : undefined;
-      if (schema && Object.keys(schema).length) {
-        return [
-          {
-            statusCode: "200",
-            description: "",
-            confidence: "medium",
-            content: [{ mediaType: "application/json", schema }],
-          },
-        ];
-      }
-    }    gaps.push("response-unknown");
+    const direct = inferDirectReturn(lambda, model);
+    if (direct) return [direct];
+    gaps.push("response-unknown");
     return [
       {
         statusCode: "200",
@@ -853,6 +1321,7 @@ function inferMinimalResponses(
   }
 
   const responses: DiscoveredResponse[] = [];
+  let explicitEmptySuccess = false;
   for (const call of resultCalls) {
     const access = call.namedChildren.find((c) => c.type === "member_access_expression")!;
     const name = access.namedChildren[access.namedChildren.length - 1]!.text;
@@ -866,9 +1335,20 @@ function inferMinimalResponses(
     if (RESULT_STATUS_METHODS[name]) {
       // TypedResults.BadRequest(problem) / Results.NotFound() / Conflict(value):
       // the first argument, when present, is the (optional) error payload.
+      const status = RESULT_STATUS_METHODS[name]!;
+      if (name === "Problem" || name === "ValidationProblem") {
+        responses.push({
+          statusCode: status,
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/problem+json", schema: problemDetailsSchema() }],
+        });
+        continue;
+      }
       const schema = firstArg ? inferExpressionSchema(firstArg, model, lambda) : undefined;
+      if (!schema && /^2\d\d$/.test(status)) explicitEmptySuccess = true;
       responses.push({
-        statusCode: RESULT_STATUS_METHODS[name]!,
+        statusCode: status,
         description: "",
         confidence: schema ? "high" : "medium",
         ...(schema
@@ -932,6 +1412,23 @@ function inferMinimalResponses(
       });
       continue;
     }
+    const successStatus = SUCCESS_RESULT_STATUS[name];
+    if (successStatus) {
+      // Ok(value?) carries the payload in the first argument; Created*/Accepted*
+      // carry it in the last argument after URI/route metadata.
+      const allArgs = callArgs ? childrenOfType(callArgs, "argument") : [];
+      const payloadArg =
+        name === "Ok" ? firstArg : allArgs.length > 1 ? allArgs[allArgs.length - 1] : undefined;
+      const schema = payloadArg ? inferExpressionSchema(payloadArg, model, lambda) : undefined;
+      if (!schema) explicitEmptySuccess = true;
+      responses.push({
+        statusCode: successStatus,
+        description: "",
+        confidence: schema ? "high" : "medium",
+        ...(schema ? { content: [{ mediaType: "application/json", schema }] } : {}),
+      });
+      continue;
+    }
     const schema = firstArg ? inferExpressionSchema(firstArg, model, lambda) : undefined;
     responses.push({
       statusCode: "200",
@@ -944,10 +1441,32 @@ function inferMinimalResponses(
   }
 
   const merged = mergeResponses(responses);
-  if (merged.some((r) => r.statusCode === "200" && !r.content?.[0]?.schema)) {
+  if (
+    !explicitEmptySuccess &&
+    merged.some((r) => r.statusCode === "200" && !r.content?.[0]?.schema)
+  ) {
     gaps.push("response-unknown");
   }
   return merged;
+}
+
+/** RFC 7807 ProblemDetails / ValidationProblemDetails (adds an errors map). */
+function problemDetailsSchema(): JsonSchema {
+  return {
+    type: "object",
+    properties: {
+      type: { type: "string", nullable: true },
+      title: { type: "string", nullable: true },
+      status: { type: "integer", nullable: true },
+      detail: { type: "string", nullable: true },
+      instance: { type: "string", nullable: true },
+      errors: {
+        type: "object",
+        nullable: true,
+        additionalProperties: { type: "array", items: { type: "string" } },
+      },
+    },
+  };
 }
 
 export function inferExpressionSchema(
@@ -1010,9 +1529,37 @@ export function inferExpressionSchema(
         }
       }
     }
+    // Pattern variable introduced by `await FindAsync(...) is Todo todo` or
+    // `x is Todo t`. Its declared type is the payload schema.
+    if (identifier) {
+      const patternSchema = patternVariableSchema(identifier.text, lambda, model);
+      if (patternSchema) return patternSchema;
+    }
   }
+  // A data-access call (EF terminal, JSON parse) used directly as an argument.
+  const dataSchema = inferDataCallSchema(node, lambda, model);
+  if (dataSchema) return dataSchema;
   // Implicit new() / collection expressions cannot be typed without flow
   // analysis; leave to AI gap resolution.
+  return undefined;
+}
+
+/** Resolve a variable introduced by an `is Type name` pattern to its schema. */
+function patternVariableSchema(name: string, lambda: TsNode, model: CsModelIndex): JsonSchema | undefined {
+  for (const decl of findAll(
+    lambda,
+    (n) =>
+      n.type === "declaration_pattern" ||
+      n.type === "is_pattern_expression" ||
+      n.type === "binary_expression",
+  )) {
+    const text = decl.text;
+    const m = new RegExp(`\\bis\\s+([A-Za-z_][\\w.]*(?:<[^>]+>)?)\\s+${name}\\b`).exec(text);
+    if (m) {
+      const schema = schemaFromCsTypeText(m[1]!, model);
+      if (schema) return schema;
+    }
+  }
   return undefined;
 }
 
@@ -1135,7 +1682,33 @@ function collectParameters(
       continue;
     }
 
-    if (isInjectedService(typeNode) || findAttribute(param, new Set(['FromServices', 'FromKeyedServices']))) continue;
+    // MinimalApis.Extensions Body<T>/Bind<T>/ModelBinder<T>: the inner type is
+    // the request body (string/byte[] -> raw, DTO -> JSON).
+    const bodyInner = bodyWrapperInner(typeNode);
+    if (bodyInner) {
+      const innerText = bodyInner.text.replace(/\?.*$/, "");
+      const isRaw = /^(?:string|char|byte\[\]|String|Byte\[\])$/.test(innerText) || /ReadOnlyMemory<byte>/.test(typeNode.text);
+      const schema = isRaw
+        ? innerText.includes("byte") || innerText.includes("Byte")
+          ? { type: "string", format: "binary" }
+          : { type: "string" }
+        : csTypeToSchema(bodyInner, model);
+      requestBody = {
+        required: !typeNode.type.toString().includes("nullable"),
+        content: [{
+          mediaType: isRaw && schema.format === "binary" ? "application/octet-stream" : "application/json",
+          schema,
+        }],
+        confidence: "medium",
+      };
+      continue;
+    }
+
+    // Response-shaping wrappers are not request input.
+    const bareType = typeNode.text.replace(/<.*>/, "");
+    if (/^(?:SuppressDefaultResponse|ValueTuple|Tuple)$/.test(bareType)) continue;
+
+    if (isInjectedService(typeNode, model) || findAttribute(param, new Set(['FromServices', 'FromKeyedServices']))) continue;
 
     const fromRoute = findAttribute(param, new Set(["FromRoute"]));
     const fromQuery = findAttribute(param, new Set(["FromQuery"]));
