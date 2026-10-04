@@ -21,6 +21,7 @@ import type {
 } from "../core/types.js";
 import type { JsonSchema, DiscoveredUnresolved } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
+import { receiverTypeName } from "../lang/go/index.js";
 import {
   buildGoModelIndex,
   ensureGoComponent,
@@ -83,6 +84,17 @@ function selectorCall(node: TsNode): { receiver: TsNode; method: string } | null
   const field = selector.namedChildren[1];
   if (!receiver || !field || field.type !== "field_identifier") return null;
   return { receiver, method: field.text };
+}
+
+// Base type name of a composite-literal receiver such as `usersResource{}`
+// or `pkg.Resource{}`; null for anything else.
+function compositeReceiverTypeName(node: TsNode): string | null {
+  if (node.type !== "composite_literal") return null;
+  const typeNode = node.namedChildren[0];
+  if (!typeNode) return null;
+  if (typeNode.type === "type_identifier") return typeNode.text;
+  if (typeNode.type === "selector_expression") return typeNode.namedChildren[1]?.text ?? null;
+  return null;
 }
 
 function statusCode(node: TsNode | null | undefined): string | null {
@@ -358,9 +370,21 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
                 : target.namedChildren[0]?.type === "identifier"
                   ? target.namedChildren[0].text
                   : null;
-              const factory = factoryName
+              let factory: GoFunction | undefined = factoryName
                 ? analysis.functions.get(factoryName)?.find((fn) => fn.file === file.path)
                 : undefined;
+              // Method-value factory on a value, e.g. `usersResource{}.Routes()`.
+              if (!factory && factorySel) {
+                const receiverType = compositeReceiverTypeName(factorySel.receiver);
+                if (receiverType) {
+                  const matches = analysis.methods.filter(
+                    (m) =>
+                      m.name === factorySel.method &&
+                      receiverTypeName(m) === receiverType,
+                  );
+                  factory = matches.find((m) => m.file === file.path) ?? matches[0];
+                }
+              }
               if (factory?.body) collectFactory(factory, joinPath(prefix, mountPrefix), visited);
             }
           }
@@ -374,7 +398,12 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         const returnNames = findAll(fn.body, (n) => n.type === "return_statement")
           .flatMap((statement) => {
             const list = statement.namedChildren.find((c) => c.type === "expression_list");
-            return list?.namedChildren.filter((c) => c.type === "identifier").map((c) => c.text) ?? [];
+            const inList = list?.namedChildren.filter((c) => c.type === "identifier").map((c) => c.text) ?? [];
+            // Single-value `return r` exposes the identifier directly.
+            const direct = statement.namedChildren
+              .filter((c) => c.type === "identifier")
+              .map((c) => c.text);
+            return [...inList, ...direct];
           });
         for (const routerName of routersInBody(fn.body)) {
           if (returnNames.includes(routerName)) {

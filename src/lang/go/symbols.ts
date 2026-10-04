@@ -89,7 +89,20 @@ export function goExpressionType(node:TsNode,analysis:GoAnalysis,depth=0):TsNode
   return values[pos]?goExpressionType(values[pos]!,analysis,depth+1):undefined;
  }
  const lists=owner.namedChildren.filter(n=>n.type==='parameter_list'&&n.id!==owner?.childForFieldName('result')?.id);
- return lists.flatMap(list=>list.namedChildren).find(p=>p.namedChildren.some(c=>c.type==='identifier'&&c.text===node.text))?.childForFieldName('type')??undefined;
+ const fromOwner=lists.flatMap(list=>list.namedChildren).find(p=>p.namedChildren.some(c=>c.type==='identifier'&&c.text===node.text))?.childForFieldName('type');
+ if(fromOwner)return fromOwner;
+ // Closure capture: a func_literal may reference the receiver or parameters
+ // of its enclosing method/function (e.g. `rs.Get` inside a nested Route
+ // callback). Fall back to the nearest enclosing declaration's parameters.
+ if(owner.type==='func_literal'){
+  let outer=owner.parent;
+  while(outer&&!['function_declaration','method_declaration'].includes(outer.type))outer=outer.parent;
+  if(outer){
+   const outerLists=outer.namedChildren.filter(n=>n.type==='parameter_list'&&n.id!==outer?.childForFieldName('result')?.id);
+   return outerLists.flatMap(list=>list.namedChildren).find(p=>p.namedChildren.some(c=>c.type==='identifier'&&c.text===node.text))?.childForFieldName('type')??undefined;
+  }
+ }
+ return undefined;
 }
 /**
  * Resolve a package-level function referenced as `pkg.Func` (or bare `Func`)
