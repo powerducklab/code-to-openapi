@@ -241,11 +241,16 @@ function collectVerbHandlers(expr: TsNode): VerbHandler[] {
   let current: TsNode | null = expr;
   while (current && current.type === "call_expression") {
     const args = childrenOfType(current, "arguments")[0];
-    // Handlers may be plain identifiers (`get(index)`) or scoped paths
-    // (`get(listing::list_articles)`).
-    const handlerArg = args?.namedChildren.find(
-      (c) => c.type === "identifier" || c.type === "scoped_identifier",
-    );
+    // Handlers may be plain identifiers (`get(index)`), scoped paths
+    // (`get(listing::list_articles)`), or service expressions such as
+    // `get(kv_get.layer(CompressionLayer::new()))` / `post_service(kv_set
+    //   .layer(...).with_state(state))`, whose base handler is the receiver
+    // at the bottom of the `.layer`/`.with_state` decoration chain.
+    const handlerArg =
+      args?.namedChildren.find(
+        (c) => c.type === "identifier" || c.type === "scoped_identifier",
+      ) ?? resolveDecoratedHandler(args);
+
     const callee: TsNode | undefined = current.namedChildren.find(
       (c) =>
         c.type === "identifier" ||
@@ -254,7 +259,10 @@ function collectVerbHandlers(expr: TsNode): VerbHandler[] {
     );
 
     if (callee?.type === "field_expression") {
-      const verb = callee.namedChildren.find((c) => c.type === "field_identifier")?.text;
+      const rawVerb = callee.namedChildren.find((c) => c.type === "field_identifier")?.text;
+      // axum exposes `get_service`/`post_service`/... method routers that take
+      // a service rather than a handler function; they bind the same verb.
+      const verb = rawVerb?.replace(/_service$/, "");
       if (verb && VERB_METHODS.has(verb) && handlerArg) {
         out.push({ verb, handler: handlerArg });
       }
@@ -274,6 +282,44 @@ function collectVerbHandlers(expr: TsNode): VerbHandler[] {
     break;
   }
   return out;
+}
+
+/**
+ * Finds the base handler behind a decorated service expression, following the
+ * receiver of `.layer(...)`/`.route_layer(...)`/`.with_state(...)`/`.boxed()`
+ * calls until it reaches the handler identifier/scoped path. Constructor
+ * arguments are deliberately ignored so a layer's own services are not
+ * mistaken for the handler.
+ */
+function resolveDecoratedHandler(args: TsNode | undefined): TsNode | undefined {
+  if (!args) return undefined;
+  let node: TsNode | undefined = args.namedChildren.find(
+    (c) => c.type === "call_expression",
+  );
+  let guard = 0;
+  while (node && guard < 12) {
+    guard += 1;
+    const callee = node.namedChildren.find(
+      (c) =>
+        c.type === "field_expression" ||
+        c.type === "identifier" ||
+        c.type === "scoped_identifier",
+    );
+    if (!callee) return undefined;
+    if (callee.type === "identifier" || callee.type === "scoped_identifier") {
+      return callee;
+    }
+    // field_expression: descend into the receiver (the value before `.layer`).
+    const receiver = callee.namedChildren.find(
+      (c) => c.type === "call_expression" || c.type === "identifier" || c.type === "scoped_identifier",
+    );
+    if (!receiver) return undefined;
+    if (receiver.type === "identifier" || receiver.type === "scoped_identifier") {
+      return receiver;
+    }
+    node = receiver;
+  }
+  return undefined;
 }
 
 function calleeIdentifier(call: TsNode): string | null {
@@ -633,9 +679,35 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
     ];
   }
 
+  // bytes::Bytes / axum::body::Bytes -> raw binary body.
+  if (isBytesType(returnType)) {
+    return [
+      {
+        statusCode: "200",
+        description: "",
+        confidence: "high",
+        content: [
+          { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+        ],
+      },
+    ];
+  }
+
   // Result<T, E> unwrap.
   const resultInner = unwrapNamedGeneric(returnType, "Result");
   if (resultInner) {
+    if (isBytesType(resultInner)) {
+      return [
+        {
+          statusCode: "200",
+          description: "",
+          confidence: "high",
+          content: [
+            { mediaType: "application/octet-stream", schema: { type: "string", format: "binary" } },
+          ],
+        },
+      ];
+    }
     const schema = rustTypeToSchema(resultInner, model);
     if (Object.keys(schema).length) {
       return [
@@ -772,6 +844,11 @@ function isTextType(node: TsNode): boolean {
     return node.text.replace(/^&/, "").replace(/'[a-z_]+\s*/g, "").trim() === "str";
   }
   return node.type === "type_identifier" && node.text === "String";
+}
+
+function isBytesType(node: TsNode): boolean {
+  // bytes::Bytes / axum::body::Bytes surface as a bare `Bytes` type identifier.
+  return node.type === "type_identifier" && node.text === "Bytes";
 }
 
 function normalizeRoute(raw: string): string {
