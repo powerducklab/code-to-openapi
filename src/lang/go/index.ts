@@ -97,6 +97,15 @@ export function formTag(field: GoField): string | null {
   return value.split(",")[0];
 }
 
+/** True when a go-playground/validator `validate:"required"` tag is present. */
+export function validateRequiredTag(field: GoField): boolean {
+  const tag = parseTag(field.tag);
+  if (!tag) return false;
+  const match = tag.match(/validate:"([^"]*)"/);
+  if (!match) return false;
+  return match[1].split(",").includes("required");
+}
+
 /** Parse named and anonymous struct fields with the same tag semantics. */
 export function goStructFields(structType: TsNode): GoField[] {
   const list = structType.namedChildren.find(node => node.type === "field_declaration_list");

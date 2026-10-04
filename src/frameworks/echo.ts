@@ -34,7 +34,7 @@ import {
   resolveLocalType,
   type GoModelIndex,
 } from "../lang/go/schema.js";
-import { literalSchema, scalarLiteral } from "../lang/go/httphandler.js";
+import { convertedParameterSchema, literalSchema, scalarLiteral } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   findAll,
@@ -225,6 +225,7 @@ interface RouteSite {
   params: string[];
   handler: TsNode | null;
   origin: SourceLocation;
+  groupVar: string | null;
 }
 
 /** Resolve a c.JSON payload to a schema (constructor / local var / literal). */
@@ -319,7 +320,7 @@ function analyzeEchoHandler(
       if (sel.method === "Param") {
         const name = literalString(args[0]);
         if (name && declaredParams.includes(name) && !parameters.some((p) => p.name === name && p.in === "path")) {
-          parameters.push({ name, in: "path", required: true, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "path", required: true, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -327,7 +328,7 @@ function analyzeEchoHandler(
       if (sel.method === "QueryParam") {
         const name = literalString(args[0]);
         if (name && !parameters.some((p) => p.name === name && p.in === "query")) {
-          parameters.push({ name, in: "query", required: false, schema: { type: "string" }, confidence: "high" });
+          parameters.push({ name, in: "query", required: false, schema: convertedParameterSchema(call, analysis), confidence: "high" });
         }
         continue;
       }
@@ -493,13 +494,18 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: DiscoveredUnresolved[] = [];
     const modelIndex = buildGoModelIndex(analysis);
-    const inputModel: GoModelIndex = {...modelIndex, input: true, components: new Map()};
+    // Echo handlers validate bound requests with c.Validate(r), which runs
+    // go-playground/validator `validate:"required"` tags.
+    const usesValidator = [...analysis.files.values()].some((f) =>
+      findAll(f.root, (n) => n.type === "call_expression").some((n) => selectorCall(n)?.method === "Validate"),
+    );
+    const inputModel: GoModelIndex = {...modelIndex, input: true, validated: usesValidator, components: new Map()};
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
     // Echo instances and groups: name -> prefix.
     const echoVars = new Map<string, string>();
-    const groupDecls: Array<{ name: string; parent: string; prefix: string }> = [];
+    const groupDecls: Array<{ name: string; parent: string; prefix: string; middleware: TsNode[] }> = [];
 
     for (const file of analysis.files.values()) {
       for (const decl of findAll(file.root, (n) => n.type === "short_var_declaration")) {
@@ -521,10 +527,11 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
             const ctor = (analysis.functions.get("New") ?? []).find((f) => f.node.text.includes("echo.New("));
             if (ctor) echoVars.set(name.text, "");
           }
-          // g := e.Group("/api")
+          // g := e.Group("/api", middleware...)
           if (sel.method === "Group" && sel.receiver.type === "identifier" && name) {
-            const prefix = literalString(positionalArguments(call)[0]) ?? "";
-            groupDecls.push({ name: name.text, parent: sel.receiver.text, prefix });
+            const groupArgs = positionalArguments(call);
+            const prefix = literalString(groupArgs[0]) ?? "";
+            groupDecls.push({ name: name.text, parent: sel.receiver.text, prefix, middleware: groupArgs.slice(1) });
           }
         }
       }
@@ -573,6 +580,7 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
           params,
           handler: args[1] ?? null,
           origin: { file: file.path, line: call.startPosition.row + 1 },
+          groupVar: sel.receiver.text,
         });
       }
 
@@ -583,6 +591,31 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
         if (sel.method === "Start" && sel.receiver.type === "identifier" && echoVars.has(sel.receiver.text)) {
           const addr = literalString(positionalArguments(call)[0]);
           if (addr) servers.add(addrToUrl(addr));
+        }
+      }
+    }
+
+    // Resolve group-level middleware contracts (e.g. JWT returning 401/403) so
+    // protected routes inherit the authentication error responses.
+    const groupContracts = new Map<string, GroupMiddlewareContract>();
+    for (const group of groupDecls) {
+      for (const mw of group.middleware) {
+        const contract = resolveGroupMiddleware(mw, analysis, modelIndex);
+        if (contract) {
+          const previous = groupContracts.get(group.name);
+          if (previous) {
+            const merged = new Map<string, RouteCandidate["responses"][number]>();
+            for (const r of [...previous.responses, ...contract.responses]) {
+              const p = merged.get(r.statusCode);
+              merged.set(r.statusCode, p ? mergeResponseVariants(p, r) : r);
+            }
+            groupContracts.set(group.name, {
+              responses: [...merged.values()],
+              skipGetExcept: contract.skipGetExcept ?? previous.skipGetExcept,
+            });
+          } else {
+            groupContracts.set(group.name, contract);
+          }
         }
       }
     }
@@ -628,6 +661,24 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
           };
 
       const confidence: Confidence = evidence.gaps.size > 0 ? "medium" : "high";
+
+      // Inherit group middleware responses (authentication 401/403), honoring a
+      // Skipper that exposes GET requests publicly.
+      const groupContract = site.groupVar ? groupContracts.get(site.groupVar) : null;
+      if (groupContract) {
+        const skipped = groupContract.skipGetExcept !== null
+          && site.method === "get" && site.path !== groupContract.skipGetExcept;
+        if (!skipped) {
+          const byStatus = new Map<string, RouteCandidate["responses"][number]>();
+          for (const r of evidence.responses) byStatus.set(r.statusCode, r);
+          for (const mr of groupContract.responses) {
+            const previous = byStatus.get(mr.statusCode);
+            byStatus.set(mr.statusCode, previous ? mergeResponseVariants(previous, mr) : mr);
+          }
+          evidence.responses = [...byStatus.values()];
+        }
+      }
+
       routes.push({
         method: site.method,
         path: site.path,
@@ -656,6 +707,112 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
     };
   },
 };
+
+interface GroupMiddlewareContract {
+  responses: RouteCandidate["responses"];
+  // When the middleware config skips GET requests except one path (a JWT
+  // Skipper), only that GET path inherits the middleware responses.
+  skipGetExcept: string | null;
+}
+
+/** Resolve a group middleware argument (variable or constructor call) to the
+ * status responses its per-request closure emits. */
+function resolveGroupMiddleware(
+  expr: TsNode,
+  analysis: GoAnalysis,
+  modelIndex: GoModelIndex,
+): GroupMiddlewareContract | null {
+  let call: TsNode | undefined = expr;
+  // `jwtMiddleware := middleware.JWT(secret)` -> follow the local variable.
+  if (expr.type === "identifier") {
+    let resolved: TsNode | undefined;
+    for (const file of analysis.files.values()) {
+      for (const decl of findAll(file.root, (n) => n.type === "short_var_declaration")) {
+        const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
+        const left = lists[0];
+        const right = lists[lists.length - 1];
+        if (!left || !right) continue;
+        const idx = left.namedChildren.findIndex((c) => c.type === "identifier" && c.text === expr.text);
+        if (idx >= 0) {
+          resolved = right.namedChildren[idx] ?? right.namedChildren[0];
+          break;
+        }
+      }
+      if (resolved) break;
+    }
+    if (!resolved) return null;
+    call = resolved;
+  }
+  if (call.type !== "call_expression") return null;
+  const calleeNode = call.namedChildren[0];
+  const callee = selectorCall(call);
+  const fnName = callee?.method ?? (calleeNode?.type === "identifier" ? calleeNode.text : null);
+  let fn = fnName ? ((analysis.functions.get(fnName) ?? [])[0] ?? null) : null;
+  for (let hop = 0; hop < 4 && fn?.body; hop++) {
+    if (findAll(fn.body, (n) => n.type === "func_literal").length > 0) break;
+    const returned = findAll(fn.body, (n) => n.type === "return_statement")
+      .flatMap((r) => findAll(r, (c) => c.type === "call_expression"))
+      .find((c) => {
+        const calleeNode = c.namedChildren[0];
+        const name = calleeNode?.type === "identifier" ? calleeNode.text : selectorCall(c)?.method;
+        return !!name && (analysis.functions.get(name) ?? []).length > 0;
+      });
+    const returnedCallee = returned ? returned.namedChildren[0] : null;
+    const nextName = returnedCallee?.type === "identifier" ? returnedCallee.text : (returned ? selectorCall(returned)?.method : null);
+    const nextFn = nextName ? (analysis.functions.get(nextName) ?? [])[0] : null;
+    if (!nextFn || nextFn === fn) break;
+    fn = nextFn;
+  }
+  if (!fn?.body) return null;
+
+  // Select the request-handling closure: the func literal whose own block emits
+  // c.JSON calls, excluding calls nested inside other (callback) literals.
+  const ownedJsonCount = (literal: TsNode): number => {
+    const block = findFirst(literal, (n) => n.type === "block") ?? literal;
+    return findAll(block, (n) => {
+      if (n.type !== "call_expression" || selectorCall(n)?.method !== "JSON") return false;
+      let owner = n.parent;
+      while (owner && owner.id !== block.id) {
+        if (owner.type === "func_literal") return false;
+        owner = owner.parent;
+      }
+      return true;
+    }).length;
+  };
+  const literals = findAll(fn.body, (n) => n.type === "func_literal")
+    .filter((l) => ownedJsonCount(l) > 0)
+    .sort((a, b) => ownedJsonCount(b) - ownedJsonCount(a));
+  const closure = literals[0];
+  const block = closure ? (findFirst(closure, (n) => n.type === "block") ?? closure) : fn.body;
+
+  const responses: RouteCandidate["responses"] = [];
+  for (const jsonCall of findAll(block, (n) => n.type === "call_expression")) {
+    const sel = selectorCall(jsonCall);
+    if (sel?.method !== "JSON") continue;
+    const jsonArgs = positionalArguments(jsonCall);
+    const status = statusCode(jsonArgs[0]);
+    if (!status) continue;
+    const schema = payloadSchema(jsonArgs[1], block, analysis, modelIndex);
+    responses.push({
+      statusCode: status,
+      description: "",
+      confidence: schema ? "high" : "medium",
+      ...(schema ? { content: [{ mediaType: "application/json", schema, confidence: "high" as Confidence }] } : {}),
+    });
+  }
+
+  // Detect a JWTConfig Skipper of the form
+  // `c.Request().Method == "GET" && c.Path() != "/api/articles/feed"`.
+  let skipGetExcept: string | null = null;
+  const callText = call.text;
+  if (/Skipper/.test(callText)) {
+    const pathMatch = callText.match(/Path\(\)\s*!==?\s*"([^"]+)"/);
+    if (pathMatch && /Method[^\n;]{0,40}==\s*"GET"/.test(callText)) {
+      skipGetExcept = pathMatch[1]!;
+    }
+  }
+  return responses.length ? { responses, skipGetExcept } : null;
+}
 
 function dedupeRoutes(routes: RouteCandidate[]): RouteCandidate[] {
   const seen = new Map<string, RouteCandidate>();

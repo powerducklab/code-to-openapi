@@ -317,7 +317,7 @@ export function convertedParameterSchema(call: TsNode, analysis: GoAnalysis, dep
     return names.some(c => c.type === "identifier" && c.text === converter.receiver.text);
   });
   if (!imported || shadowed) return {type:"string"};
-  if (converter.method === "Atoi") return {type:"integer"};
+  if (converter.method === "Atoi" || converter.method === "ParseInt" || converter.method === "ParseUint") return {type:"integer"};
   if (converter.method === "ParseBool") return {type:"boolean"};
   if (converter.method === "ParseFloat") return {type:"number"};
   return {type:"string"};

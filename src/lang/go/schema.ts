@@ -609,6 +609,17 @@ function narrowNonNullPaths(schema: JsonSchema, segments: string[], index: GoMod
     schema = inlined;
   }
   if (depth > 8 || segments.length === 0) return nonNullGoSchema(schema);
+  // Pointer field encoded as anyOf[ref, null]: descend into the non-null
+  // branch while carrying the remaining segments. At the path end the branch
+  // above removes null via nonNullGoSchema.
+  if (Array.isArray(schema.anyOf)) {
+    return {
+      ...schema,
+      anyOf: schema.anyOf.map(branch =>
+        branch.type === "null" ? branch : narrowNonNullPaths(branch, segments, index, depth),
+      ),
+    };
+  }
   const [head, ...rest] = segments;
   if (head === "[]") {
     if (schema.items) return { ...schema, items: narrowNonNullPaths(schema.items as JsonSchema, rest, index, depth + 1) };
@@ -677,7 +688,6 @@ function constructorNonNullPaths(
       if (init?.kind === "object" && init.typeName === rootTypeName) receiver = id.text;
     });
   }
-  if (!receiver) return paths;
 
   const rootStruct = index.byName.get(rootTypeName);
   if (!rootStruct) return paths;
@@ -708,6 +718,35 @@ function constructorNonNullPaths(
       if (init?.kind === "object" && init.typeName) objectLocals.set(id.text, init.typeName);
     });
   }
+
+  // Positional embedded object returned as `return &Root{localObj}`: map the
+  // nested local's proven fields under the positional root field (e.g.
+  // `&singleArticleResponse{ar}` binds ar's constructed fields to `article.*`).
+  const embedded = new Map<string, string>();
+  if (!receiver) {
+    for (const ret of findAll(body, node => node.type === "return_statement")) {
+      for (const lit of findAll(ret, node => node.type === "composite_literal")) {
+        if (namedStructOf(lit.namedChildren[0]) !== rootTypeName) continue;
+        const literalValue = lit.namedChildren.find(child => child.type === "literal_value");
+        if (!literalValue) continue;
+        // literal_value wraps positional elements in an expression_list.
+        const positional = literalValue.namedChildren
+          .filter(child => child.type !== "keyed_element")
+          .flatMap(child => child.type === "expression_list" ? child.namedChildren : [child]);
+        positional.forEach((exprNode, position) => {
+          const valueExpr = exprNode.type === "literal_element" ? exprNode.namedChildren[0] : exprNode;
+          if (!valueExpr || valueExpr.type !== "identifier") return;
+          const localStruct = objectLocals.get(valueExpr.text);
+          const rootField = rootStruct.fields[position];
+          if (!localStruct || !rootField) return;
+          const rootJson = fieldName(rootField);
+          const fieldStruct = namedStructOf(rootField.typeNode);
+          if (rootJson && (!fieldStruct || fieldStruct === localStruct)) embedded.set(valueExpr.text, rootJson);
+        });
+      }
+    }
+  }
+  if (!receiver && embedded.size === 0) return paths;
 
   const selectorOf = (node: TsNode): { base: string; field: string } | null => {
     if (node.type !== "selector_expression") return null;
@@ -766,6 +805,33 @@ function constructorNonNullPaths(
       if (!value || !nonNilInit(value)) return;
       const subField = fieldJson(binding.elementStruct, target.field);
       if (subField) paths.add(`${binding.parentField}[].${subField}`);
+    });
+  }
+
+  // Pass 3: field construction on positional embedded locals (`ar.TagList =
+  // make(...)` where `return &Root{ar}` nests ar under a root field).
+  for (const assignment of assignments) {
+    const sides = assignment.namedChildren.filter(child => child.type === "expression_list");
+    const lefts = sides[0]?.namedChildren ?? [];
+    const rights = sides[1]?.namedChildren ?? [];
+    lefts.forEach((left, position) => {
+      const target = selectorOf(left);
+      if (!target || !embedded.has(target.base)) return;
+      const rootPrefix = embedded.get(target.base)!;
+      const localStruct = objectLocals.get(target.base)!;
+      const value = rights[position];
+      if (!value) return;
+      if (value.type === "call_expression" && value.namedChildren[0]?.text === "append" && !shadowed("append")) {
+        const args = positionalArguments(value);
+        const sliceTarget = args[0] ? selectorOf(args[0]) : null;
+        if (sliceTarget && sliceTarget.base === target.base) {
+          const subField = fieldJson(localStruct, sliceTarget.field);
+          if (subField) paths.add(`${rootPrefix}.${subField}`);
+        }
+      } else if (nonNilInit(value)) {
+        const subField = fieldJson(localStruct, target.field);
+        if (subField) paths.add(`${rootPrefix}.${subField}`);
+      }
     });
   }
 
@@ -972,12 +1038,18 @@ export function followCallToSchema(
   // pointer/slice nullability. Only applied to a named struct return.
   if (schema) {
     const rootTypeName = namedStructOf(resultType);
-    if (rootTypeName && fn.body && (schema.$ref || schema.type === "object" || Array.isArray(schema.type))) {
+    const anyOfBranches = Array.isArray(schema.anyOf) ? schema.anyOf : [];
+    const hasStructShape =
+      !!schema.$ref || schema.type === "object" || Array.isArray(schema.type) ||
+      anyOfBranches.some((branch: JsonSchema) => !!branch.$ref || branch.type === "object");
+    if (rootTypeName && fn.body && hasStructShape) {
       const nonNullPaths = constructorNonNullPaths(fn, rootTypeName, analysis, index);
       if (nonNullPaths.size) {
         let specialized = inlineSchema(schema, index);
         if (specialized.$ref) specialized = {};
-        if (specialized.type === "object" || Array.isArray(specialized.type)) {
+        const isObjectLike =
+          specialized.type === "object" || Array.isArray(specialized.type) || Array.isArray(specialized.anyOf);
+        if (isObjectLike) {
           for (const path of nonNullPaths) {
             specialized = narrowNonNullPaths(specialized, toPathSegments(path), index);
           }

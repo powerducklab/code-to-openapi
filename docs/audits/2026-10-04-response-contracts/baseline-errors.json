@@ -354,5 +354,376 @@
         "resolution": "Scanner correctly emits application/x-www-form-urlencoded from the EditTagForm `form` tags."
       }
     ]
+  },
+  "echo": {
+    "falseRoutes": [
+      {
+        "method": "put",
+        "path": "/todos/{id}",
+        "evidence": "handler/routes.go registers todos.PUT(\"/id\", h.UpdateTodo) with the literal path \"/id\" (a source bug), not a \":id\" parameter; there is no PUT /todos/{id}.",
+        "resolution": "Scanner faithfully emits put /api/todos/id as registered; the baseline's parameterized {id} route does not exist (see missingRoutes)."
+      }
+    ],
+    "missingRoutes": [
+      {
+        "method": "put",
+        "path": "/api/todos/id",
+        "evidence": "handler/routes.go: todos.PUT(\"/id\", h.UpdateTodo) registers the literal segment /id under the /api/todos group.",
+        "resolution": "Real registered route the baseline misdocuments as /todos/{id}."
+      },
+      {
+        "method": "get",
+        "path": "/swagger/{wildcard}",
+        "evidence": "main.go:35 r.GET(\"/swagger/*\", echoSwagger.WrapHandler) serves the Swagger UI via the echo-swagger middleware.",
+        "resolution": "Real registered route omitted from the swaggo baseline; scanner correctly discovers the wildcard handler."
+      },
+      {
+        "method": "get",
+        "path": "/hello",
+        "evidence": "main.go:36 r.GET(\"/hello\", func(c echo.Context) error { ... }) registers a health-check endpoint.",
+        "resolution": "Real registered route omitted from the swaggo baseline; scanner correctly discovers it."
+      }
+    ],
+    "falseStatuses": [
+      {
+        "method": "post",
+        "path": "/articles",
+        "status": 500,
+        "evidence": "Handler POST /articles never emits HTTP 500; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/articles/{slug}",
+        "status": 400,
+        "evidence": "Handler GET /articles/{slug} never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "put",
+        "path": "/articles/{slug}",
+        "status": 400,
+        "evidence": "Handler PUT /articles/{slug} never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/articles/{slug}/comments",
+        "status": 422,
+        "evidence": "Handler GET /articles/{slug}/comments never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/articles/{slug}/comments",
+        "status": 400,
+        "evidence": "Handler POST /articles/{slug}/comments never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "delete",
+        "path": "/articles/{slug}/comments/{id}",
+        "status": 422,
+        "evidence": "Handler DELETE /articles/{slug}/comments/{id} never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/articles/{slug}/favorite",
+        "status": 400,
+        "evidence": "Handler POST /articles/{slug}/favorite never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "delete",
+        "path": "/articles/{slug}/favorite",
+        "status": 400,
+        "evidence": "Handler DELETE /articles/{slug}/favorite never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/profiles/{username}",
+        "status": 400,
+        "evidence": "Handler GET /profiles/{username} never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/profiles/{username}",
+        "status": 422,
+        "evidence": "Handler GET /profiles/{username} never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/profiles/{username}/follow",
+        "status": 400,
+        "evidence": "Handler POST /profiles/{username}/follow never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "delete",
+        "path": "/profiles/{username}/follow",
+        "status": 201,
+        "evidence": "Handler DELETE /profiles/{username}/follow never emits HTTP 201; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "delete",
+        "path": "/profiles/{username}/follow",
+        "status": 400,
+        "evidence": "Handler DELETE /profiles/{username}/follow never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/tags",
+        "status": 201,
+        "evidence": "Handler GET /tags never emits HTTP 201; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/tags",
+        "status": 400,
+        "evidence": "Handler GET /tags never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/tags",
+        "status": 404,
+        "evidence": "Handler GET /tags never emits HTTP 404; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/tags",
+        "status": 422,
+        "evidence": "Handler GET /tags never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/todos",
+        "status": 400,
+        "evidence": "Handler GET /todos never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/todos",
+        "status": 404,
+        "evidence": "Handler GET /todos never emits HTTP 404; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/todos",
+        "status": 422,
+        "evidence": "Handler GET /todos never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/todos",
+        "status": 500,
+        "evidence": "Handler POST /todos never emits HTTP 500; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/todos/{id}",
+        "status": 400,
+        "evidence": "Handler GET /todos/{id} never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/todos/{id}",
+        "status": 422,
+        "evidence": "Handler GET /todos/{id} never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/user",
+        "status": 400,
+        "evidence": "Handler GET /user never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "get",
+        "path": "/user",
+        "status": 422,
+        "evidence": "Handler GET /user never emits HTTP 422; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "put",
+        "path": "/user",
+        "status": 400,
+        "evidence": "Handler PUT /user never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users",
+        "status": 400,
+        "evidence": "Handler POST /users never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users",
+        "status": 404,
+        "evidence": "Handler POST /users never emits HTTP 404; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users",
+        "status": 500,
+        "evidence": "Handler POST /users never emits HTTP 500; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users/login",
+        "status": 400,
+        "evidence": "Handler POST /users/login never emits HTTP 400; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users/login",
+        "status": 401,
+        "evidence": "Handler POST /users/login never emits HTTP 401; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      },
+      {
+        "method": "post",
+        "path": "/users/login",
+        "status": 404,
+        "evidence": "Handler POST /users/login never emits HTTP 404; status codes are read directly from c.JSON calls in handler/*.go.",
+        "resolution": "The status comes from templated swaggo @Failure/@Success annotations that drifted from the code. Scanner matches the actual c.JSON status set."
+      }
+    ],
+    "falseMismatches": [
+      {
+        "whereContains": " response ",
+        "fieldContains": "/required",
+        "baseline": false,
+        "scanner": true,
+        "evidence": "Every response DTO in handler/response.go declares its fields WITHOUT omitempty, so each key is always present even when its value is empty.",
+        "resolution": "Scanner marks keys required (present) per the actual struct tags; the baseline marks them optional."
+      },
+      {
+        "whereContains": " response ",
+        "fieldContains": "bio/type",
+        "baseline": "string",
+        "scanner": [
+          "string",
+          "null"
+        ],
+        "evidence": "Bio is *string without omitempty: the key is always emitted but the value may be null.",
+        "resolution": "Scanner keeps [string,null]; baseline omits nullability."
+      },
+      {
+        "whereContains": " response ",
+        "fieldContains": "image/type",
+        "baseline": "string",
+        "scanner": [
+          "string",
+          "null"
+        ],
+        "evidence": "Image is *string without omitempty: key present, value nullable.",
+        "resolution": "Scanner keeps [string,null]; baseline omits nullability."
+      },
+      {
+        "whereContains": " response ",
+        "fieldContains": "article/type",
+        "baseline": "object",
+        "scanner": [
+          "object",
+          "null"
+        ],
+        "evidence": "singleArticleResponse.Article is *articleResponse without omitempty: key present, value is a pointer that can be null.",
+        "resolution": "Scanner keeps [object,null]; baseline omits nullability."
+      },
+      {
+        "whereContains": " response ",
+        "fieldContains": "comment/type",
+        "baseline": "object",
+        "scanner": [
+          "object",
+          "null"
+        ],
+        "evidence": "singleCommentResponse.Comment is a pointer field without omitempty: key present, value nullable.",
+        "resolution": "Scanner keeps [object,null]; baseline omits nullability."
+      },
+      {
+        "whereContains": " response ",
+        "fieldContains": "todo/type",
+        "baseline": "object",
+        "scanner": [
+          "object",
+          "null"
+        ],
+        "evidence": "singleTodoResponse.Todo is *todoResponse without omitempty: key present, value nullable.",
+        "resolution": "Scanner keeps [object,null]; baseline omits nullability."
+      },
+      {
+        "whereContains": " response 500 ",
+        "fieldContains": "/type",
+        "evidence": "List handlers (Articles/Feed/Tags/GetTodoList) emit c.JSON(http.StatusInternalServerError, nil) on store errors; nil serializes to JSON null or an empty body, never an errors object.",
+        "resolution": "Scanner reports null exactly as the code does; an error object must not be fabricated.",
+        "baseline": "object"
+      },
+      {
+        "whereContains": " response 500 ",
+        "fieldContains": "errors/",
+        "scanner": null,
+        "evidence": "The 500 branch passes nil to c.JSON, so there is no errors envelope on that path.",
+        "resolution": "No errors object exists on the nil branch; baseline invents one."
+      },
+      {
+        "whereContains": " response 500 ",
+        "fieldContains": "/present",
+        "scanner": null,
+        "evidence": "c.JSON(500, nil) yields a JSON null body with no properties.",
+        "resolution": "Baseline expects an errors.body property that the nil response cannot contain."
+      },
+      {
+        "whereContains": "get /api/profiles/{username} response 200",
+        "evidence": "GetProfile returns newProfileResponse -> profileResponse {profile:{username,bio,image,following}}. The baseline 200 references handler.userResponse {user:{email,token,...}}, the wrong model.",
+        "resolution": "Scanner emits profileResponse matching the code; the baseline references an unrelated user envelope."
+      },
+      {
+        "whereContains": "get /api/todos/{id} response 200",
+        "evidence": "GetTodoById returns newTodoResponse -> singleTodoResponse {todo: *todoResponse}; the baseline 200 references the bare handler.todoResponse, dropping the todo wrapper.",
+        "resolution": "Scanner emits the singleTodoResponse envelope; baseline omits the wrapper layer."
+      },
+      {
+        "whereContains": " request ",
+        "fieldContains": "tagList/type",
+        "baseline": "array",
+        "scanner": [
+          "array",
+          "null"
+        ],
+        "evidence": "On create/update article requests tagList is an optional input slice with no required binding; a client may omit it or send null.",
+        "resolution": "Scanner keeps [array,null] for the request input; the baseline narrows it to a required array."
+      },
+      {
+        "whereContains": "path:id",
+        "fieldContains": "/type",
+        "baseline": "string",
+        "scanner": "integer",
+        "evidence": "todo handlers parse c.Param(\"id\") with strconv.Atoi (handler/todo.go:29,119,156), so the id is an integer.",
+        "resolution": "Scanner emits integer; baseline types it as string."
+      }
+    ]
   }
 }

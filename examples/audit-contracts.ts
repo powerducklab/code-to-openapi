@@ -217,6 +217,8 @@ for(const [path,item] of Object.entries<any>(baseline.paths??{}))for(const metho
   compare(entry.schema,resolve(got.requestBody,actual)?.content?.[media]?.schema,where+' request '+media);
  }
  for(const [status,raw] of Object.entries<any>(op.responses??{})){
+  const falseStatus=(baselineLedger?.falseStatuses??[]).find((r:any)=>r.method===method&&r.path===path&&String(r.status)===String(status));
+  if(falseStatus){baselineErrors.push({where,error:'false baseline status',status,evidence:falseStatus.evidence,resolution:falseStatus.resolution});continue;}
   assertions++;const response=resolve(got.responses?.[status],actual);
   if(!response){errors.push({where,error:'missing response',status});continue;}
   if (/^(1\d\d|204|205|304)$/.test(status)) {
