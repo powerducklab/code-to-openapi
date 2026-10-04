@@ -3,21 +3,127 @@
   "purpose": "Fresh generality batch: real open-source apps pinned to a commit, scanned with an empty ledger. Independent of the 2026-10-04 batch. Roots always point at a coherent application (or a clean example sub-app), never a library monorepo root.",
   "scoring": {
     "gate": 0.96,
-    "axes": ["routeRecall", "routePrecision", "requestCompleteness", "responseCompleteness", "parameterCompleteness", "constraintAccuracy"],
+    "axes": [
+      "routeRecall",
+      "routePrecision",
+      "requestCompleteness",
+      "responseCompleteness",
+      "parameterCompleteness",
+      "constraintAccuracy"
+    ],
     "unknownCountsAsIncorrect": true,
     "notes": "Deterministic = provable from source. AiReview = contract the deterministic pass honestly cannot prove (opaque ORM/service returns, dynamic serializers); routed to the interactive AI gap review where the user accepts/edits/rejects each fragment (tagged x-ai-inferred). These are reported separately, never silently merged."
   },
   "projects": [
-    { "key": "express-boilerplate", "framework": "express", "repo": "hagopj13/node-express-boilerplate", "commit": "179ae84efec61b14206d0305d941daed6c6d07f9", "scanRoot": "", "baseline": "source-verified routes + Joi validations; Mongoose service returns routed to AI review" },
-    { "key": "nest-boilerplate", "framework": "nest", "repo": "brocoders/nestjs-boilerplate", "commit": "9620f159eefe38f47747d02ab162852367c5472c", "scanRoot": "", "baseline": "source-verified controllers; TypeORM service returns routed to AI review" },
-    { "key": "fastapi-fullstack", "framework": "fastapi", "repo": "fastapi/full-stack-fastapi-template", "commit": "1762adac607a1b29cfc4da129557780beea71616", "scanRoot": "backend", "baseline": "FastAPI code-first OpenAPI (runtime)" },
-    { "key": "flask-restx-zoo", "framework": "flask", "repo": "python-restx/flask-restx", "commit": "30abd919e7c6bb2533eef57ec9c2339d7de69b39", "scanRoot": "examples/zoo_app", "baseline": "flask-restx api.model + marshal_with code-first contract" },
-    { "key": "laravel-blog", "framework": "laravel", "repo": "guillaumebriday/laravel-blog", "commit": "c88e307c833708665b0c2d486a8fe633eb4cefd7", "scanRoot": "", "baseline": "routes + FormRequest + API Resources; conditional when()/coalesce fields routed to AI review" },
-    { "key": "fiber-todo-gorm", "framework": "fiber", "repo": "gofiber/recipes", "commit": "47a33121aee2607fcfa49696db0a0d358d844a72", "scanRoot": "todo-app-with-auth-gorm", "baseline": "source-verified handlers + GORM response structs" },
-    { "key": "chi-rest", "framework": "chi", "repo": "go-chi/chi", "commit": "167e1e3bd039d060696b99c8da4e876ae04f42c1", "scanRoot": "_examples/rest", "baseline": "source-verified handlers; panic->500 error path" },
-    { "key": "chi-todos", "framework": "chi", "repo": "go-chi/chi", "commit": "167e1e3bd039d060696b99c8da4e876ae04f42c1", "scanRoot": "_examples/todos-resource", "baseline": "source-verified" },
-    { "key": "axum-kv", "framework": "axum", "repo": "tokio-rs/axum", "commit": "90f299cb721bf930ba26c0f373b8b3d2e8295ec7", "scanRoot": "examples/key-value-store", "baseline": "source-verified handlers + serde structs; unit () -> empty 200" },
-    { "key": "actix-json", "framework": "actix", "repo": "actix/examples", "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6", "scanRoot": "json/json", "baseline": "source-verified handlers + serde MyObj" },
-    { "key": "rocket-serialization", "framework": "rocket", "repo": "rwf2/Rocket", "commit": "3a54d079aef060a8f732bd04ea54b0581a604087", "scanRoot": "examples/serialization", "baseline": "source-verified json! macros + Message struct + 404 catcher" }
+    {
+      "key": "express-boilerplate",
+      "framework": "express",
+      "repo": "hagopj13/node-express-boilerplate",
+      "commit": "179ae84efec61b14206d0305d941daed6c6d07f9",
+      "scanRoot": "",
+      "baseline": "source-verified routes + Joi validations; Mongoose service returns routed to AI review",
+      "expectedRoutes": 14,
+      "falseRoutes": 0
+    },
+    {
+      "key": "nest-boilerplate",
+      "framework": "nest",
+      "repo": "brocoders/nestjs-boilerplate",
+      "commit": "9620f159eefe38f47747d02ab162852367c5472c",
+      "scanRoot": "",
+      "baseline": "source-verified controllers; TypeORM service returns routed to AI review",
+      "expectedRoutes": 19,
+      "falseRoutes": 0
+    },
+    {
+      "key": "fastapi-fullstack",
+      "framework": "fastapi",
+      "repo": "fastapi/full-stack-fastapi-template",
+      "commit": "1762adac607a1b29cfc4da129557780beea71616",
+      "scanRoot": "backend",
+      "baseline": "FastAPI code-first OpenAPI (runtime)",
+      "expectedRoutes": 23,
+      "falseRoutes": 0
+    },
+    {
+      "key": "flask-restx-zoo",
+      "framework": "flask",
+      "repo": "python-restx/flask-restx",
+      "commit": "30abd919e7c6bb2533eef57ec9c2339d7de69b39",
+      "scanRoot": "examples/zoo_app",
+      "baseline": "flask-restx api.model + marshal_with code-first contract",
+      "expectedRoutes": 4,
+      "falseRoutes": 0
+    },
+    {
+      "key": "laravel-blog",
+      "framework": "laravel",
+      "repo": "guillaumebriday/laravel-blog",
+      "commit": "c88e307c833708665b0c2d486a8fe633eb4cefd7",
+      "scanRoot": "",
+      "baseline": "routes + FormRequest + API Resources; conditional when()/coalesce fields routed to AI review",
+      "expectedRoutes": 75,
+      "falseRoutes": 0
+    },
+    {
+      "key": "fiber-todo-gorm",
+      "framework": "fiber",
+      "repo": "gofiber/recipes",
+      "commit": "47a33121aee2607fcfa49696db0a0d358d844a72",
+      "scanRoot": "todo-app-with-auth-gorm",
+      "baseline": "source-verified handlers + GORM response structs",
+      "expectedRoutes": 8,
+      "falseRoutes": 0
+    },
+    {
+      "key": "chi-rest",
+      "framework": "chi",
+      "repo": "go-chi/chi",
+      "commit": "167e1e3bd039d060696b99c8da4e876ae04f42c1",
+      "scanRoot": "_examples/rest",
+      "baseline": "source-verified handlers; panic->500 error path",
+      "expectedRoutes": 13,
+      "falseRoutes": 0
+    },
+    {
+      "key": "chi-todos",
+      "framework": "chi",
+      "repo": "go-chi/chi",
+      "commit": "167e1e3bd039d060696b99c8da4e876ae04f42c1",
+      "scanRoot": "_examples/todos-resource",
+      "baseline": "source-verified",
+      "expectedRoutes": 14,
+      "falseRoutes": 0
+    },
+    {
+      "key": "axum-kv",
+      "framework": "axum",
+      "repo": "tokio-rs/axum",
+      "commit": "90f299cb721bf930ba26c0f373b8b3d2e8295ec7",
+      "scanRoot": "examples/key-value-store",
+      "baseline": "source-verified handlers + serde structs; unit () -> empty 200",
+      "expectedRoutes": 3,
+      "falseRoutes": 0
+    },
+    {
+      "key": "actix-json",
+      "framework": "actix",
+      "repo": "actix/examples",
+      "commit": "1ef1837ef02b52ad9ef936a3f148bbeb211c25a6",
+      "scanRoot": "json/json",
+      "baseline": "source-verified handlers + serde MyObj",
+      "expectedRoutes": 4,
+      "falseRoutes": 0
+    },
+    {
+      "key": "rocket-serialization",
+      "framework": "rocket",
+      "repo": "rwf2/Rocket",
+      "commit": "3a54d079aef060a8f732bd04ea54b0581a604087",
+      "scanRoot": "examples/serialization",
+      "baseline": "source-verified json! macros + Message struct + 404 catcher",
+      "expectedRoutes": 6,
+      "falseRoutes": 0
+    }
   ]
 }
