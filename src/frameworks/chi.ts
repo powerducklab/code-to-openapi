@@ -530,11 +530,32 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
 
       // Entry-point factories: package functions that create a chi router and
       // return it (e.g. `router.New(...) *chi.Mux`), even when `main` lives in
-      // another package and only calls the factory.
+      // another package and only calls the factory. A factory that is only
+      // reached through Mount(...) is a sub-router, not an entry point; its
+      // routes already carry the mount prefix, so scanning it standalone would
+      // emit unreachable, prefix-less duplicates.
+      const mountedFactoryNames = new Set<string>();
+      for (const mountCall of findAll(file.root, (n) => {
+        if (n.type !== "call_expression") return false;
+        const s = selectorCall(n);
+        return s?.method === "Mount";
+      })) {
+        const mountArgs = positionalArguments(mountCall);
+        const target = mountArgs[1];
+        if (target?.type !== "call_expression") continue;
+        const factorySel = selectorCall(target);
+        const name = factorySel
+          ? factorySel.method
+          : target.namedChildren[0]?.type === "identifier"
+            ? target.namedChildren[0].text
+            : null;
+        if (name) mountedFactoryNames.add(name);
+      }
       for (const fn of file.root.namedChildren.filter((c) => c.type === "function_declaration")) {
         const nameNode = fn.namedChildren[0];
         const body = fn.namedChildren.find((c) => c.type === "block");
         if (!body || (nameNode?.type === "identifier" && nameNode.text === "main")) continue;
+        if (nameNode?.type === "identifier" && mountedFactoryNames.has(nameNode.text)) continue;
         const created = routersInBody(body);
         if (created.size === 0) continue;
         const returnsRouter = findAll(body, (n) => n.type === "return_statement").some((rs) => {
