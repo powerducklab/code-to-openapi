@@ -60,7 +60,23 @@ export function goExpressionType(node:TsNode,analysis:GoAnalysis,depth=0):TsNode
  if(depth>12)return;
  if(node.type==='unary_expression'&&node.namedChildren[0])return goExpressionType(node.namedChildren[0],analysis,depth+1);
  if(node.type==='composite_literal')return node.childForFieldName('type')??node.namedChildren[0];
- if(node.type==='call_expression'){const fn=resolveGoCall(node,analysis,depth+1);return fn?goResultType(fn.node):undefined;}
+ // Builtin make([]T, ...)/make(map[K]V, ...)/make(chan T, ...) yields the
+ // container type passed as its first type argument.
+ if(node.type==='call_expression'){
+  const made=builtinMakeType(node,analysis);
+  if(made)return made;
+  const fn=resolveGoCall(node,analysis,depth+1);return fn?goResultType(fn.node):undefined;
+ }
+ // Index expression m[k] / s[i]: value type of a map, element type of a
+ // slice/array. Covers both local containers and package-level vars.
+ if(node.type==='index_expression'){
+  const receiver=node.namedChildren[0];if(!receiver)return;
+  const container=goExpressionType(receiver,analysis,depth+1)??packageVarType(receiver,analysis);
+  if(!container)return;
+  if(container.type==='map_type')return container.namedChildren[1]??container.namedChildren.at(-1);
+  if(container.type==='slice_type'||container.type==='array_type')return container.namedChildren[0];
+  return;
+ }
  if(node.type==='selector_expression'){
   const receiver=node.namedChildren[0],field=node.namedChildren[1];if(!receiver||!field)return;
   const type=goExpressionType(receiver,analysis,depth+1);const def=type?goTypeDeclaration(type,analysis):undefined;
@@ -85,7 +101,11 @@ export function goExpressionType(node:TsNode,analysis:GoAnalysis,depth=0):TsNode
   const names=declaration.childForFieldName('left')?.namedChildren??declaration.namedChildren.filter(c=>c.type==='identifier');
   const pos=names.findIndex(c=>c.text===node.text);
   const values=(declaration.childForFieldName('right')??declaration.childForFieldName('value'))?.namedChildren??[];
-  if(values.length===1&&values[0]?.type==='call_expression'){const fn=resolveGoCall(values[0],analysis,depth+1);return fn?goResultType(fn.node,pos):undefined;}
+  if(values.length===1&&values[0]?.type==='call_expression'){
+  const made=builtinMakeType(values[0]!,analysis);
+  if(made)return made;
+  const fn=resolveGoCall(values[0],analysis,depth+1);return fn?goResultType(fn.node,pos):undefined;
+ }
   return values[pos]?goExpressionType(values[pos]!,analysis,depth+1):undefined;
  }
  const lists=owner.namedChildren.filter(n=>n.type==='parameter_list'&&n.id!==owner?.childForFieldName('result')?.id);
@@ -102,7 +122,33 @@ export function goExpressionType(node:TsNode,analysis:GoAnalysis,depth=0):TsNode
    return outerLists.flatMap(list=>list.namedChildren).find(p=>p.namedChildren.some(c=>c.type==='identifier'&&c.text===node.text))?.childForFieldName('type')??undefined;
   }
  }
- return undefined;
+ // Package-level variable, e.g. `var users = map[int]user{...}`.
+ return packageVarType(node,analysis);
+}
+
+/** Static type of a package-level variable identifier, from its initializer. */
+function packageVarType(node:TsNode,analysis:GoAnalysis):TsNode|undefined{
+ if(node.type!=='identifier')return;
+ const variable=analysis.vars.get(node.text);
+ const value=variable?.value;
+ if(!value)return;
+ if(value.type==='composite_literal')return value.childForFieldName('type')??value.namedChildren[0];
+ if(value.type==='call_expression'){
+  const made=builtinMakeType(value,analysis);
+  if(made)return made;
+  const fn=resolveGoCall(value,analysis,1);
+  return fn?goResultType(fn.node):undefined;
+ }
+ return;
+}
+
+/** Container type passed to a builtin `make([]T, ...)` / `make(map[K]V,...)`. */
+function builtinMakeType(call:TsNode,analysis:GoAnalysis):TsNode|undefined{
+ const callee=call.namedChildren[0];
+ if(callee?.type!=='identifier'||callee.text!=='make'||analysis.functions.has('make'))return;
+ const args=call.childForFieldName('arguments')??call.namedChildren.find(c=>c.type==='argument_list');
+ const first=args?.namedChildren?.[0]??call.namedChildren.find(c=>['slice_type','map_type','channel_type'].includes(c.type));
+ return first;
 }
 /**
  * Resolve a package-level function referenced as `pkg.Func` (or bare `Func`)

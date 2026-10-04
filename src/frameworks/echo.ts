@@ -274,13 +274,17 @@ function echoContexts(fn: GoFunction, analysis: GoAnalysis): Set<string> {
   const aliases = new Set<string>();
   for (const spec of file ? findAll(file.root, node => node.type === "import_spec") : []) {
     const path = spec.childForFieldName("path") ?? spec.namedChildren.find(node => node.type === "interpreted_string_literal");
-    if (path && /"github\.com\/labstack\/echo(?:\/v[34])?"/.test(path.text)) aliases.add(spec.childForFieldName("name")?.text ?? "echo");
+    if (path && /"github\.com\/labstack\/echo(?:\/v\d+)?"/.test(path.text)) aliases.add(spec.childForFieldName("name")?.text ?? "echo");
   }
   const result = new Set<string>();
   const parameters = fn.node.childForFieldName("parameters");
   for (const parameter of parameters?.namedChildren ?? []) {
     const type = parameter.childForFieldName("type");
-    if (!type || ![...aliases].some(alias => type.text === `${alias}.Context`)) continue;
+    // Handlers may take the context by value (`c echo.Context`) or by pointer
+    // (`c *echo.Context`); both are valid across echo major versions.
+    if (!type) continue;
+    const normalized = type.text.replace(/^\*/, "");
+    if (![...aliases].some(alias => normalized === `${alias}.Context`)) continue;
     for (const name of parameter.namedChildren.filter(node => node.type === "identifier")) result.add(name.text);
   }
   return result;
