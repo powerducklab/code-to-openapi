@@ -141,7 +141,14 @@ interface SerializerIndex {
   analysis: PythonAnalysis;
   /** Required field names proven from built-in external Django models (auth.User). */
   externalRequired: Map<string, Set<string>>;
+  /** Serializers with at least one field whose allowed values are only known at
+   *  runtime (e.g. dynamic choices). The field keeps its deterministic type and
+   *  carries `x-dynamic-enum`; this flag is informational and never fatal. */
   dynamicConstraints: Set<string>;
+  /** Serializers with at least one field whose very type cannot be proven
+   *  statically (e.g. an unparameterized DecimalField). Those operations cannot
+   *  emit a complete contract and are honestly marked unknown. */
+  untypedConstraints: Set<string>;
   bindings: ReturnType<typeof pythonBindingResolver>;
 }
 
@@ -307,7 +314,7 @@ function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<str
       if (values.length && values.every(v => v !== null)) schema.enum = values;
       else { index.dynamicConstraints.add(cls.name); schema["x-dynamic-enum"] = true; }
     } else if (choices) { index.dynamicConstraints.add(cls.name); schema["x-dynamic-enum"] = true; }
-    if (kind === "DecimalField" && !schema.type) index.dynamicConstraints.add(cls.name);
+    if (kind === "DecimalField" && !schema.type) index.untypedConstraints.add(cls.name);
     result[name] = schema;
   }
   if (externalRequired.size) index.externalRequired.set(cls.name, externalRequired);
@@ -345,7 +352,7 @@ function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<s
     const call = field.default;
     if (!call || call.type !== "call") continue;
     const schema = drfFieldSchema(call, index, seen);
-    if (callName(call.namedChildren[0] ?? null) === "DecimalField" && !schema.type) index.dynamicConstraints.add(cls.name);
+    if (callName(call.namedChildren[0] ?? null) === "DecimalField" && !schema.type) index.untypedConstraints.add(cls.name);
     if (keywordArgument(call, "read_only")?.type === "true" || ["ReadOnlyField", "SerializerMethodField", "HyperlinkedIdentityField"].includes(callName(call.namedChildren[0] ?? null) ?? "")) schema.readOnly = true;
     if (keywordArgument(call, "write_only")?.type === "true") schema.writeOnly = true;
     for (const [argument, key] of [["min_length", "minLength"], ["max_length", "maxLength"], ["min_value", "minimum"], ["max_value", "maximum"]]) {
@@ -382,6 +389,7 @@ function buildSerializerIndex(analysis: PythonAnalysis): SerializerIndex {
     classNames: new Set(),
     componentsByName: new Map(),
     dynamicConstraints: new Set(),
+    untypedConstraints: new Set(),
     externalRequired: new Map(),
     bindings: pythonBindingResolver(analysis),
     analysis,
@@ -886,7 +894,10 @@ function buildViewsetRoute(
   } & CommonRouteInput,
 ): RouteCandidate {
   const gaps = new Set<GapCode>();
-  if (input.serializerName && input.serializers.dynamicConstraints.has(input.serializerName)) {
+  // Only an unprovable field TYPE invalidates the whole contract. A field with
+  // a known type whose enum values are computed at runtime keeps that type and
+  // is flagged per-field with `x-dynamic-enum`, so the operation stays complete.
+  if (input.serializerName && input.serializers.untypedConstraints.has(input.serializerName)) {
     gaps.add("response-schema-unknown");
     if (["create", "update", "partial_update"].includes(input.action)) gaps.add("body-schema-unknown");
   }
