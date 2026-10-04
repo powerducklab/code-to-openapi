@@ -91,10 +91,14 @@ export const actixPack: FrameworkPack<RustAnalysis> = {
     // handler function name -> scope prefixes it is .service()'d under.
     const handlerPrefixes = new Map<string, string[]>();
 
+    // Index every function by unqualified name together with its module chain,
+    // so scoped handlers such as `api::index` resolve across files/modules.
+    const handlerIndex = buildHandlerIndex(analysis);
+
     for (const [rel, file] of analysis.files) {
       collectServiceRegistrations(file.root, handlerPrefixes);
       collectMacroHandlers(analysis, file.root, rel, model, handlerPrefixes, candidates);
-      collectResourceRoutes(analysis, file.root, rel, model, candidates);
+      collectResourceRoutes(analysis, file.root, rel, model, handlerIndex, candidates);
     }
 
     const components = [...model.components.entries()].map(([name, schema]) => ({
@@ -280,11 +284,88 @@ function scopePrefixOf(serviceCall: TsNode): string {
 // resource().route() chains
 // ---------------------------------------------------------------------------
 
+interface IndexedHandler {
+  fn: TsNode;
+  mods: string[];
+}
+
+/** Module segments contributed by a file path (src/api/mod.rs -> ["api"]). */
+function fileModuleChain(path: string): string[] {
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  const fileName = parts.pop() ?? "";
+  if (fileName === "main.rs" || fileName === "lib.rs") return [];
+  if (fileName === "mod.rs") return parts.slice(parts.lastIndexOf("src") + 1);
+  const stem = fileName.replace(/\.rs$/, "");
+  const afterSrc = parts.slice(parts.lastIndexOf("src") + 1);
+  return [...afterSrc, stem];
+}
+
+/** Nested `mod foo { ... }` items wrapping a node, outermost first. */
+function enclosingModItems(node: TsNode): string[] {
+  const mods: string[] = [];
+  let cur = node.parent;
+  while (cur) {
+    if (cur.type === "mod_item") {
+      const name = cur.namedChildren.find((c) => c.type === "identifier")?.text;
+      if (name) mods.unshift(name);
+    }
+    cur = cur.parent;
+  }
+  return mods;
+}
+
+/** Unqualified function name -> every definition with its module chain. */
+function buildHandlerIndex(analysis: RustAnalysis): Map<string, IndexedHandler[]> {
+  const index = new Map<string, IndexedHandler[]>();
+  for (const [path, file] of analysis.files) {
+    const fileMods = fileModuleChain(path);
+    for (const fn of findAll(file.root, (n) => n.type === "function_item")) {
+      const name = fn.namedChildren.find((c) => c.type === "identifier")?.text;
+      if (!name) continue;
+      const mods = [...fileMods, ...enclosingModItems(fn)];
+      const list = index.get(name);
+      const entry = { fn, mods };
+      if (list) list.push(entry);
+      else index.set(name, [entry]);
+    }
+  }
+  return index;
+}
+
+/**
+ * Resolves a possibly module-qualified handler reference (`api::index`,
+ * `crate::api::index`) to a function, preferring a matching module chain.
+ */
+function resolveHandler(index: Map<string, IndexedHandler[]>, reference: string): TsNode | undefined {
+  const segments = reference.split("::").map((s) => s.trim()).filter(Boolean);
+  const bare = segments[segments.length - 1];
+  if (!bare) return undefined;
+  const candidates = index.get(bare);
+  if (!candidates || candidates.length === 0) return undefined;
+  const modPath = segments.slice(0, -1).filter((s) => s !== "crate" && s !== "self" && s !== "super");
+  if (modPath.length === 0) return candidates[0]!.fn;
+  let best = candidates[0]!;
+  let bestScore = -1;
+  for (const candidate of candidates) {
+    const mods = candidate.mods;
+    let score = 0;
+    const tail = mods.slice(mods.length - modPath.length);
+    if (tail.length === modPath.length && modPath.every((m, i) => tail[i] === m)) score = 3;
+    else if (mods.includes(modPath[modPath.length - 1]!)) score = 1;
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return best.fn;
+}
+
 function collectResourceRoutes(
   analysis: RustAnalysis,
   root: TsNode,
   rel: string,
   model: RustModelIndex,
+  handlerIndex: Map<string, IndexedHandler[]>,
   out: RouteCandidate[],
 ): void {
   for (const routeCall of findAll(root, (n) => n.type === "call_expression")) {
@@ -305,7 +386,7 @@ function collectResourceRoutes(
     const routeArg = childrenOfType(routeCall, "arguments")[0]?.namedChildren[0];
     const { verb, handlerName } = parseRouteTo(routeArg);
     if (!verb || !handlerName) continue;
-    const fn = analysis.functions.get(handlerName)?.[0];
+    const fn = resolveHandler(handlerIndex, handlerName);
     if (!fn) continue;
 
     const pathParams = new Set([...route.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!));
@@ -581,6 +662,37 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
     }
     // .finish() / plain builder with no body.
     responses.push({ statusCode: status, description: "", confidence: "high" });
+  }
+
+  // web::Redirect::to(path)[.using_status_code(StatusCode::FOUND)] — a redirect
+  // carries a Location header and no body; the default status is 302.
+  const redirectStatusCodes: Record<string, string> = {
+    MOVED_PERMANENTLY: "301",
+    FOUND: "302",
+    SEE_OTHER: "303",
+    TEMPORARY_REDIRECT: "307",
+    PERMANENT_REDIRECT: "308",
+  };
+  for (const toId of findAll(
+    fn,
+    (n) => n.type === "scoped_identifier" && n.text === "web::Redirect::to",
+  )) {
+    let redirectStatus = "302";
+    let call: TsNode | null | undefined = toId.parent;
+    let outer = call?.parent?.type === "field_expression" ? call.parent : null;
+    while (outer && outer.type === "field_expression") {
+      const enclosing = outer.parent;
+      const method = outer.namedChildren.find((c) => c.type === "field_identifier")?.text;
+      if (enclosing?.type === "call_expression" && method === "using_status_code") {
+        const code = childrenOfType(enclosing, "arguments")[0]?.namedChildren[0]?.text
+          .split("::")
+          .pop();
+        if (code && redirectStatusCodes[code]) redirectStatus = redirectStatusCodes[code]!;
+      }
+      call = enclosing;
+      outer = enclosing?.parent?.type === "field_expression" ? enclosing.parent : null;
+    }
+    responses.push({ statusCode: redirectStatus, description: "", confidence: "high" });
   }
 
   if (!responses.length) {

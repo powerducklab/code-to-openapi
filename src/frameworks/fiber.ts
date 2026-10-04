@@ -41,6 +41,7 @@ import {
 import { resolveGoPackageFunction } from "../lang/go/symbols.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
+  childrenOfType,
   findAll,
   findFirst,
   literalString,
@@ -422,54 +423,100 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
-    // Fiber apps and groups: name -> prefix.
-    const appVars = new Map<string, string>();
-    const groupDecls: Array<{ name: string; parent: string; prefix: string }> = [];
+    // Router/group variables are resolved PER FUNCTION. Local names such as
+    // `r := app.Group("/auth")` and `r := app.Group("/todo")` in two setup
+    // functions must not leak prefixes into each other.
+    const scopeCache = new Map<TsNode, Map<string, string>>();
 
-    for (const file of analysis.files.values()) {
-      for (const decl of findAll(file.root, (n) => n.type === "short_var_declaration")) {
+    const enclosingFunction = (node: TsNode): TsNode | null => {
+      let cur: TsNode | null = node;
+      while (cur) {
+        if (
+          cur.type === "function_declaration" ||
+          cur.type === "method_declaration" ||
+          cur.type === "func_literal"
+        ) {
+          return cur;
+        }
+        cur = cur.parent;
+      }
+      return null;
+    };
+
+    const isRouterType = (typeNode: TsNode | undefined | null): boolean =>
+      !!typeNode && /fiber\.(Router|App|Group)|gofiber\/fiber/.test(typeNode.text);
+
+    const buildScope = (fnNode: TsNode): Map<string, string> => {
+      const cached = scopeCache.get(fnNode);
+      if (cached) return cached;
+      const scope = new Map<string, string>();
+
+      // Router-typed parameters are roots (prefix "") inside this function.
+      for (const paramList of findAll(fnNode, (n) => n.type === "parameter_list")) {
+        if (paramList.parent !== fnNode && paramList.parent?.type !== "function_type" &&
+            !["function_declaration", "method_declaration", "func_literal"].includes(paramList.parent?.type ?? "")) {
+          continue;
+        }
+        for (const decl of childrenOfType(paramList, "parameter_declaration")) {
+          const typeNode = decl.namedChildren.find((c: TsNode) => /type|pointer|qualified|selector/.test(c.type));
+          const names = decl.namedChildren.filter((c: TsNode) => c.type === "identifier");
+          if (isRouterType(typeNode)) for (const nameNode of names) scope.set(nameNode.text, "");
+        }
+      }
+
+      interface GroupDecl {
+        name: string;
+        parent: string;
+        prefix: string;
+      }
+      const groups: GroupDecl[] = [];
+      for (const decl of findAll(fnNode, (n) => n.type === "short_var_declaration" || n.type === "var_declaration")) {
         const left = decl.namedChildren.find((c) => c.type === "expression_list");
-        const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
-        const right = lists.length > 1 ? lists[lists.length - 1] : undefined;
-        if (!right) continue;
+        const right = decl.namedChildren.filter((c) => c.type === "expression_list").pop();
+        if (!left || !right) continue;
+        const names = left.namedChildren.filter((c) => c.type === "identifier");
         for (const call of findAll(right, (c) => c.type === "call_expression")) {
           const sel = selectorCall(call);
-          if (!sel) continue;
-          const name = left?.namedChildren.find((c) => c.type === "identifier");
-          // app := fiber.New()
-          if (sel.receiver.type === "identifier" && sel.receiver.text === "fiber" && sel.method === "New") {
-            if (name) appVars.set(name.text, "");
+          if (!sel || sel.receiver.type !== "identifier") continue;
+          if (sel.receiver.text === "fiber" && sel.method === "New") {
+            const target = names[0];
+            if (target) scope.set(target.text, "");
           }
-          // grp := app.Group("/api")
-          if (sel.method === "Group" && sel.receiver.type === "identifier" && name) {
+          if (sel.method === "Group") {
             const prefix = literalString(positionalArguments(call)[0]) ?? "";
-            groupDecls.push({ name: name.text, parent: sel.receiver.text, prefix });
+            const target = names[0];
+            if (target) groups.push({ name: target.text, parent: sel.receiver.text, prefix });
           }
         }
       }
-    }
 
-    let grew = true;
-    let guard = 0;
-    while (grew && guard < 16) {
-      grew = false;
-      guard++;
-      for (const g of groupDecls) {
-        const parentPrefix = appVars.get(g.parent);
-        if (parentPrefix === undefined) continue;
-        const resolved = joinPath(parentPrefix, g.prefix);
-        if (appVars.get(g.name) !== resolved) {
-          appVars.set(g.name, resolved);
-          grew = true;
+      let grew = true;
+      let guard = 0;
+      while (grew && guard < 16) {
+        grew = false;
+        guard++;
+        for (const g of groups) {
+          const parentPrefix = scope.has(g.parent) ? scope.get(g.parent)! : null;
+          if (parentPrefix === null) continue;
+          const resolved = joinPath(parentPrefix, g.prefix);
+          if (scope.get(g.name) !== resolved) {
+            scope.set(g.name, resolved);
+            grew = true;
+          }
         }
       }
-    }
+      scopeCache.set(fnNode, scope);
+      return scope;
+    };
 
     for (const file of analysis.files.values()) {
       for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
         const sel = selectorCall(call);
-        if (!sel) continue;
-        if (sel.receiver.type !== "identifier" || !appVars.has(sel.receiver.text)) continue;
+        if (!sel || sel.receiver.type !== "identifier") continue;
+        const ownerFn = enclosingFunction(call);
+        const scope = ownerFn ? buildScope(ownerFn) : null;
+        const prefix = scope?.get(sel.receiver.text);
+        if (prefix === undefined) continue;
         const verb = sel.method.toLowerCase();
         if (!VERBS.has(verb)) continue;
         const args = positionalArguments(call);
@@ -487,7 +534,7 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
         const { path, params } = fiberPathToOas(rawPath);
         sites.push({
           method: verb,
-          path: joinPath(appVars.get(sel.receiver.text) ?? "", path),
+          path: joinPath(prefix, path),
           params,
           handler: args[1] ?? null,
           origin: { file: file.path, line: call.startPosition.row + 1 },
@@ -498,10 +545,11 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
       for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
         const sel = selectorCall(call);
         if (!sel) continue;
-        if (sel.method === "Listen" && sel.receiver.type === "identifier" && appVars.has(sel.receiver.text)) {
-          const addr = literalString(positionalArguments(call)[0]);
-          if (addr) servers.add(addrToUrl(addr));
-        }
+        if (sel.method !== "Listen" || sel.receiver.type !== "identifier") continue;
+        const ownerFn = enclosingFunction(call);
+        if (ownerFn && !buildScope(ownerFn).has(sel.receiver.text)) continue;
+        const addr = literalString(positionalArguments(call)[0]);
+        if (addr) servers.add(addrToUrl(addr));
       }
     }
 
