@@ -35,6 +35,7 @@ import {
   buildCsModelIndex,
   csTypeToSchema,
   findAttribute,
+  scopedName,
   type CsModelIndex,
 } from "../lang/csharp/schema.js";
 
@@ -109,6 +110,12 @@ function extractEndpoints(
 
     const requestType = base.requestType;
     const responseType = base.responseType;
+    // Resolve the generic DTO name through the endpoint's own namespace. Many
+    // features declare a class named `Request`, so the index disambiguates
+    // them to qualified names and a bare `requestType.text` lookup would miss.
+    const requestTypeName = requestType
+      ? (scopedName(requestType, model) ?? requestType.text)
+      : null;
 
     for (const { verb, route } of verbsRoutes) {
       const fullPath = normalizeRoute(route || "/");
@@ -124,8 +131,8 @@ function extractEndpoints(
       }));
 
       const gaps: GapCode[] = [];
-      const requestDef = requestType ? model.byName.get(requestType.text) : undefined;
-      if (requestType && !requestDef && !["EmptyRequest", "object"].includes(requestType.text)) gaps.push("body-schema-unknown");
+      const requestDef = requestTypeName ? model.byName.get(requestTypeName) : undefined;
+      if (requestTypeName && !requestDef && !["EmptyRequest", "object"].includes(requestTypeName)) gaps.push("body-schema-unknown");
       for (const parameter of parameters) {
         const field = requestDef?.fields.find(field => field.name.toLowerCase() === parameter.name.toLowerCase());
         if (field) parameter.schema = csTypeToSchema(field.typeNode, model);
@@ -139,15 +146,15 @@ function extractEndpoints(
       let requestBody:
         | { required: boolean; content: DiscoveredMediaType[]; confidence: Confidence }
         | undefined;
-      if (requestType && requestType.text !== "EmptyRequest" && requestType.text !== "object") {
-        let schema = csTypeToSchema(requestType, model);
+      if (requestTypeName && requestTypeName !== "EmptyRequest" && requestTypeName !== "object") {
+        let schema = csTypeToSchema(requestType!, model);
         if (queryProperties.length && requestDef) {
           const excluded = new Set(queryProperties.map(property => property.childForFieldName("name")?.text.toLowerCase()));
           const fields = requestDef.fields.filter(field => !excluded.has(field.name.toLowerCase()));
           schema = fields.length ? { type: "object", properties: Object.fromEntries(fields.map(field => [field.jsonName ?? field.name, csTypeToSchema(field.typeNode, model)])), required: fields.filter(field => field.required).map(field => field.jsonName ?? field.name) } : {};
         }
         if (requestDef && !requestDef.fields.length) schema = {};
-        if (!cfg || !findAll(cfg, n => n.type === "invocation_expression").some(n => invocationName(n) === "DontAutoValidate")) schema = applyRequestValidation(schema, requestType.text, model);
+        if (!cfg || !findAll(cfg, n => n.type === "invocation_expression").some(n => invocationName(n) === "DontAutoValidate")) schema = applyRequestValidation(schema, requestTypeName, model);
         // Route binding supplies matching DTO properties independently of
         // JSON input. Do not demand a duplicate copy in the request body.
         if (pathParams.size && requestDef) {

@@ -1539,8 +1539,52 @@ export function inferExpressionSchema(
   // A data-access call (EF terminal, JSON parse) used directly as an argument.
   const dataSchema = inferDataCallSchema(node, lambda, model);
   if (dataSchema) return dataSchema;
+  // Unwrap a single-expression `argument` node to its inner expression.
+  const subject: TsNode =
+    node.type === "argument" && node.namedChildCount === 1 && node.namedChildren[0]
+      ? node.namedChildren[0]!
+      : node;
+  // String concatenation with at least one string literal produces a string.
+  if (subject.type === "binary_expression" && /["']/.test(subject.text) && /\+/.test(subject.text)) {
+    return { type: "string" };
+  }
+  // Null-coalescing `a ?? b`: take the first side we can type.
+  if (subject.type === "binary_expression" && /\?\?/.test(subject.text)) {
+    for (const operand of subject.namedChildren) {
+      const side = inferExpressionSchema(operand, model, lambda);
+      if (side) return side;
+    }
+  }
+  // Bare identifier bound to a local variable, e.g. `var msg = ...; Send(msg)`.
+  if (subject.type === "identifier") {
+    const local = localVariableSchema(subject.text, lambda, model);
+    if (local) return local;
+  }
   // Implicit new() / collection expressions cannot be typed without flow
   // analysis; leave to AI gap resolution.
+  return undefined;
+}
+
+/** Resolve a local `var name = <expr>` initializer to a schema (bounded depth). */
+function localVariableSchema(
+  name: string,
+  scope: TsNode,
+  model: CsModelIndex,
+  depth = 0,
+): JsonSchema | undefined {
+  if (depth > 3) return undefined;
+  for (const declarator of findAll(scope, (n) => n.type === "variable_declarator")) {
+    const id = declarator.namedChildren.find((c) => c.type === "identifier");
+    if (id?.text !== name) continue;
+    const equals = declarator.namedChildren.find((c) => c.type === "equals_value_clause");
+    const initializer = equals?.namedChildren.find(
+      (c) => !["variable_declarator", "identifier", "equals_value_clause"].includes(c.type),
+    );
+    if (initializer) {
+      const schema = inferExpressionSchema(initializer, model, scope);
+      if (schema) return schema;
+    }
+  }
   return undefined;
 }
 
