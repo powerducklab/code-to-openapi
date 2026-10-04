@@ -164,6 +164,13 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
     }
 
     // gin.H{...} (selector type) or map literal.
+    // For a typed map (`map[string]string{...}`), the declared value type is
+    // the fallback for entries whose expressions cannot be evaluated.
+    let mapValueFallback: JsonSchema | null = null;
+    if (typeNode?.type === "map_type") {
+      const valueTypeNode = typeNode.namedChildren[1];
+      if (valueTypeNode) mapValueFallback = goConstructedTypeToSchema(valueTypeNode, index);
+    }
     const properties: Record<string, JsonSchema> = {};
     const elements = value
       ? childrenOfType(value, "keyed_element")
@@ -174,9 +181,16 @@ function literalSchema(node: TsNode | null, index: GoModelIndex, depth = 0): Jso
       if (!keyNode || !valNode) continue;
       const keyText = literalString(keyNode);
       if (!keyText) continue;
-      properties[keyText] = scalarLiteral(valNode) ?? literalSchema(valNode, index, depth + 1) ?? {};
+      properties[keyText] =
+        scalarLiteral(valNode) ??
+        literalSchema(valNode, index, depth + 1) ??
+        mapValueFallback ??
+        {};
     }
     if (value && Object.keys(properties).length > 0) return { type: "object", properties };
+    if (typeNode && typeNode.type === "map_type" && mapValueFallback) {
+      return { type: "object", additionalProperties: mapValueFallback };
+    }
     if (typeNode && typeNode.type === "selector_expression") return { type: "object" };
     return null;
   }
@@ -268,21 +282,28 @@ function analyzeHandler(
         noteWrapperLiteral(left.namedChildren[i], right.namedChildren[i]);
       }
     }
-    // Parenthesized `var ( appG = app.Gin{C: c} )` declarations.
+    // Parenthesized `var ( appG = app.Gin{C: c} )` declarations. A var_spec
+    // holds its names as identifiers and its initializers directly (not
+    // wrapped in an expression_list); a type-only spec (`form AddTagForm`)
+    // has no initializer.
     for (const decl of findAll(body, (n) => n.type === "var_declaration")) {
       for (const spec of childrenOfType(decl, "var_spec")) {
         const names = spec.namedChildren.filter((c) => c.type === "identifier");
-        const value = spec.namedChildren.find((c) => c.type === "expression_list");
-        if (!value) continue;
-        for (let i = 0; i < names.length; i++) {
-          noteWrapperLiteral(names[i], value.namedChildren[i]);
-        }
+        const values = spec.namedChildren.filter(
+          (c) => c.type !== "identifier" && c.type !== "type_identifier",
+        );
+        names.forEach((name, i) => noteWrapperLiteral(name, values[i]));
       }
+    }
+    // Also cover single `var appG = app.Gin{C: c}` specs at function scope.
+    for (const spec of findAll(body, (n) => n.type === "var_spec")) {
+      const name = spec.namedChildren.find((c) => c.type === "identifier");
+      const value = spec.namedChildren.find((c) => c.type !== "identifier" && c.type !== "type_identifier");
+      if (name && value) noteWrapperLiteral(name, value);
     }
   }
 
   const addResponse = (status: string, response: RouteCandidate["responses"][number]) => {
-    if (status === "default") gaps.add("response-unknown");
     const previous = responseStatus.get(status);
     responseStatus.set(status, previous ? mergeResponseVariants(previous, response) : response);
   };
@@ -604,6 +625,13 @@ function analyzeHandler(
 
   if (responsesEmpty(responseStatus)) {
     gaps.add("response-unknown");
+  } else if (responseStatus.has("default")) {
+    // A dynamic-status branch (e.g. a wrapper fed a runtime httpCode) becomes
+    // an OAS `default` catch-all. When sibling branches prove concrete codes,
+    // the contract is known; only an operation whose every branch is dynamic
+    // stays response-unknown.
+    const concrete = [...responseStatus.keys()].some((code) => code !== "default");
+    if (!concrete) gaps.add("response-unknown");
   }
 
   return {
@@ -1094,6 +1122,19 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
             // contract. Named functions (including package-qualified selectors
             // such as v1.GetTags) and inline closures are supported.
             const handlerArgs = args.slice(pathNode === args[0] ? 1 : 2);
+
+            // Skip auto-generated interactive documentation handlers such as
+            // `ginSwagger.WrapHandler(swaggerFiles.Handler)`; they serve the
+            // Swagger UI rather than a documented API operation.
+            const isDocsWrapper = handlerArgs.some((arg) => {
+              const callee =
+                arg.type === "call_expression"
+                  ? arg.namedChildren[0]
+                  : undefined;
+              return callee?.type === "selector_expression" && /WrapHandler$/.test(callee.text);
+            });
+            if (isDocsWrapper) continue;
+
             const terminal = [...handlerArgs]
               .reverse()
               .find((a) => a.type === "identifier" || a.type === "selector_expression" || a.type === "func_literal");
