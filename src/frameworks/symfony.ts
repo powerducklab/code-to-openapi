@@ -650,7 +650,11 @@ function yamlRoutes(
     for(const entry of Object.values(f.entries)){
       if(!entry||typeof entry!=='object'||typeof entry.path!=='string')continue;
       const path=normalizeSymfonyPath(entry.path.startsWith('/')?entry.path:'/'+entry.path);
-      const verbs=entry.methods?(Array.isArray(entry.methods)?entry.methods:[entry.methods]).map((v:any)=>String(v).toLowerCase()).filter((v:string)=>ROUTE_VERBS.has(v)):[...ROUTE_VERBS];
+      // A YAML route without explicit `methods` technically matches every verb,
+      // but documenting all eight fabricates write operations. Pages and
+      // generic handlers are documented as GET (Symfony implicitly serves
+      // HEAD on GET routes).
+      const verbs=entry.methods?(Array.isArray(entry.methods)?entry.methods:[entry.methods]).map((v:any)=>String(v).toLowerCase()).filter((v:string)=>ROUTE_VERBS.has(v)):['get'];
       const controllerMatch=typeof entry.controller==='string'?['',entry.controller]:null;
       let methodNode: TsNode | null = null;
       let className: string | null = null;
@@ -678,15 +682,33 @@ function yamlRoutes(
           parameters.push({ name: p, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
         }
       }
-      const responses: DiscoveredResponse[] = methodNode ? collectResponses(methodNode, model, gaps) : (() => {
+      // FrameworkBundle's TemplateController renders a Twig template referenced
+      // by defaults.template; that is a deterministic HTML 200 response.
+      const templateName =
+        entry.defaults && typeof entry.defaults === "object"
+          ? (entry.defaults as Record<string, unknown>).template
+          : undefined;
+      const isTemplateController =
+        className === "TemplateController" || (typeof templateName === "string" && /\.twig$/.test(templateName));
+      let responses: DiscoveredResponse[];
+      if (methodNode) {
+        responses = collectResponses(methodNode, model, gaps);
+      } else if (isTemplateController) {
+        responses = [{
+          statusCode: "200",
+          description: "",
+          confidence: "high" as Confidence,
+          content: [{ mediaType: "text/html", schema: { type: "string" } }],
+        }];
+      } else {
         unresolved.push({
           reason: "unresolved-controller",
           message: `routes.yaml references ${controllerMatch?.[1] ?? "?"} which is not in the scanned tree`,
           origin: { file: f.path, line: 0 },
         });
         gaps.push("response-unknown");
-        return [{ statusCode: "200", description: "", confidence: "low" as Confidence }];
-      })();
+        responses = [{ statusCode: "200", description: "", confidence: "low" as Confidence }];
+      }
 
       for (const verb of verbs) {
         out.push({
