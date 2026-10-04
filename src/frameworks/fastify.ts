@@ -505,6 +505,14 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
   dependencyHints: ["fastify"],
 
   applies(ctx) {
+    // NestJS may use Fastify only as its transport (@nestjs/platform-fastify);
+    // the Nest pack is authoritative in that case.
+    if (
+      ctx.manifest.packages.has("@nestjs/common") ||
+      ctx.manifest.packages.has("@nestjs/core")
+    ) {
+      return false;
+    }
     return (
       ctx.manifest.packages.has("fastify") ||
       ctx.index.files.some((f) =>

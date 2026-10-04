@@ -139,6 +139,14 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
   dependencyHints: ["express", "@types/express"],
 
   applies(ctx) {
+    // NestJS uses Express (or Fastify) only as its transport; the Nest pack is
+    // authoritative, so do not treat raw Express usage as a standalone app.
+    if (
+      ctx.manifest.packages.has("@nestjs/common") ||
+      ctx.manifest.packages.has("@nestjs/core")
+    ) {
+      return false;
+    }
     return (
       ctx.manifest.packages.has("express") ||
       ctx.index.files.some((f) =>
