@@ -16,9 +16,10 @@ bought by fabrication.
 | --- | --- | --- | --- | --- | --- | --- |
 | starlette-crud | starlette | gtfisher/starlette-example-crud | d948b7b | Python 3.13 + dataset 1.6.2 / SQLite | 172 assertions, all axes 1.0 | 172 assertions, all axes 1.0 |
 | mongoose-express | express + mongoose | bezkoder/node-express-mongodb | 30851145 | not bootable on audit host (no mongod/Docker) | 254 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; no AI completion needed) |
+| aspnet-todoapidto | asp.net core mvc controllers (csharp) | dotnet/AspNetCore.Docs (`aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO`) | 3d06f3ee | .NET SDK 10.302 rolling forward to net9.0, EF Core InMemory | 252 assertions, all axes 1.0, 0 review gaps | n/a (static contract matches native HTTP evidence; no AI completion needed) |
 
 Later samples planned for this batch: a Symfony JSON API (API Platform style,
-not the Twig SSR demo), ASP.NET, and Micronaut. Each gets the same closed loop:
+not the Twig SSR demo) and Micronaut. Each gets the same closed loop:
 real third-party project at a pinned commit, native runtime where the
 environment allows it, independently hand-written static and runtime baselines,
 generic scanner fixes with regression tests.
@@ -192,14 +193,87 @@ the sample.
     narrows to `number`. `parseInt` alone is never assumed to reject
     non-integers (P1#2) — only the proven conversion result is typed.
 
+### ASP.NET Core MVC controllers (per-return-branch contracts, DTO projection, validation)
+
+14. **Per-return-branch controller results** (`src/frameworks/aspnet.ts`):
+    controller actions are classified per owned `return` statement (nested
+    lambdas and local functions are excluded) instead of collapsing to the
+    declared `ActionResult<T>`. Each helper (`Ok`/`Json` 200, `Created*` 201,
+    `Accepted*` 202, `NoContent` 204, `BadRequest`/`Problem`/
+    `ValidationProblem` 400, `Unauthorized` 401, `Forbid` 403, `NotFound` 404,
+    `Conflict` 409, `UnprocessableEntity` 422, `TooManyRequests` 429) and the
+    explicit `StatusCode(...)` form map to their real status, distinguishing
+    the success and error arms. `await`/parenthesized returns and bare, `this.`
+    and `base.` callee forms are recognized. A controller that declares (`new`)
+    its own `NoContent`/`Ok`/... shadows the ControllerBase helper; such calls
+    are treated as ordinary user methods and never forced to the built-in
+    status.
+15. **Payload concreteness and DTO projection** (`src/frameworks/aspnet.ts`):
+    a returned payload schema is used only when it is concrete (a real object /
+    array / scalar, recursively — no empty `{}`, property-less object or empty
+    array items). When the value is produced by an unresolvable local mapper or
+    a LINQ projection chain, the declared `ActionResult<T>` stays authoritative
+    instead of emitting an empty shell. This recovers `Ok(items.Select(...).
+    ToList())` as an array of the declared DTO. Response DTOs are built through
+    the serialization index, so an entity field absent from the projection DTO
+    (e.g. `TodoItem.Secret`) can never leak; response objects in the baseline
+    carry `x-audit-exact-properties` to hard-fail any extra wire field.
+16. **Route Name vs template** (`src/frameworks/aspnet.ts`): the class/method
+    route template attributes now read only the `Template`/`Pattern` arguments.
+    `[HttpGet(Name = "GetWeatherForecast")]` is a route NAME, not a path, so
+    the route is `/WeatherForecast` (native `/WeatherForecast/GetWeather…`
+    returns 404). Binding aliases (`[FromRoute(Name=)]`, `[FromQuery]`,
+    `[FromHeader]`, `[FromForm]`) still honor `Name`.
+17. **[ApiController] automatic 400, scoped to what can actually fail binding**
+    (`src/frameworks/aspnet.ts`): the built-in ModelStateInvalidFilter adds a
+    400 `application/problem+json` (ValidationProblemDetails) when the action
+    has a request body (malformed JSON / type mismatch / data-annotation or
+    NRT violations) OR a value-type route/query/header parameter
+    (`integer`/`number`/`boolean`, or `string` with `date`/`date-time`/`time`/
+    `uuid` format, covering `DateOnly`/`DateTime`/`Guid`). A plain string route
+    parameter accepts any token and never 400s, so no spurious 400 is added.
+    This built-in 400 is independent of FluentValidation: an unregistered
+    validator or a missing `AddFluentValidationAutoValidation()` still leaves
+    the built-in 400 but never overlays FluentValidation rules on the body.
+18. **.NET 9 bodiless error results emit ProblemDetails**
+    (`src/frameworks/aspnet.ts`): the target framework is read from the
+    `.csproj` (including multi-targeting); on net9+ a parameterless
+    `NotFound()`/`BadRequest()`/... error result returns an RFC 7807
+    `application/problem+json` body, while `NoContent()` and 2xx results stay
+    empty. `Forbid` (no body) is excluded. On earlier frameworks the bodiless
+    results stay empty. The nullable-reference-types setting
+    (`<Nullable>` enable/annotations/disable/absent) is likewise read from the
+    project and drives implicit request requiredness.
+19. **Value-type request optionality vs wire presence**
+    (`src/lang/csharp/schema.ts`, `src/lang/csharp/index.ts`,
+    `src/lang/csharp/serialization.ts`): in the REQUEST direction a value-type
+    member (`int`/`long`/`bool`/`DateTime`/`Guid`/`struct`/`enum`, unwrapping
+    nullables) is never implicitly required — it binds to its default when
+    omitted, so `POST {}` can be valid; non-nullable reference types are
+    implicitly required only when NRT annotations are enabled, and
+    `[Required]`/`[JsonRequired]` always wins. In the RESPONSE/wire direction
+    (the dedicated serialization index, now flagged `wireSerialization`)
+    field presence follows System.Text.Json: non-conditionally-ignored keys —
+    including value types — are required on the wire, STJ does not omit nulls
+    by default, and `DateOnly` maps to `string` format `date`. Read-only
+    computed properties (e.g. `TemperatureF => 32 + C/0.5556`) are serialized;
+    `struct` declarations are modeled as a distinct type kind.
+
 Regression tests: `test/starlette-computed-contract.test.ts` (schema-less
 gateway rows, nullable reads, open inserts, no fabricated value types),
-`sanitizeSchema` cases in `test/ai-gap.test.ts`, and
+`sanitizeSchema` cases in `test/ai-gap.test.ts`,
 `test/express-mongoose-projection.test.ts` (ESM + CommonJS models, factory /
 namespace resolution, toJSON `id`/`_id`/`__v` projection, timestamps, request
 body backfill with required guards, whole-body PATCH optionality, and null
-narrowing); `test/express-scan.test.ts` now asserts the untyped query default.
-Full suite: 180 files / 493 tests green.
+narrowing), `test/express-scan.test.ts` (untyped query default), and
+`test/aspnet-controller-branches-scan.test.ts` over the synthetic
+`test/fixtures/aspnet-controller-branches` project (per-branch statuses and DTO
+secret non-leakage, value-type request optionality vs wire requiredness,
+`DateOnly` and a read-only computed property, route `Name` not treated as a
+template, and recursive csproj target-framework detection). Existing ASP.NET
+tests were tightened to the native behavior: shadowed `NoContent`, value-type
+query binding 400, the built-in (FluentValidation-independent) 400, and empty
+`required` arrays. Full suite: 181 files / 496 tests green.
 
 ## Result
 
@@ -228,15 +302,36 @@ Full suite: 180 files / 493 tests green.
   and the audit host has no `mongod`/Docker, so no runtime baseline is
   fabricated (recorded honestly in `projects-batch8.json`).
 
+### ASP.NET Core MVC controller result (dotnet/AspNetCore.Docs TodoApiDTO @ 3d06f3ee)
+
+- All 6 operations recalled with zero false routes and **zero review gaps**:
+  five `/api/TodoItems` CRUD operations plus `GET /WeatherForecast`; the
+  `[HttpGet(Name=...)]` route name does not create a false path.
+- Static deterministic gate: **252 assertions, 0 mismatch / 0 unknown / 0
+  extra, every axis 1.0** (`results/contracts-batch8-aspnet-static.json`).
+  Responses expose exactly the projected `TodoItemDTO`
+  (`{id:int64,name:string|null,isComplete:boolean}`) and never the entity
+  `Secret`; `WeatherForecast` carries the `DateOnly` date string and the
+  computed read-only `TemperatureF`; value-type request members are optional
+  (`POST {}` → 201) while the request body itself is required; value-type
+  `{id}` routes carry the automatic 400 validation problem plus 404 problem;
+  PUT adds the explicit id-mismatch 400; success PUT/DELETE are 204 empty; and
+  .NET 9 bodiless error results are RFC 7807 `application/problem+json`.
+- The static contract was written independently from source and then checked
+  against native HTTP evidence captured by running the net9.0 app on .NET 10
+  (`DOTNET_ROLL_FORWARD=LatestMajor`, EF Core InMemory). Every static assertion
+  matches the native behavior, so no runtime/AI layer is needed and none is
+  claimed; the native findings are recorded in `projects-batch8.json`.
+
 ## Remaining for batch 8
 
 - Symfony JSON API (API Platform or equivalent; the symfony/demo project is
-  Twig server-rendered and is not a JSON gate sample).
-- ASP.NET real project at a pinned commit (.NET 10 SDK is available; confirm
-  any /tmp project is third-party and unseen by the scanner, not a self-made
-  fixture).
+  Twig server-rendered and is not a JSON gate sample). The audit host has no
+  PHP runtime, so this sample needs a runnable environment or a static-only
+  boundary recorded honestly.
 - Micronaut real project (JDK 25 + Gradle/Maven caches available; only logs
-  exist under /tmp so a fresh third-party sample is required).
+  exist under /tmp so a fresh third-party sample at a pinned commit is
+  required).
 - Fold each into `projects-batch8.json`, `results/scorecard-batch8.json`, and
   this log with both static and runtime gates.
 

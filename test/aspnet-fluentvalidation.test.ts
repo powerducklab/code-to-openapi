@@ -94,9 +94,13 @@ app.MapControllers();
 `;
   const doc = await scanCSharp(setup);
   const op = doc.paths['/orders'].post;
-  expect(op.responses['400']).toBeUndefined();
-  // Body stays the plain component $ref; rules are not overlaid.
+  // [ApiController] still adds the built-in model-binding 400 even though no
+  // FluentValidation validator is registered; the body keeps its plain $ref and
+  // no FluentValidation rules are overlaid.
+  expect(op.responses['400'].content['application/problem+json']).toBeDefined();
   expect(op.requestBody.content['application/json'].schema.$ref).toBeDefined();
+  const component = doc.components.schemas.CreateOrder;
+  expect(component.properties.name.maxLength).toBeUndefined();
 });
 
 it('does not add 400 without AddFluentValidationAutoValidation', async () => {
@@ -109,5 +113,12 @@ app.MapControllers();
 `;
   const doc = await scanCSharp(setup);
   const op = doc.paths['/orders'].post;
-  expect(op.responses['400']).toBeUndefined();
+  // Without AddFluentValidationAutoValidation() the discovered validator never
+  // runs, so no FluentValidation rules are applied. The built-in [ApiController]
+  // model-binding 400 is still present, independent of FluentValidation.
+  expect(op.responses['400'].content['application/problem+json']).toBeDefined();
+  expect(op.requestBody.content['application/json'].schema.$ref).toBeDefined();
+  const component = doc.components.schemas.CreateOrder;
+  expect(component.properties.name.maxLength).toBeUndefined();
+  expect(component.properties.age.minimum).toBeUndefined();
 });

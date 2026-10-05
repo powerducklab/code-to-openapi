@@ -77,6 +77,32 @@
         "passGate": true,
         "reviewGaps": 0
       }
+    },
+    {
+      "key": "aspnet-todoapidto",
+      "framework": "asp.net-core-mvc-controllers",
+      "language": "csharp",
+      "repo": "dotnet/AspNetCore.Docs",
+      "commit": "3d06f3ee297f0514cfade27232c1a266362f4f97",
+      "scanRoot": "aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO",
+      "runtimeEnvironment": {
+        "available": true,
+        "sdk": ".NET SDK 10.0.302 with DOTNET_ROLL_FORWARD=LatestMajor building/running the net9.0 target (net9 targeting pack restored via NuGet)",
+        "database": "EF Core InMemory database named TodoList",
+        "evidence": "Native HTTP evidence corrected several static assumptions: [HttpGet(Name=...)] is a route NAME, not a template (real route /WeatherForecast, /WeatherForecast/GetWeatherForecast 404s); responses are projected through ItemToDTO to TodoItemDTO so the entity Secret never appears on the wire; System.Text.Json web defaults use camelCase and do not ignore nulls, so nullable keys are always present but still required; POST {} returns 201 because value-type members bind to defaults and ModelState stays valid; on .NET 9 bodiless NotFound()/BadRequest() emit application/problem+json (RFC 7807) while only 204 NoContent is empty; [ApiController] auto model binding/validation returns 400 problem+json for malformed JSON, type mismatches and non-numeric value-type route parameters, whereas plain string route parameters never fail binding."
+      },
+      "baseline": "Microsoft official controller-based TodoApiDTO sample ([ApiController]+ControllerBase, net9.0, nullable enabled, EF Core InMemory). Six operations: GET /api/TodoItems -> 200 array of TodoItemDTO; GET /api/TodoItems/{id} with int64 path id -> 200 TodoItemDTO, 400 validation problem for a non-numeric id, 404 problem when absent; POST /api/TodoItems with a required request body whose members are ALL optional (value types default) -> 201 TodoItemDTO plus Location, 400 validation problem; PUT /api/TodoItems/{id} -> 400 validation problem (non-numeric id / malformed body) and a plain 400 problem when body id differs from route id, 404 problem when absent, 204 empty on success; DELETE /api/TodoItems/{id} -> 400 validation problem, 404 problem, 204 empty; GET /WeatherForecast -> 200 array of WeatherForecast (DateOnly maps to string format date, computed read-only TemperatureF is serialized, nullable Summary key is always present). The response DTO is {id:int64,name:string|null,isComplete:boolean}; the persisted entity additionally carries Secret which MUST NOT leak, asserted with x-audit-exact-properties on every response object.",
+      "expectedRoutes": 6,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/aspnet-todoapidto.static.baseline.json",
+        "contracts": "results/contracts-batch8-aspnet-static.json",
+        "scan": "results/scan-batch8-aspnet.json",
+        "assertions": 252,
+        "gate": 0.96,
+        "passGate": true,
+        "reviewGaps": 0
+      }
     }
   ]
 }

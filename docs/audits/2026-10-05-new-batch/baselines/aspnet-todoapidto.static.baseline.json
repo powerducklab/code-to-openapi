@@ -1,0 +1,319 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ASP.NET Core TodoApiDTO static-contract baseline",
+    "version": "1.0.0",
+    "x-basis": "Hand-written from the pinned, third-party source dotnet/AspNetCore.Docs @ 3d06f3ee297f0514cfade27232c1a266362f4f97, path aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO, independent of scanner output. This is the official Microsoft controller-based tutorial (not Minimal API): [ApiController] controllers on .NET 9 (net9.0, Nullable enabled) backed by EF Core InMemory. Contract decisions verified by reading the source and by running the app natively (dotnet SDK 10 with DOTNET_ROLL_FORWARD=LatestMajor): (1) [Route(\"api/[controller]\")] on TodoItemsController resolves to /api/TodoItems; WeatherForecastController uses [Route(\"[controller]\")] and its [HttpGet(Name = \"GetWeatherForecast\")] Name is the route NAME for URL generation, not a path template, so the route is /WeatherForecast (the extra /GetWeatherForecast segment returns 404). (2) The response projects TodoItem through ItemToDTO into TodoItemDTO { id:long, name:string?, isComplete:bool }; the entity's Secret property MUST NOT appear in any response (field-leak guard), enforced with x-audit-exact-properties. (3) System.Text.Json web defaults use camelCase and do not ignore nulls, so nullable keys (name, summary) are always present and stay required while carrying a null type. (4) Request DTO members are never implicitly required: value types (long id, bool isComplete) bind to default values when omitted and name is string?, so POST with an empty object returns 201; only the request body itself is required. (5) GET/PUT/DELETE return NotFound()/BadRequest()/NoContent() per branch; on ASP.NET Core 9 bodiless error StatusCodeResults are auto-filled with application/problem+json (RFC 7807) while 204 stays empty. (6) [ApiController] automatic model binding/validation returns 400 application/problem+json with an errors map, including a non-numeric {id} for the long route parameter. (7) POST returns CreatedAtAction(..., ItemToDTO) = 201 with the DTO; PUT success is 204; DELETE success is 204. (8) WeatherForecast exposes DateOnly Date as string format date and the read-only computed TemperatureF property is serialized; Summary is string? and may be null."
+  },
+  "paths": {
+    "/api/TodoItems": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "x-audit-exact-properties": true,
+                    "properties": {
+                      "id": { "type": "integer", "format": "int64" },
+                      "name": { "type": ["string", "null"] },
+                      "isComplete": { "type": "boolean" }
+                    },
+                    "required": ["id", "name", "isComplete"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "integer", "format": "int64" },
+                  "name": { "type": ["string", "null"] },
+                  "isComplete": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "x-audit-exact-properties": true,
+                  "properties": {
+                    "id": { "type": "integer", "format": "int64" },
+                    "name": { "type": ["string", "null"] },
+                    "isComplete": { "type": "boolean" }
+                  },
+                  "required": ["id", "name", "isComplete"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "title": { "type": "string" },
+                    "status": { "type": "number", "enum": [400] },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "traceId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/TodoItems/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "x-audit-exact-properties": true,
+                  "properties": {
+                    "id": { "type": "integer", "format": "int64" },
+                    "name": { "type": ["string", "null"] },
+                    "isComplete": { "type": "boolean" }
+                  },
+                  "required": ["id", "name", "isComplete"]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "title": { "type": "string" },
+                    "status": { "type": "number", "enum": [400] },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "traceId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "nullable": true },
+                    "title": { "type": "string", "nullable": true },
+                    "status": { "type": "integer", "nullable": true },
+                    "detail": { "type": "string", "nullable": true },
+                    "instance": { "type": "string", "nullable": true },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "integer", "format": "int64" },
+                  "name": { "type": ["string", "null"] },
+                  "isComplete": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "" },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "nullable": true },
+                    "title": { "type": "string", "nullable": true },
+                    "status": { "type": "integer", "nullable": true },
+                    "detail": { "type": "string", "nullable": true },
+                    "instance": { "type": "string", "nullable": true },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "nullable": true },
+                    "title": { "type": "string", "nullable": true },
+                    "status": { "type": "integer", "nullable": true },
+                    "detail": { "type": "string", "nullable": true },
+                    "instance": { "type": "string", "nullable": true },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "" },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "title": { "type": "string" },
+                    "status": { "type": "number", "enum": [400] },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "traceId": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "nullable": true },
+                    "title": { "type": "string", "nullable": true },
+                    "status": { "type": "integer", "nullable": true },
+                    "detail": { "type": "string", "nullable": true },
+                    "instance": { "type": "string", "nullable": true },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/WeatherForecast": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "x-audit-exact-properties": true,
+                    "properties": {
+                      "date": { "type": "string", "format": "date" },
+                      "temperatureC": { "type": "integer", "format": "int32" },
+                      "temperatureF": { "type": "integer", "format": "int32" },
+                      "summary": { "type": ["string", "null"] }
+                    },
+                    "required": ["date", "temperatureC", "temperatureF", "summary"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

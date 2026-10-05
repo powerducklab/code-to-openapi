@@ -127,12 +127,13 @@ class Data {public int Id {get;set;} public string? Name {get;set;}
 public Data? Child {get;set;} }
 class Api:Endpoint<Data,Data>{public override void Configure(){Post("/data/{id}");} public override Task HandleAsync(Data r,CancellationToken ct){return Send.OkAsync(r);}}`},doc=>{
  const op=doc.paths['/data/{id}'].post;
- expect(op.requestBody.content['application/json'].schema.required).not.toContain('id');
+ const inputRequired=op.requestBody.content['application/json'].schema.required??[];
+ expect(inputRequired).not.toContain('id');
  const output=doc.components.schemas.serialized_Data;
  expect(output.required).toEqual(['id','name','child']);
  expect(output.properties).not.toHaveProperty('secret');
  expect(output.properties.child.anyOf[0].$ref).toBe('#/components/schemas/serialized_Data');
- expect(doc.components.schemas.Data.required).not.toContain('name');
+ expect((doc.components.schemas.Data.required??[])).not.toContain('name');
  });
 });
 it('retains Fiber error statuses, unknown status and multiple payload branches',async()=>{

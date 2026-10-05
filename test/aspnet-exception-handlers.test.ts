@@ -86,9 +86,11 @@ app.MapControllers();
   // KeyNotFoundException is not automatically translated to 404.
   expect(Object.keys(doc.paths['/missing'].get.responses)).toEqual(['500']);
 
-  // A success branch plus a handled exception keeps both.
+  // A success branch plus a handled exception keeps both. The int query
+  // parameter additionally exposes the [ApiController] automatic binding 400
+  // (e.g. /mixed?id=abc), while the parameterless throwing actions do not.
   const mixed = doc.paths['/mixed'].get.responses;
-  expect(Object.keys(mixed).sort()).toEqual(['200', '418']);
+  expect(Object.keys(mixed).sort()).toEqual(['200', '400', '418']);
 });
 
 it('does not activate an IExceptionHandler that was never registered', async () => {

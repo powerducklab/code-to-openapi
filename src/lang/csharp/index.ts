@@ -16,13 +16,15 @@ export interface CsField {
   name: string;
   typeNode: TsNode;
   required: boolean;
+  /** True only when [Required] / [JsonRequired] is explicitly applied. */
+  explicitRequired: boolean;
   /** Explicit JSON name from [JsonPropertyName] / [JsonProperty]. */
   jsonName?: string;
   ignoreJson?:boolean;
   conditionalJson?:boolean;
 }
 
-export type CsTypeKind = "class" | "record" | "enum";
+export type CsTypeKind = "class" | "record" | "struct" | "enum";
 
 export interface CsTypeDef {
   kind: CsTypeKind;
@@ -145,6 +147,7 @@ export function extractTypeDef(node: TsNode): CsTypeDef | null {
         fields.push({
           name: lowerFirst(fieldName.text),
           typeNode,
+          explicitRequired: hasRequiredAttribute(param),
           required: hasRequiredAttribute(param) || !isOptionalMember(typeNode, param),
           jsonName: jsonPropertyName(param),
           ...jsonVisibility(param),
@@ -191,6 +194,7 @@ export function extractTypeDef(node: TsNode): CsTypeDef | null {
         fields.push({
           name: lowerFirst(fieldName.text),
           typeNode,
+          explicitRequired: hasRequiredAttribute(prop),
           required: hasRequiredAttribute(prop) || !isOptionalMember(typeNode, prop),
           jsonName: jsonPropertyName(prop),
           ...jsonVisibility(prop),
@@ -200,7 +204,12 @@ export function extractTypeDef(node: TsNode): CsTypeDef | null {
   }
 
   return {
-    kind: node.type === "record_declaration" ? "record" : "class",
+    kind:
+      node.type === "record_declaration"
+        ? "record"
+        : node.type === "struct_declaration"
+          ? "struct"
+          : "class",
     name,
     fields,
     enumValues: [],

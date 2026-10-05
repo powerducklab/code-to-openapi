@@ -45,8 +45,56 @@ export interface CsModelIndex {
   readonly components: Map<string, JsonSchema>;
   readonly qualified?: Map<string, CsTypeDef>;
   readonly serialization?:boolean;
+  /**
+   * True for response/wire component indexes (FastEndpoints) whose field.required
+   * already encodes System.Text.Json presence (Never/conditional/global ignore).
+   * In this direction value-type keys are present and must stay required.
+   */
+  readonly wireSerialization?:boolean;
   readonly componentNames?:Map<string,string>;
   readonly enumSerializationUncertain?:boolean;
+  /**
+   * ASP.NET Core 9+ writes an RFC 7807 ProblemDetails body for bodiless error
+   * StatusCodeResults (NotFound()/BadRequest()/...) when IProblemDetailsService is
+   * registered. Derived from the project TargetFramework; false/undefined on older
+   * targets where those results return an empty body.
+   */
+  readonly errorProblemDetailsDefault?:boolean;
+  /**
+   * Nullable reference types are enabled (<Nullable>enable</Nullable>). When true,
+   * non-nullable reference-type request members are implicitly required. Value
+   * types are never implicitly required (a missing value binds to its default).
+   * Undefined means the project setting could not be determined.
+   */
+  readonly nullableReferenceTypes?:boolean;
+}
+
+const VALUE_TYPE_PREDEFINED = new Set([
+  "sbyte","byte","short","ushort","int","uint","long","ulong","char","float",
+  "double","decimal","bool","half","nint","nuint",
+]);
+const VALUE_TYPE_NAMES = new Set([
+  "DateTime","DateTimeOffset","DateOnly","TimeOnly","TimeSpan","Guid",
+  "Half","Int128","UInt128","BigInteger",
+]);
+
+/** Whether a C# type node is a value type (struct/enum/primitive), unwrapping Nullable<T>. */
+function isValueTypeNode(node: TsNode | undefined, index: CsModelIndex): boolean {
+  if (!node) return false;
+  if (node.type === "nullable_type") {
+    return isValueTypeNode(node.namedChildren[0], index);
+  }
+  if (node.type === "predefined_type") {
+    return VALUE_TYPE_PREDEFINED.has(node.text.replace(/[?\s]/g, "").toLowerCase());
+  }
+  if (node.type === "array_type" || node.type === "generic_name") return false;
+  if (node.type === "identifier" || node.type === "qualified_name") {
+    const short = node.text.split(".").pop()!.replace(/<.*$/, "");
+    if (VALUE_TYPE_NAMES.has(short)) return true;
+    const def = index.byName.get(short) ?? index.qualified?.get(node.text);
+    if (def && (def.kind === "struct" || def.kind === "enum")) return true;
+  }
+  return false;
 }
 
 export function buildCsModelIndex(analysis: CSharpAnalysis): CsModelIndex {
@@ -431,7 +479,26 @@ function buildTypeSchema(
         } else value[keyword] = branches;
       }
     }
-    if(index.serialization?!field.conditionalJson:field.required)required.push(propertyName);
+    if (index.serialization) {
+      // Serialized keys are present whenever they are not conditionally dropped
+      // (STJ does not omit nulls by default), even when the value is nullable.
+      if (!field.conditionalJson) required.push(propertyName);
+    } else if (field.explicitRequired) {
+      required.push(propertyName);
+    } else if (field.required) {
+      if (index.wireSerialization) {
+        // Response/wire direction: field.required already encodes STJ presence
+        // (Never / conditional / global ignore); value-type keys are emitted.
+        required.push(propertyName);
+      } else {
+        // Request binding direction. Value types bind to their default value when
+        // omitted, so they are never implicitly required. Non-nullable reference
+        // types are implicitly required only when NRT annotations are enabled.
+        const valueType = isValueTypeNode(field.typeNode, index);
+        const nrtOff = index.nullableReferenceTypes === false;
+        if (!valueType && !nrtOff) required.push(propertyName);
+      }
+    }
   }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;

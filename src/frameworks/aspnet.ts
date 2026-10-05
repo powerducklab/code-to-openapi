@@ -10,7 +10,7 @@
  */
 
 import { mergeResponseVariants } from "../core/response-variants.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -198,6 +198,7 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
     const unresolved: DiscoveredUnresolved[] = [];
     const candidates: RouteCandidate[] = [];
     const model = buildCsModelIndex(analysis);
+    Object.assign(model, detectProjectContractFlags(ctx));
     const exceptionIndex = buildAspNetExceptionIndex(analysis, model);
     const fvIndex = buildFluentValidationIndex(analysis);
 
@@ -224,6 +225,89 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
     return { routes, unresolved, components, securitySchemes, servers };
   },
 };
+
+/**
+ * Determine whether bodiless error results (NotFound()/BadRequest()/...) are
+ * serialized as RFC 7807 ProblemDetails by default. ASP.NET Core 9+ registers
+ * IProblemDetailsService in the MVC pipeline and fills empty 4xx/5xx status
+ * results; .NET 8 and earlier return an empty body. The lowest targeted TFM wins
+ * for multi-targeted projects. Unknown projects stay conservative (empty body).
+ */
+interface ProjectContractFlags {
+  errorProblemDetailsDefault: boolean;
+  nullableReferenceTypes?: boolean;
+}
+
+function detectProjectContractFlags(ctx: ScanContext): ProjectContractFlags {
+  const contents: string[] = [];
+  for (const f of ctx.index.files) {
+    if (/\.csproj$/i.test(f.path)) contents.push(f.content);
+  }
+  if (!contents.length) {
+    for (const rel of findCsprojFiles(ctx.root, 4)) {
+      try {
+        contents.push(readFileSync(join(ctx.root, rel), "utf8"));
+      } catch {
+        // Unreadable project file: ignore rather than guessing the framework.
+      }
+    }
+  }
+  const majors: number[] = [];
+  const nullableSettings: string[] = [];
+  for (const xml of contents) {
+    const tfmMatch = /<TargetFrameworks?>\s*([^<]+?)\s*<\/TargetFrameworks?>/i.exec(xml);
+    if (tfmMatch) {
+      for (const tfm of tfmMatch[1]!.split(";")) {
+        const mm = /^net(\d+)/i.exec(tfm.trim());
+        if (mm) majors.push(Number(mm[1]));
+      }
+    }
+    const nullableMatch = /<Nullable>\s*([^<]+?)\s*<\/Nullable>/i.exec(xml);
+    if (nullableMatch) nullableSettings.push(nullableMatch[1]!.trim().toLowerCase());
+  }
+  // Bodiless error results become ProblemDetails on ASP.NET Core 9+; the lowest
+  // targeted TFM wins for multi-targeted projects.
+  const errorProblemDetailsDefault = majors.length ? Math.min(...majors) >= 9 : false;
+  // Implicit [Required] for non-nullable reference types depends on NRT metadata.
+  let nullableReferenceTypes: boolean | undefined;
+  if (nullableSettings.some((s) => s === "disable")) {
+    nullableReferenceTypes = false;
+  } else if (nullableSettings.some((s) => s === "enable" || s === "annotations")) {
+    nullableReferenceTypes = true;
+  }
+  return { errorProblemDetailsDefault, nullableReferenceTypes };
+}
+
+/** Locate *.csproj files under root, skipping build output and hidden folders. */
+function findCsprojFiles(root: string, maxDepth: number): string[] {
+  const out: string[] = [];
+  const skip = new Set(["bin", "obj", "node_modules", ".git", ".vs"]);
+  const walk = (dir: string, depth: number) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || skip.has(entry.name)) continue;
+      const full = join(dir, entry.name);
+      if (entry.isFile() && /\.csproj$/i.test(entry.name)) {
+        out.push(full.slice(root.length + 1));
+      } else if (entry.isDirectory() && depth > 0) {
+        let isDir = true;
+        try {
+          isDir = statSync(full).isDirectory();
+        } catch {
+          isDir = false;
+        }
+        if (isDir) walk(full, depth - 1);
+      }
+    }
+  };
+  walk(root, maxDepth);
+  return out;
+}
 
 /** Recognize a registered, source-proven controller route-prefix convention. */
 function controllerPrefix(analysis:CSharpAnalysis):{prefix:string;dynamic:boolean}|undefined{
@@ -372,7 +456,7 @@ function extractControllers(
     // literal token here because it only resolves per-method to the action name
     // (it is NOT a request path parameter).
     const classRouteRaw = routeAttr
-      ? (attributeStringArg(routeAttr, new Set(["Template", "Name", "Pattern"])) ?? "").replace(
+      ? (attributeStringArg(routeAttr, new Set(["Template", "Pattern"])) ?? "").replace(
           /\[controller\]/g,
           controllerToken,
         )
@@ -383,8 +467,11 @@ function extractControllers(
       const verbAttr = attrs.find((a) => HTTP_VERB_ATTRIBUTES.has(a.name));
       if (!verbAttr) continue;
       const verb = verbAttr.name.replace("Http", "").toLowerCase();
+      // `[HttpGet(Name = "...")]` sets the route NAME (used for URL generation),
+      // never the path template; only a positional arg or an explicit Template/
+      // Pattern named arg contributes to the route.
       const subTemplate =
-        attributeStringArg(verbAttr.node, new Set(["Template", "Name", "Pattern"])) ?? "";
+        attributeStringArg(verbAttr.node, new Set(["Template", "Pattern"])) ?? "";
       const methodName =
         method.childForFieldName("name")?.text ??
         method.namedChildren.find((c) => c.type === "identifier")?.text ??
@@ -436,6 +523,31 @@ function extractControllers(
             statusCode: "400",
             description: "Request body failed FluentValidation rules",
             confidence: "medium" as Confidence,
+            content: [{ mediaType: "application/problem+json", schema: validationProblemSchema() }],
+          },
+        ];
+      }
+      const hasValueTypeBinding = parameters.some(
+        (p) =>
+          (p.in === "path" || p.in === "query" || p.in === "header") &&
+          isValueTypeParameterSchema(p.schema),
+      );
+      if (
+        isApiController &&
+        (requestBody || hasValueTypeBinding) &&
+        !responses.some((r) => r.statusCode === "400")
+      ) {
+        // [ApiController] enables the automatic 400 ModelStateInvalidFilter: a
+        // missing/malformed [FromBody], a failed value-type route/query binding
+        // (e.g. a non-numeric id for an int parameter) or a failed validation rule
+        // short-circuits the action with a ValidationProblemDetails response.
+        // Plain string parameters never fail binding, so they do not add a 400.
+        responses = [
+          ...responses,
+          {
+            statusCode: "400",
+            description: "Automatic model binding/validation failed (ValidationProblemDetails)",
+            confidence: "high" as Confidence,
             content: [{ mediaType: "application/problem+json", schema: validationProblemSchema() }],
           },
         ];
@@ -557,6 +669,27 @@ function collectControllerSuccessResponses(
     }
   }
   const schema = returnType ? csTypeToSchema(returnType, model) : {};
+
+  // Branch-level ControllerBase result helpers: a method that returns
+  // NotFound()/BadRequest()/NoContent()/CreatedAtAction(...) on distinct branches
+  // is resolved per return statement instead of collapsing to the declared type.
+  const ownMethodNames = new Set<string>();
+  for (const body of controller ? childrenOfType(controller, "declaration_list") : []) {
+    for (const member of childrenOfType(body, "method_declaration")) {
+      const memberName = member.childForFieldName("name")?.text;
+      if (typeof memberName === "string") ownMethodNames.add(memberName);
+    }
+  }
+  const branched = collectControllerReturnBranches(
+    method,
+    returnedExpressions,
+    schema,
+    model,
+    gaps,
+    ownMethodNames,
+  );
+  if (branched) return mergeResponses(branched);
+
   if (producesSse && schema) {
     return [
       {
@@ -601,6 +734,282 @@ function collectControllerSuccessResponses(
       content: [{ mediaType: "application/json", schema }],
     },
   ];
+}
+
+/**
+ * ControllerBase result helper name -> HTTP status for bare controller returns
+ * (`return NotFound();`, `return NoContent();`, ...). These are instance methods
+ * on ControllerBase, so unlike Minimal API `Results.X` they are invoked without a
+ * `this.`/`Results.` qualifier.
+ */
+const CONTROLLER_RESULT_STATUS: Record<string, string> = {
+  Ok: "200",
+  Json: "200",
+  Created: "201",
+  CreatedAtRoute: "201",
+  CreatedAtAction: "201",
+  CreatedAtUri: "201",
+  Accepted: "202",
+  AcceptedAtRoute: "202",
+  AcceptedAtAction: "202",
+  NoContent: "204",
+  BadRequest: "400",
+  ValidationProblem: "400",
+  Problem: "400",
+  Unauthorized: "401",
+  Forbid: "403",
+  NotFound: "404",
+  Conflict: "409",
+  UnprocessableEntity: "422",
+  TooManyRequests: "429",
+};
+const CREATED_OR_ACCEPTED = new Set([
+  "Created",
+  "CreatedAtRoute",
+  "CreatedAtAction",
+  "CreatedAtUri",
+  "Accepted",
+  "AcceptedAtRoute",
+  "AcceptedAtAction",
+]);
+const PROBLEM_RESULT_NAMES = new Set(["Problem", "ValidationProblem"]);
+
+/**
+ * Whether a bound route/query/header parameter is a value type whose binding can
+ * fail with a 400 (int/long/bool/number, DateOnly/DateTime/Guid exposed as a typed
+ * string format). A plain string parameter accepts any token and never 400s.
+ */
+function isValueTypeParameterSchema(schema: JsonSchema | undefined): boolean {
+  if (!schema) return false;
+  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+  const format = typeof schema.format === "string" ? schema.format : "";
+  for (const type of types) {
+    if (type === "integer" || type === "number" || type === "boolean") return true;
+    if (type === "string" && ["date", "date-time", "time", "uuid"].includes(format)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Unwrap `await x` / parenthesized expressions to the returned expression. */
+function unwrapReturned(expr: TsNode | undefined): TsNode | undefined {
+  let e = expr;
+  while (e) {
+    if (e.type === "await_expression") {
+      e = e.namedChildren.find((c) => c.type !== "identifier" || c.text !== "await");
+      continue;
+    }
+    if (e.type === "parenthesized_expression") {
+      e = e.namedChildren[0];
+      continue;
+    }
+    break;
+  }
+  return e;
+}
+
+/** Callee name of an invocation: bare `Foo()` -> Foo, `this.Foo()`/`base.Foo()` -> Foo. */
+function invocationCalleeName(expr: TsNode | undefined): string | undefined {
+  if (!expr || expr.type !== "invocation_expression") return undefined;
+  const fn = expr.namedChildren.find(
+    (c) => c.type === "identifier" || c.type === "member_access_expression",
+  );
+  if (!fn) return undefined;
+  if (fn.type === "identifier") return fn.text;
+  const last = fn.namedChildren[fn.namedChildren.length - 1];
+  return last?.type === "identifier" ? last.text : undefined;
+}
+
+function invocationArguments(expr: TsNode): TsNode[] {
+  const list = expr.namedChildren.find((c) => c.type === "argument_list");
+  return list ? childrenOfType(list, "argument") : [];
+}
+
+/** Resolve an explicit `StatusCode(...)` first argument to a numeric status. */
+function statusCodeArgument(arg: TsNode | undefined): string | undefined {
+  if (!arg) return undefined;
+  const literal = findFirst(arg, (n) => n.type === "integer_literal");
+  if (literal) {
+    const m = /\b(\d{3})\b/.exec(literal.text);
+    if (m) return m[1];
+  }
+  const member = findFirst(arg, (n) => n.type === "member_access_expression");
+  if (member) {
+    const m = /Status(\d{3})/.exec(member.text);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+/**
+ * A schema carries concrete, usable type information only when every leaf has a
+ * type/$ref/enum. An empty object, a property-less object or an array whose
+ * items could not be resolved is opaque (e.g. a LINQ chain the expression
+ * inferrer could not type) and must fall back to the declared return type.
+ */
+function schemaIsConcrete(schema: JsonSchema | undefined): boolean {
+  if (!schema || Object.keys(schema).length === 0) return false;
+  if (schema.$ref || schema.enum || schema.const !== undefined) return true;
+  for (const combiner of ["anyOf", "oneOf", "allOf"] as const) {
+    const branches = schema[combiner];
+    if (Array.isArray(branches)) {
+      const data = branches.filter((b) => !(b && (b as JsonSchema).type === "null"));
+      return data.length > 0 && data.every((b) => schemaIsConcrete(b as JsonSchema));
+    }
+  }
+  if (schema.type === "array") {
+    const items = Array.isArray(schema.items) ? schema.items[0] : schema.items;
+    return !!items && schemaIsConcrete(items as JsonSchema);
+  }
+  if (schema.type === "object" || schema.properties) {
+    const values = Object.values(schema.properties ?? {});
+    if (values.length === 0 && !schema.additionalProperties && !schema.$ref) return false;
+    return values.every((p) => schemaIsConcrete(p as JsonSchema));
+  }
+  return typeof schema.type === "string" || Array.isArray(schema.type);
+}
+
+/**
+ * Resolve controller actions that mix ControllerBase result helpers on distinct
+ * branches (`if (x == null) return NotFound(); ... return NoContent();`). Returns
+ * null when the method has no such helper return, leaving data-returning actions
+ * to the declared return-type path. The declared `ActionResult<T>` payload schema
+ * fills successful branches whose value is produced through a local mapper that
+ * cannot be resolved expression-locally.
+ */
+function collectControllerReturnBranches(
+  scope: TsNode,
+  returnedExpressions: (TsNode | undefined)[],
+  successSchema: JsonSchema,
+  model: CsModelIndex,
+  gaps: GapCode[],
+  ownMethodNames: Set<string> = new Set(),
+): DiscoveredResponse[] | null {
+  const hasPayloadType = !!successSchema && Object.keys(successSchema).length > 0;
+  let sawHelper = false;
+  let untypedSuccess = false;
+  const branches: DiscoveredResponse[] = [];
+
+  const payloadSchemaFor = (arg: TsNode | undefined): JsonSchema | undefined => {
+    if (arg) {
+      const inferred = inferExpressionSchema(arg, model, scope);
+      if (schemaIsConcrete(inferred)) return inferred;
+    }
+    // The declared ActionResult<T> is authoritative when the payload expression
+    // cannot be typed precisely (local mapper, LINQ projection chain).
+    return hasPayloadType ? successSchema : undefined;
+  };
+
+  for (const raw of returnedExpressions) {
+    const expr = unwrapReturned(raw);
+    if (!expr) continue;
+    const rawName = invocationCalleeName(expr);
+    // A controller that declares (`new`) its own NoContent/Ok/NotFound/... shadows
+    // the ControllerBase helper; treat such calls as ordinary user methods.
+    const name = rawName && !ownMethodNames.has(rawName) ? rawName : undefined;
+
+    if (name === "StatusCode") {
+      sawHelper = true;
+      const args = invocationArguments(expr);
+      const code = statusCodeArgument(args[0]);
+      if (!code) continue;
+      const schema = payloadSchemaFor(args[1]);
+      branches.push({
+        statusCode: code,
+        description: "",
+        confidence: schema ? "high" : "medium",
+        ...(schema ? { content: [{ mediaType: "application/json", schema }] } : {}),
+      });
+      continue;
+    }
+
+    if (!name || !CONTROLLER_RESULT_STATUS[name]) {
+      // A data-returning branch (mapper call, EF query result, object literal).
+      if (hasPayloadType) {
+        branches.push({
+          statusCode: "200",
+          description: "",
+          confidence: "high",
+          content: [{ mediaType: "application/json", schema: successSchema }],
+        });
+      } else {
+        untypedSuccess = true;
+      }
+      continue;
+    }
+
+    sawHelper = true;
+    const args = invocationArguments(expr);
+
+    if (name === "NoContent") {
+      branches.push({ statusCode: "204", description: "", confidence: "high" });
+      continue;
+    }
+    if (PROBLEM_RESULT_NAMES.has(name)) {
+      branches.push({
+        statusCode: CONTROLLER_RESULT_STATUS[name]!,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/problem+json", schema: problemDetailsSchema() }],
+      });
+      continue;
+    }
+    if (CREATED_OR_ACCEPTED.has(name)) {
+      const payload = payloadSchemaFor(args[args.length - 1]);
+      branches.push({
+        statusCode: CONTROLLER_RESULT_STATUS[name]!,
+        description: "",
+        confidence: payload ? "high" : "medium",
+        ...(payload ? { content: [{ mediaType: "application/json", schema: payload }] } : {}),
+      });
+      continue;
+    }
+    const status = CONTROLLER_RESULT_STATUS[name]!;
+    if (name === "Ok" || name === "Json") {
+      const payload = payloadSchemaFor(args[0]);
+      branches.push({
+        statusCode: status,
+        description: "",
+        confidence: payload ? "high" : "medium",
+        ...(payload ? { content: [{ mediaType: "application/json", schema: payload }] } : {}),
+      });
+      continue;
+    }
+    // Error helpers (NotFound/BadRequest/Conflict/...): an explicit first argument
+    // is serialized as-is. A parameterless error result is empty on .NET 8 and
+    // earlier, but ASP.NET Core 9+ fills it with an RFC 7807 ProblemDetails body
+    // (Forbid/Challenge authentication results are excluded).
+    const inferredPayload = args[0] ? inferExpressionSchema(args[0], model, scope) : undefined;
+    const payload = schemaIsConcrete(inferredPayload) ? inferredPayload : undefined;
+    if (payload) {
+      branches.push({
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/json", schema: payload }],
+      });
+    } else if (
+      model.errorProblemDetailsDefault &&
+      /^[45]\d\d$/.test(status) &&
+      name !== "Forbid"
+    ) {
+      branches.push({
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/problem+json", schema: problemDetailsSchema() }],
+      });
+    } else {
+      branches.push({ statusCode: status, description: "", confidence: "high" });
+    }
+  }
+
+  if (!sawHelper) return null;
+  if (untypedSuccess && !branches.some((b) => /^2\d\d$/.test(b.statusCode) && b.content?.[0]?.schema)) {
+    gaps.push("response-unknown");
+  }
+  return branches;
 }
 
 function parseProducesAttribute(

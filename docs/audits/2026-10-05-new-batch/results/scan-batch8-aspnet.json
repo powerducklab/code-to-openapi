@@ -1,0 +1,1160 @@
+{
+  "report": {
+    "languages": [
+      "csharp"
+    ],
+    "frameworks": [
+      "aspnet"
+    ],
+    "filesScanned": 7,
+    "routesConfirmed": 6,
+    "routesPartial": 0,
+    "unresolved": 0,
+    "gaps": [],
+    "aiAttempted": 0,
+    "aiResolved": 0,
+    "aiResolvedRoutes": [],
+    "diagnostics": []
+  },
+  "project": {
+    "title": "Scanned API",
+    "version": "1.0.0",
+    "operations": [
+      {
+        "method": "get",
+        "path": "/api/TodoItems",
+        "operationId": "TodoItems_GetTodoItems",
+        "tags": [
+          "todoItems"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/TodoItemsController.cs",
+          "line": 19
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/api/TodoItems/{id}",
+        "operationId": "TodoItems_GetTodoItem",
+        "tags": [
+          "todoItems"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "confidence": "medium"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "title": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "detail": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "instance": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "400",
+            "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "traceId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/TodoItemsController.cs",
+          "line": 29
+        },
+        "gaps": []
+      },
+      {
+        "method": "put",
+        "path": "/api/TodoItems/{id}",
+        "operationId": "TodoItems_PutTodoItem",
+        "tags": [
+          "todoItems"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "confidence": "medium"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "$ref": "#/components/schemas/TodoItemDTO"
+              }
+            }
+          ],
+          "confidence": "medium"
+        },
+        "responses": [
+          {
+            "statusCode": "400",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "title": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "detail": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "instance": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "title": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "detail": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "instance": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "204",
+            "description": "",
+            "confidence": "high"
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/TodoItemsController.cs",
+          "line": 46
+        },
+        "gaps": []
+      },
+      {
+        "method": "post",
+        "path": "/api/TodoItems",
+        "operationId": "TodoItems_PostTodoItem",
+        "tags": [
+          "todoItems"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "$ref": "#/components/schemas/TodoItemDTO"
+              }
+            }
+          ],
+          "confidence": "medium"
+        },
+        "responses": [
+          {
+            "statusCode": "201",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "400",
+            "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "traceId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/TodoItemsController.cs",
+          "line": 79
+        },
+        "gaps": []
+      },
+      {
+        "method": "delete",
+        "path": "/api/TodoItems/{id}",
+        "operationId": "TodoItems_DeleteTodoItem",
+        "tags": [
+          "todoItems"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "confidence": "medium"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "title": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "detail": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "instance": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "errors": {
+                      "type": "object",
+                      "nullable": true,
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "204",
+            "description": "",
+            "confidence": "high"
+          },
+          {
+            "statusCode": "400",
+            "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/problem+json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number",
+                      "enum": [
+                        400
+                      ]
+                    },
+                    "errors": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "traceId": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/TodoItemsController.cs",
+          "line": 99
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/WeatherForecast",
+        "operationId": "WeatherForecast_Get",
+        "tags": [
+          "weatherForecast"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/serialized_WeatherForecast"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "Controllers/WeatherForecastController.cs",
+          "line": 21
+        },
+        "gaps": []
+      }
+    ],
+    "components": [
+      {
+        "name": "serialized_TodoItemDTO",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "isComplete": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "isComplete"
+          ]
+        }
+      },
+      {
+        "name": "TodoItemDTO",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "isComplete": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      {
+        "name": "serialized_WeatherForecast",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "format": "date"
+            },
+            "temperatureC": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "temperatureF": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "date",
+            "temperatureC",
+            "temperatureF",
+            "summary"
+          ]
+        }
+      }
+    ],
+    "securitySchemes": [],
+    "servers": [],
+    "unresolved": []
+  },
+  "document": {
+    "openapi": "3.2.0",
+    "info": {
+      "title": "Scanned API",
+      "version": "1.0.0"
+    },
+    "servers": [
+      {
+        "url": "/"
+      }
+    ],
+    "paths": {
+      "/api/TodoItems": {
+        "get": {
+          "operationId": "TodoItems_GetTodoItems",
+          "tags": [
+            "todoItems"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "post": {
+          "operationId": "TodoItems_PostTodoItem",
+          "tags": [
+            "todoItems"
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoItemDTO"
+                }
+              }
+            }
+          },
+          "responses": {
+            "201": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "number",
+                        "enum": [
+                          400
+                        ]
+                      },
+                      "errors": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "traceId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/TodoItems/{id}": {
+        "get": {
+          "operationId": "TodoItems_GetTodoItem",
+          "tags": [
+            "todoItems"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/serialized_TodoItemDTO"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "number",
+                        "enum": [
+                          400
+                        ]
+                      },
+                      "errors": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "traceId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "title": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "detail": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "instance": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "errors": {
+                        "type": "object",
+                        "nullable": true,
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "put": {
+          "operationId": "TodoItems_PutTodoItem",
+          "tags": [
+            "todoItems"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoItemDTO"
+                }
+              }
+            }
+          },
+          "responses": {
+            "204": {
+              "description": ""
+            },
+            "400": {
+              "description": "",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "title": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "detail": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "instance": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "errors": {
+                        "type": "object",
+                        "nullable": true,
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "title": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "detail": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "instance": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "errors": {
+                        "type": "object",
+                        "nullable": true,
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "delete": {
+          "operationId": "TodoItems_DeleteTodoItem",
+          "tags": [
+            "todoItems"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": ""
+            },
+            "400": {
+              "description": "Automatic model binding/validation failed (ValidationProblemDetails)",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "number",
+                        "enum": [
+                          400
+                        ]
+                      },
+                      "errors": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "traceId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/problem+json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "title": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "detail": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "instance": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "errors": {
+                        "type": "object",
+                        "nullable": true,
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/WeatherForecast": {
+        "get": {
+          "operationId": "WeatherForecast_Get",
+          "tags": [
+            "weatherForecast"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/serialized_WeatherForecast"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "components": {
+      "schemas": {
+        "serialized_TodoItemDTO": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "isComplete": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "isComplete"
+          ]
+        },
+        "TodoItemDTO": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "isComplete": {
+              "type": "boolean"
+            }
+          }
+        },
+        "serialized_WeatherForecast": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "format": "date"
+            },
+            "temperatureC": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "temperatureF": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "date",
+            "temperatureC",
+            "temperatureF",
+            "summary"
+          ]
+        }
+      }
+    }
+  },
+  "gapReviews": [],
+  "valid": true,
+  "ok": true,
+  "diagnostics": []
+}

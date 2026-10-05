@@ -24,7 +24,7 @@ export function buildCsSerializationIndex(analysis: CSharpAnalysis): CsModelInde
     });
     return [name, { ...def, fields }];
   }));
-  return { ...model, byName };
+  return { ...model, byName, wireSerialization: true };
 }
 
 export function serializedComponents(model: CsModelIndex, reserved: Set<string>) {
