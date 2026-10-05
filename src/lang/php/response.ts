@@ -19,13 +19,96 @@ import type { TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findAll, findFirst } from "../treesitter/ast.js";
 import { phpStringText, resolvePhpClass, findPhpMethod, type PhpClass } from "./index.js";
 import type { PhpModelIndex } from "./schema.js";
-import { ensurePhpResponseComponent, formalParameters, phpTypeToSchema } from "./schema.js";
+import { ensurePhpResponseComponent, ensurePhpSerializedComponent, formalParameters, phpTypeToSchema, docTypeToSerializedSchema } from "./schema.js";
 
 /** Read an integer literal node as its decimal text, or null. */
 export function integerText(node: TsNode | undefined): string | null {
   if (!node) return null;
   const int = node.type === "integer" ? node : node.namedChildren.find((c) => c.type === "integer");
-  return int?.text ?? null;
+  if (int) return int.text.replace(/[_\s]/g, "");
+  return phpHttpConstantText(node);
+}
+
+/**
+ * Symfony HttpFoundation (and PSR-7) `Response::HTTP_*` status constants.
+ * These are fixed framework constants, so the mapping is stable evidence
+ * rather than a project-specific assumption.
+ */
+const HTTP_STATUS_CONSTANTS: Record<string, string> = {
+  HTTP_CONTINUE: "100",
+  HTTP_SWITCHING_PROTOCOLS: "101",
+  HTTP_PROCESSING: "102",
+  HTTP_EARLY_HINTS: "103",
+  HTTP_OK: "200",
+  HTTP_CREATED: "201",
+  HTTP_ACCEPTED: "202",
+  HTTP_NON_AUTHORITATIVE_INFORMATION: "203",
+  HTTP_NO_CONTENT: "204",
+  HTTP_RESET_CONTENT: "205",
+  HTTP_PARTIAL_CONTENT: "206",
+  HTTP_MULTI_STATUS: "207",
+  HTTP_ALREADY_REPORTED: "208",
+  HTTP_IM_USED: "226",
+  HTTP_MULTIPLE_CHOICES: "300",
+  HTTP_MOVED_PERMANENTLY: "301",
+  HTTP_FOUND: "302",
+  HTTP_SEE_OTHER: "303",
+  HTTP_NOT_MODIFIED: "304",
+  HTTP_USE_PROXY: "305",
+  HTTP_RESERVED: "306",
+  HTTP_TEMPORARY_REDIRECT: "307",
+  HTTP_PERMANENTLY_REDIRECT: "308",
+  HTTP_BAD_REQUEST: "400",
+  HTTP_UNAUTHORIZED: "401",
+  HTTP_PAYMENT_REQUIRED: "402",
+  HTTP_FORBIDDEN: "403",
+  HTTP_NOT_FOUND: "404",
+  HTTP_METHOD_NOT_ALLOWED: "405",
+  HTTP_NOT_ACCEPTABLE: "406",
+  HTTP_PROXY_AUTHENTICATION_REQUIRED: "407",
+  HTTP_REQUEST_TIMEOUT: "408",
+  HTTP_CONFLICT: "409",
+  HTTP_GONE: "410",
+  HTTP_LENGTH_REQUIRED: "411",
+  HTTP_PRECONDITION_FAILED: "412",
+  HTTP_REQUEST_ENTITY_TOO_LARGE: "413",
+  HTTP_REQUEST_URI_TOO_LONG: "414",
+  HTTP_UNSUPPORTED_MEDIA_TYPE: "415",
+  HTTP_REQUESTED_RANGE_NOT_SATISFIABLE: "416",
+  HTTP_EXPECTATION_FAILED: "417",
+  HTTP_I_AM_A_TEAPOT: "418",
+  HTTP_MISDIRECTED_REQUEST: "421",
+  HTTP_UNPROCESSABLE_ENTITY: "422",
+  HTTP_LOCKED: "423",
+  HTTP_FAILED_DEPENDENCY: "424",
+  HTTP_TOO_EARLY: "425",
+  HTTP_UPGRADE_REQUIRED: "426",
+  HTTP_PRECONDITION_REQUIRED: "428",
+  HTTP_TOO_MANY_REQUESTS: "429",
+  HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE: "431",
+  HTTP_UNAVAILABLE_FOR_LEGAL_REASONS: "451",
+  HTTP_INTERNAL_SERVER_ERROR: "500",
+  HTTP_NOT_IMPLEMENTED: "501",
+  HTTP_BAD_GATEWAY: "502",
+  HTTP_SERVICE_UNAVAILABLE: "503",
+  HTTP_GATEWAY_TIMEOUT: "504",
+  HTTP_VERSION_NOT_SUPPORTED: "505",
+  HTTP_VARIANT_ALSO_NEGOTIATES_EXPERIMENTAL: "506",
+  HTTP_INSUFFICIENT_STORAGE: "507",
+  HTTP_LOOP_DETECTED: "508",
+  HTTP_NOT_EXTENDED: "510",
+  HTTP_NETWORK_AUTHENTICATION_REQUIRED: "511",
+};
+
+export function phpHttpConstantByName(constant: string): string | null {
+  return HTTP_STATUS_CONSTANTS[constant.toUpperCase()] ?? null;
+}
+
+function phpHttpConstantText(node: TsNode | undefined): string | null {
+  if (!node || node.type !== "class_constant_access_expression") return null;
+  const names = node.namedChildren.filter((c) => c.type === "name" || c.type === "qualified_name");
+  const constant = names[names.length - 1]?.text;
+  return constant ? phpHttpConstantByName(constant) : null;
 }
 
 /** Read a static string literal argument, or null when dynamic. */
@@ -325,6 +408,92 @@ export function inferStaticModel(call: TsNode, model: PhpModelIndex): JsonSchema
     return { type: "array", items: ref };
   }
   return ref;
+}
+
+const REPO_ARRAY_METHODS = new Set(["findall", "findby", "findallbynames", "findbyids"]);
+const REPO_ONE_METHODS = new Set(["find", "findoneby", "findonebyname"]);
+const REPO_COUNT_METHODS = new Set(["count", "countby"]);
+
+/** Resolve a `Book::class` class constant or FQCN string argument to a class. */
+function classConstantEntity(node: TsNode | undefined, model: PhpModelIndex, handler?: TsNode): PhpClass | undefined {
+  if (!node) return undefined;
+  // Arguments are wrapped in an `argument` node; unwrap to the expression.
+  const expr = node.type === "argument" ? node.namedChildren[0] : node;
+  if (!expr) return undefined;
+  if (expr.type === "class_constant_access_expression") {
+    const nameNode = expr.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
+    return nameNode ? resolvePhpClass(nameNode.text, model.analysis, nameNode) : undefined;
+  }
+  if (expr.type === "string") {
+    const text = phpStringText(expr);
+    if (!text) return undefined;
+    return model.analysis.classes.get(text.replace(/^\\/, "")) ?? resolvePhpClass(text, model.analysis, handler);
+  }
+  return undefined;
+}
+
+/** Read the entity bound in a ServiceEntityRepository `parent::__construct($reg, Book::class)`. */
+function repoConstructorEntity(cls: PhpClass | undefined, model: PhpModelIndex): PhpClass | undefined {
+  const ctor = cls?.methods.get("__construct");
+  if (!ctor) return undefined;
+  for (const call of findAll(ctor, (n) => n.type === "member_call_expression")) {
+    if (call.namedChildren.find((c) => c.type === "name")?.text !== "__construct") continue;
+    const args = call.namedChildren.find((c) => c.type === "arguments");
+    const list = args ? childrenOfType(args, "argument") : [];
+    const entity = classConstantEntity(list[1], model, ctor) ?? classConstantEntity(list[0], model, ctor);
+    if (entity) return entity;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a Doctrine ObjectRepository call chain to its entity schema:
+ *   $em->getRepository(Book::class)->findAll()  -> Book[]
+ *   $em->getRepository(Book::class)->find($id)  -> Book  (success branch)
+ * A typed repository variable is supported as well, and its class docblock
+ * `@method` annotations provide the precise element/nullability types.
+ */
+export function inferDoctrineRepositoryCall(call: TsNode, model: PhpModelIndex, handler?: TsNode): JsonSchema | undefined {
+  if (call.type !== "member_call_expression") return undefined;
+  const method = call.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+  if (!method) return undefined;
+  const receiver = call.namedChildren[0];
+
+  let entity: PhpClass | undefined;
+  let repoCls: PhpClass | undefined;
+
+  // $em->getRepository(Book::class)->findAll(): the receiver object is the
+  // inner getRepository() call itself.
+  if (receiver?.type === "member_call_expression") {
+    const innerName = receiver.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+    if (innerName === "getrepository" || innerName === "getrepositoryforclass") {
+      const args = receiver.namedChildren.find((c) => c.type === "arguments");
+      const first = args ? childrenOfType(args, "argument")[0] : undefined;
+      entity = classConstantEntity(first, model, handler);
+    } else {
+      repoCls = receiverClass(receiver, model, handler);
+    }
+  } else if (receiver?.type === "variable_name" || receiver?.type === "member_access_expression") {
+    // A typed repository variable ($books->...) or property ($this->repo->...).
+    repoCls = receiverClass(receiver, model, handler);
+  }
+  if (!entity) entity = repoConstructorEntity(repoCls, model);
+  if (!entity) return undefined;
+
+  // Collection finders honor a precise `@method Book[] findAll()` docblock.
+  if (REPO_ARRAY_METHODS.has(method) && repoCls?.magicMethods.has(method)) {
+    const schema = docTypeToSerializedSchema(repoCls.magicMethods.get(method)!, model, new Set());
+    if (Object.keys(schema).length) return schema;
+  }
+
+  const ref = ensurePhpSerializedComponent(entity.fqcn, model);
+  if (!ref) return undefined;
+  if (REPO_ARRAY_METHODS.has(method)) return { type: "array", items: ref };
+  // The not-found branch is represented by the thrown exception response; the
+  // success body is a non-null entity.
+  if (REPO_ONE_METHODS.has(method)) return ref;
+  if (REPO_COUNT_METHODS.has(method)) return { type: "integer" };
+  return undefined;
 }
 
 /** Mark a JSON response whose payload could not be statically inferred. */

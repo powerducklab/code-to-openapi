@@ -174,6 +174,198 @@ export function ensurePhpResponseComponent(name: string, index: PhpModelIndex): 
   return { $ref: `#/components/schemas/${component}` };
 }
 
+/**
+ * Build a response component as a metadata-aware serializer (JMS Serializer /
+ * Symfony Serializer) would emit it: reflection exposes private/protected
+ * properties too, field types come from the getter return type or Doctrine
+ * `@ORM\Column` metadata (which also fixes nullability), and Bazinga Hateoas
+ * `@Hateoas\Relation` annotations add a `_links` object. Used for FOSRest
+ * `$this->view()` payloads and Doctrine repository results rather than native
+ * json_encode (which only sees public fields).
+ */
+export function ensurePhpSerializedComponent(name: string, index: PhpModelIndex): JsonSchema | null {
+  const cls = index.analysis.classes.get(name);
+  if (!cls) return null;
+  const canonical = index.analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn.replace(/\\/g, ".");
+  const component = `serialized_${canonical}`;
+  if (index.components.has(component)) return { $ref: `#/components/schemas/${component}` };
+  index.components.set(component, {});
+  index.components.set(component, buildSerializedClassSchema(cls, index, new Set()));
+  return { $ref: `#/components/schemas/${component}` };
+}
+
+/** Doctrine column types that map directly onto JSON Schema scalars. */
+export const ORM_COLUMN_SCALARS: Record<string, JsonSchema> = {
+  string: { type: "string" },
+  text: { type: "string" },
+  ascii_string: { type: "string" },
+  guid: { type: "string" },
+  integer: { type: "integer" },
+  smallint: { type: "integer" },
+  tinyint: { type: "integer" },
+  bigint: { type: "integer" },
+  boolean: { type: "boolean" },
+  float: { type: "number" },
+  decimal: { type: "number" },
+  json: { type: "object" },
+  json_array: { type: "array", items: {} },
+  simple_array: { type: "array", items: { type: "string" } },
+  array: { type: "array", items: {} },
+  date: { type: "string", format: "date" },
+  datetime: { type: "string", format: "date-time" },
+  datetimetz: { type: "string", format: "date-time" },
+  datetimetz_immutable: { type: "string", format: "date-time" },
+  datetime_immutable: { type: "string", format: "date-time" },
+  date_immutable: { type: "string", format: "date" },
+  time: { type: "string" },
+};
+
+/** Collect the contiguous comment node(s) immediately preceding a declaration. */
+function leadingComment(node: TsNode | undefined): string {
+  if (!node) return "";
+  const decl = node.type === "property_declaration" ? node : node.parent;
+  const parent = decl?.parent;
+  if (!decl || !parent) return "";
+  const idx = parent.children.findIndex((c) => c.id === decl.id);
+  if (idx <= 0) return "";
+  let text = "";
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    const sibling = parent.children[i]!;
+    if (sibling.type !== "comment") break;
+    text = `${sibling.text}\n${text}`;
+  }
+  return text;
+}
+
+/** Parse a Doctrine `@ORM\Column(...)` / `#[ORM\Column(...)]` declaration. */
+export function ormColumnMeta(doc: string): { type: string; nullable: boolean } | null {
+  const match = doc.match(/@ORM\\Column\(([^)]*)\)/) ?? doc.match(/#\[ORM\\Column\(([^)]*)\)\]/);
+  if (!match) return null;
+  const args = match[1]!;
+  const typeMatch = args.match(/type\s*=\s*["']([\w_]+)["']/);
+  return {
+    type: typeMatch?.[1] ?? "string",
+    nullable: /nullable\s*=\s*true/.test(args),
+  };
+}
+
+/** Resolve a docblock type to a schema, routing class references through the
+ *  serializer component builder (so private/ORM fields are represented). */
+export function docTypeToSerializedSchema(docType: string, index: PhpModelIndex, stack: Set<string>, depth = 0): JsonSchema {
+  const type = docType.trim();
+  if (depth > 6) return {};
+  if (type.startsWith("?")) {
+    return combinePhpAlternatives([docTypeToSerializedSchema(type.slice(1), index, stack, depth + 1), { type: "null" }]);
+  }
+  const unions = type.split("|").filter(Boolean);
+  if (unions.length > 1) {
+    return combinePhpAlternatives(unions.map((part) => docTypeToSerializedSchema(part, index, stack, depth + 1)));
+  }
+  const arrayMatch = type.match(/^([\w\\]+)\[\]$/);
+  if (arrayMatch) return { type: "array", items: docTypeToSerializedSchema(arrayMatch[1]!, index, stack, depth + 1) };
+  const genericMatch = type.match(/^(?:Collection|array|list|Doctrine\\Common\\Collections\\Collection)<(?:[^,]+,\s*)?([\w\\]+)>$/i);
+  if (genericMatch) return { type: "array", items: docTypeToSerializedSchema(genericMatch[1]!, index, stack, depth + 1) };
+  const short = type.split("\\").pop()!;
+  if (SCALAR_NAMES[short]) return SCALAR_NAMES[short]!;
+  const cls = resolvePhpClass(type, index.analysis);
+  if (cls) return ensurePhpSerializedComponent(cls.fqcn, index) ?? {};
+  return {};
+}
+
+function buildSerializedClassSchema(cls: PhpClass, index: PhpModelIndex, stack: Set<string>): JsonSchema {
+  const canonical = index.analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn.replace(/\\/g, ".");
+  if (stack.has(canonical)) return { $ref: `#/components/schemas/serialized_${canonical}` };
+  stack.add(canonical);
+
+  const lineage: PhpClass[] = [];
+  let current: PhpClass | undefined = cls;
+  while (current && !lineage.includes(current) && lineage.length < 16) {
+    lineage.push(current);
+    current = current.extends ? resolvePhpClass(current.extends, index.analysis, current.node) : undefined;
+  }
+
+  // Map getter names to their return type node across the lineage.
+  const getterReturn = new Map<string, TsNode>();
+  for (const owner of lineage) {
+    for (const [methodName, method] of owner.methods) {
+      const getter = /^get([A-Z]\w*)$/.exec(methodName);
+      if (!getter) continue;
+      const field = getter[1]!.charAt(0).toLowerCase() + getter[1]!.slice(1);
+      if (getterReturn.has(field)) continue;
+      const returnType =
+        method.childForFieldName?.("return_type") ??
+        method.namedChildren.find((c) => ["named_type", "primitive_type", "optional_type", "union_type"].includes(c.type));
+      if (returnType) getterReturn.set(field, returnType);
+    }
+  }
+
+  const properties: Record<string, JsonSchema> = {};
+  const required: string[] = [];
+  for (const owner of lineage) {
+    for (const prop of owner.properties) {
+      if (prop.name in properties) continue;
+      const leading = leadingComment(prop.typeNode);
+      const varDoc = owner.propertyDoc.get(prop.name);
+      const doc = leading || (varDoc ? `@var ${varDoc}` : "");
+      const orm = ormColumnMeta(doc);
+      const getterNode = getterReturn.get(prop.name);
+
+      let base: JsonSchema;
+      let nullable: boolean;
+      if (orm) {
+        base = ORM_COLUMN_SCALARS[orm.type] ?? { type: "string" };
+        nullable = orm.nullable;
+      } else if (getterNode) {
+        const resolved = phpTypeToSchema(getterNode, index, new Set(), 0, true);
+        nullable = getterNode.type === "optional_type" || JSON.stringify(resolved).includes('"null"');
+        base = nullable ? stripNull(resolved) : resolved;
+      } else {
+        base = varDoc
+          ? docTypeToSerializedSchema(varDoc, index, stack)
+          : phpTypeToSchema(prop.typeNode, index, stack, 0, true);
+        nullable = prop.nullable;
+      }
+
+      properties[prop.name] = nullable ? combinePhpAlternatives([base, { type: "null" }]) : base;
+      // Detect an explicit `= <default>` initializer directly; untyped
+      // properties report hasDefault=true in the index and must not leak here.
+      const hasInitializer = findAll(prop.typeNode, (n) => n.type === "property_initializer").length > 0;
+      if (!nullable && !hasInitializer) required.push(prop.name);
+    }
+  }
+
+  // Bazinga Hateoas relations: `@Hateoas\Relation(name = "self", href = ...)`.
+  const relationNames = [...cls.classDoc.matchAll(/@Hateoas\\Relation\(\s*name\s*=\s*["'](\w+)["']/g)].map((m) => m[1]!);
+  if (relationNames.length) {
+    const links: Record<string, JsonSchema> = {};
+    for (const relation of relationNames) {
+      links[relation] = { type: "object", properties: { href: { type: "string" } }, required: ["href"] };
+    }
+    properties._links = { type: "object", properties: links, required: relationNames };
+    required.push("_links");
+  }
+
+  const schema: JsonSchema = { type: "object", properties };
+  if (required.length) schema.required = required;
+  stack.delete(canonical);
+  return schema;
+}
+
+/** Remove the null member of a nullable/union schema, returning the core type. */
+function stripNull(schema: JsonSchema): JsonSchema {
+  if (Array.isArray(schema.type)) {
+    const types = schema.type.filter((t): t is string => t !== "null");
+    return types.length === 1 ? { ...schema, type: types[0] } : { ...schema, type: types };
+  }
+  const anyOf = schema.anyOf as JsonSchema[] | undefined;
+  if (anyOf) {
+    const kept = anyOf.filter((s) => s.type !== "null");
+    if (kept.length === 1) return kept[0]!;
+    if (kept.length) return { anyOf: kept };
+  }
+  return schema;
+}
+
 function buildClassSchema(cls: PhpClass, index: PhpModelIndex, stack: Set<string>, publicOnly = false): JsonSchema {
   if (cls.resourceKind) {
     const resource = buildResourceSchema(cls, index, stack);

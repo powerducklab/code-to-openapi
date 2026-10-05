@@ -127,6 +127,30 @@
         "passGate": true,
         "reviewGaps": 0
       }
+    },
+    {
+      "key": "symfony-fosrest",
+      "framework": "symfony",
+      "language": "php",
+      "repo": "demartis/symfony5-rest-api",
+      "commit": "815a082258ac9d087304db500bea1c1c7c388790",
+      "scanRoot": "",
+      "runtimeEnvironment": {
+        "available": false,
+        "reason": "The audit host has no system PHP/composer and no Docker, and installing PHP via Homebrew is blocked by a root-owned /usr/local/share/man/man8 directory that cannot be written without an interactive sudo password, so the FOSRest/JMS application cannot be booted natively. No runtime baseline is fabricated. The contract is nevertheless fully locked from source reading plus stable, version-pinned FOSRestBundle 3 / JMS Serializer / Bazinga Hateoas / Symfony Form semantics (routing conventions, reflection-based property serialization, form submission and the kernel.exception event), and it reaches the field-level gate with zero review gaps and zero AI completion."
+      },
+      "baseline": "FOSRestBundle 3 (`type: rest` action-derived routing) + JMS Serializer + Bazinga Hateoas + Symfony Form + Doctrine ORM, with a custom JTTP envelope produced by a registered FOSRest view handler (success) and a kernel.exception listener (error). Four operations under /v1 (defaults _format json): GET /v1/books (cgetBookAction -> findAll -> 200 JTTP success data=array of serialized Book), POST /v1/books (postBookAction -> json_decode body, save() submits $body['data'] through BookType; valid -> persist/flush and 200 success data=Book; invalid FormException -> listener 400 JTTP error error.form map of field->message), GET /v1/books/{id} (getBookAction -> find($id), ResourceNotFoundException when absent -> listener 404 JTTP error error.detail; 200 success data=Book), PUT /v1/books/{id} (putBookAction -> same save path, so 200 / 400 form / 404 detail). There is no PATCH/DELETE/new/edit. The request body is application/json wrapped in an outer data key: {data:{title:string required (TextType required + NotBlank), pages:integer|null optional (untyped form field, entity pages ORM column integer nullable)}}; the form sets csrf_protection=false and allow_extra_fields=true so the object is open. JMS serializes the PRIVATE Book entity properties by reflection: id integer, title string, pages integer|null, plus the class-level Hateoas relation _links.self.href string; required is id/title/_links (pages nullable), and the ORM entity is never expanded beyond the serialized representation. The success envelope is {status:'success', code:integer, message:string, data:<Book[]|Book>}; the error envelope is {status:'error', code:integer const (400/404), message:string, error:<body>}; the listener maps get_class(): ResourceNotFoundException (no getStatusCode) to Response::HTTP_NOT_FOUND with default error.detail=getMessage(), while FormException (extends HttpKernel HttpException, constructor default int $statusCode=400 forwarded to parent::__construct) exposes getStatusCode() and builds error.form as a dynamic field->message map. Every envelope response carries x-audit-exact-properties; message text and the HTTP status phrase are left as string because the vendor Response::$statusTexts table is outside the scanned tree (no enum value is invented).",
+      "expectedRoutes": 4,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/symfony-fosrest.static.baseline.json",
+        "contracts": "results/contracts-batch8-symfony-static.json",
+        "scan": "results/scan-batch8-symfony.json",
+        "assertions": 263,
+        "gate": 0.96,
+        "passGate": true,
+        "reviewGaps": 0
+      }
     }
   ]
 }

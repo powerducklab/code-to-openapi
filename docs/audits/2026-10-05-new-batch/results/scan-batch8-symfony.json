@@ -1,0 +1,1047 @@
+{
+  "report": {
+    "languages": [
+      "php"
+    ],
+    "frameworks": [
+      "symfony"
+    ],
+    "filesScanned": 20,
+    "routesConfirmed": 4,
+    "routesPartial": 0,
+    "unresolved": 0,
+    "gaps": [],
+    "aiAttempted": 0,
+    "aiResolved": 0,
+    "aiResolvedRoutes": [],
+    "diagnostics": []
+  },
+  "project": {
+    "title": "Scanned API",
+    "version": "1.0.0",
+    "operations": [
+      {
+        "method": "get",
+        "path": "/v1/books",
+        "operationId": "BookController.cgetBooksAction",
+        "tags": [
+          "book"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/serialized_Book"
+                      }
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "src/Controller/BookController.php",
+          "line": 36
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/v1/books/{id}",
+        "operationId": "BookController.getBookAction",
+        "tags": [
+          "book"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/serialized_Book"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "error"
+                    },
+                    "code": {
+                      "type": "integer",
+                      "const": 404
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "x-audit-exact-properties": true
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "error"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "src/Controller/BookController.php",
+          "line": 47
+        },
+        "gaps": []
+      },
+      {
+        "method": "post",
+        "path": "/v1/books",
+        "operationId": "BookController.postBookAction",
+        "tags": [
+          "book"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "pages": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "title": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "title"
+                    ]
+                  }
+                },
+                "required": [
+                  "data"
+                ]
+              }
+            }
+          ],
+          "confidence": "high"
+        },
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/serialized_Book"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "400",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "error"
+                    },
+                    "code": {
+                      "type": "integer",
+                      "const": 400
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "form": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "form"
+                      ],
+                      "x-audit-exact-properties": true
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "error"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "src/Controller/BookController.php",
+          "line": 64
+        },
+        "gaps": []
+      },
+      {
+        "method": "put",
+        "path": "/v1/books/{id}",
+        "operationId": "BookController.putBookAction",
+        "tags": [
+          "book"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "pages": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "title": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "title"
+                    ]
+                  }
+                },
+                "required": [
+                  "data"
+                ]
+              }
+            }
+          ],
+          "confidence": "high"
+        },
+        "responses": [
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "error"
+                    },
+                    "code": {
+                      "type": "integer",
+                      "const": 404
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "x-audit-exact-properties": true
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "error"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/serialized_Book"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "400",
+            "description": "",
+            "confidence": "medium",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "error"
+                    },
+                    "code": {
+                      "type": "integer",
+                      "const": 400
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "form": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "form"
+                      ],
+                      "x-audit-exact-properties": true
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "code",
+                    "message",
+                    "error"
+                  ],
+                  "x-audit-exact-properties": true
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "src/Controller/BookController.php",
+          "line": 79
+        },
+        "gaps": []
+      }
+    ],
+    "components": [
+      {
+        "name": "serialized_Book",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "title": {
+              "type": "string"
+            },
+            "pages": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "_links": {
+              "type": "object",
+              "properties": {
+                "self": {
+                  "type": "object",
+                  "properties": {
+                    "href": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "href"
+                  ]
+                }
+              },
+              "required": [
+                "self"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "_links"
+          ]
+        }
+      }
+    ],
+    "securitySchemes": [],
+    "servers": [],
+    "unresolved": []
+  },
+  "document": {
+    "openapi": "3.2.0",
+    "info": {
+      "title": "Scanned API",
+      "version": "1.0.0"
+    },
+    "servers": [
+      {
+        "url": "/"
+      }
+    ],
+    "paths": {
+      "/v1/books": {
+        "get": {
+          "operationId": "BookController.cgetBooksAction",
+          "tags": [
+            "book"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "success"
+                      },
+                      "code": {
+                        "type": "integer"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/serialized_Book"
+                        }
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "data"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "post": {
+          "operationId": "BookController.postBookAction",
+          "tags": [
+            "book"
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "pages": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "title"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "success"
+                      },
+                      "code": {
+                        "type": "integer"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "$ref": "#/components/schemas/serialized_Book"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "data"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "error"
+                      },
+                      "code": {
+                        "type": "integer",
+                        "const": 400
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "object",
+                        "properties": {
+                          "form": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "form"
+                        ],
+                        "x-audit-exact-properties": true
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "error"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/v1/books/{id}": {
+        "get": {
+          "operationId": "BookController.getBookAction",
+          "tags": [
+            "book"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "success"
+                      },
+                      "code": {
+                        "type": "integer"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "$ref": "#/components/schemas/serialized_Book"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "data"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "error"
+                      },
+                      "code": {
+                        "type": "integer",
+                        "const": 404
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "object",
+                        "properties": {
+                          "detail": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "detail"
+                        ],
+                        "x-audit-exact-properties": true
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "error"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "put": {
+          "operationId": "BookController.putBookAction",
+          "tags": [
+            "book"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "pages": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "title"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "success"
+                      },
+                      "code": {
+                        "type": "integer"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "data": {
+                        "$ref": "#/components/schemas/serialized_Book"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "data"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "error"
+                      },
+                      "code": {
+                        "type": "integer",
+                        "const": 400
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "object",
+                        "properties": {
+                          "form": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "form"
+                        ],
+                        "x-audit-exact-properties": true
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "error"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "const": "error"
+                      },
+                      "code": {
+                        "type": "integer",
+                        "const": 404
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "object",
+                        "properties": {
+                          "detail": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "detail"
+                        ],
+                        "x-audit-exact-properties": true
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "code",
+                      "message",
+                      "error"
+                    ],
+                    "x-audit-exact-properties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "components": {
+      "schemas": {
+        "serialized_Book": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "title": {
+              "type": "string"
+            },
+            "pages": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "_links": {
+              "type": "object",
+              "properties": {
+                "self": {
+                  "type": "object",
+                  "properties": {
+                    "href": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "href"
+                  ]
+                }
+              },
+              "required": [
+                "self"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "_links"
+          ]
+        }
+      }
+    }
+  },
+  "gapReviews": [],
+  "valid": true,
+  "ok": true,
+  "diagnostics": []
+}

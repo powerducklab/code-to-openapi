@@ -18,12 +18,55 @@ bought by fabrication.
 | mongoose-express | express + mongoose | bezkoder/node-express-mongodb | 30851145 | not bootable on audit host (no mongod/Docker) | 254 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; no AI completion needed) |
 | aspnet-todoapidto | asp.net core mvc controllers (csharp) | dotnet/AspNetCore.Docs (`aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO`) | 3d06f3ee | .NET SDK 10.302 rolling forward to net9.0, EF Core InMemory | 252 assertions, all axes 1.0, 0 review gaps | n/a (static contract matches native HTTP evidence; no AI completion needed) |
 | micronaut-crud | micronaut (java) | nomemory/micronaut-crud-backend | 14921d7 | not bootable on audit host (2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5, only JDK 25 installed, no Gradle) | 174 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; static contract fixed by Micronaut/Jackson/ModelMapper semantics) |
+| symfony-fosrest | symfony / FOSRest 3 + JMS + Hateoas + Form (php) | demartis/symfony5-rest-api | 815a0822 | not bootable on audit host (no PHP/composer, no Docker; Homebrew PHP blocked by a root-owned `/usr/local/share/man/man8`) | 263 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; contract fixed by FOSRest/JMS/Hateoas/Form/kernel.exception semantics from source) |
 
-Later samples planned for this batch: a Symfony JSON API (API Platform style,
-not the Twig SSR demo). Micronaut is now closed statically. Each gets the same
-closed loop: real third-party project at a pinned commit, native runtime where
-the environment allows it, independently hand-written static and runtime
-baselines, generic scanner fixes with regression tests.
+The Symfony JSON API sample is now closed statically (FOSRest, not the Twig SSR
+demo). Each sample follows the same closed loop: real third-party project at a
+pinned commit, native runtime where the environment allows it, independently
+hand-written static and runtime baselines, generic scanner fixes with
+regression tests.
+
+## Symfony FOSRest sample — what was added (static-only)
+
+The demartis/symfony5-rest-api sample exercises four generic gaps that any
+FOSRest/JMS/Symfony Form project can hit; the fixes are framework-general, not
+sample-specific:
+
+1. **Config discovery** — the indexer previously indexed only `config/routes*.yaml`;
+   DI and bundle config under `config/` (services, packages) define the response
+   view handler, exception listener and validation, so the whole `config/` YAML
+   tree is now indexed.
+2. **FOSRest `type: rest` routes** — CRUD routes are derived from action method
+   names (cget/get/post/put + Action) with the collection/item path and JSON
+   format, recovering the four `/v1/books` operations.
+3. **JMS/Hateoas response schema** — JMS serializes private entity properties by
+   reflection; the serializer resolves the Doctrine repository chain
+   (`findAll`/`find` via `@method` docblock magic), entity ORM column nullability
+   and the class-level Hateoas `_links.self.href`, without expanding the whole
+   database entity.
+4. **Symfony Form request body** — `buildForm()` field types and constraints
+   decide required/type, the bound entity fills untyped fields, and submitting
+   `$body['data']` wraps the JSON body in an outer `data` key.
+5. **Static factory envelope + kernel.exception association** — a generic
+   envelope analyzer reads the factory/serializer pair for both success and
+   error branches (JTTP), and the kernel.exception listener is discovered from
+   its service tag and parsed into a per-exception dispatch: the `getStatusCode()`
+   branch (FormException extends HttpKernel HttpException, constructor default
+   `int $statusCode = 400` read from `parent::__construct`) and the
+   `get_class()` switch including its separate `default_statement`
+   (ResourceNotFoundException -> 404 `error.detail`). Throws inside same-class
+   private helpers (the shared `save()` form path) are associated too.
+
+Honest limits: no native HTTP evidence was collected because the audit host has
+no PHP runtime and Homebrew cannot install PHP without an interactive sudo
+password. The status phrase (`message`) is typed as `string` rather than an
+invented enum because the vendor `Response::$statusTexts` table is outside the
+scanned tree; dynamic form error field names are represented as
+`additionalProperties: string` rather than guessed field lists. A second, more
+opinionated Symfony project (tarlepp/symfony-flex-backend, pinned
+ec262a03) stays out of the gate on purpose: its private Rest Resource trait
+routing and `$dtoClasses`/AutoMapper response abstraction is a custom framework
+not statically provable and is tracked as an honest gap, not force-fitted.
 
 ## Two-layer acceptance model
 

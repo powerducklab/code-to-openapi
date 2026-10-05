@@ -2,8 +2,8 @@
  "summary": {
   "gate": 0.96,
   "batch": 8,
-  "projects": 4,
-  "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness. The Express+Mongoose sample is deterministic-only: its contract is fully fixed by Mongoose schema/serialization semantics, it reaches the gate with zero review gaps (no AI completion), and the audit host has no MongoDB runtime so no runtime baseline is fabricated. Success-path required fields on `new Model(...)`/`.save()`/`Model.create` documents are proven statically from early-return request guards (including compound `!req.body || !req.body.field` checks) and defaulting expressions (`field || default`, `field ?? default`, and `cond ? field : literal`), so guarded fields (e.g. title) and default-backed fields (e.g. published via a ternary `: false`) are marked required while unguarded, non-defaulted fields (e.g. description) stay optional; the full database entity is never expanded beyond the serialized document. The ASP.NET Core MVC controller sample (Microsoft official TodoApiDTO, fixed commit, natively run on .NET 10 rolling forward to net9) adds 252 assertions covering per-return-branch controller results, DTO projection that hides the entity Secret field, [ApiController] automatic value-type/body 400 validation, .NET 9 RFC 7807 problem bodies for bodiless error results, and value-type request optionality; it reaches the gate with zero review gaps. The Micronaut 2.1.3 sample (nomemory/micronaut-crud-backend, fixed commit) adds 174 deterministic assertions covering HttpResponse<T> generic-entity fallback for method-call bodies (Optional.get(), service calls), the implicit unannotated POJO @Body, bodiless wildcard HttpResponse<?> successes, nested static DTO getter scoping (no inner-class property leakage), and ModelMapper target-DTO responses that never expand the JPA entities or the eager many-to-many graph; it is static-only because the 2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5 toolchain cannot run on the host's only JDK (25) with no Gradle installed, and it reaches the gate with zero review gaps.",
+  "projects": 5,
+  "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness. The Express+Mongoose sample is deterministic-only: its contract is fully fixed by Mongoose schema/serialization semantics, it reaches the gate with zero review gaps (no AI completion), and the audit host has no MongoDB runtime so no runtime baseline is fabricated. Success-path required fields on `new Model(...)`/`.save()`/`Model.create` documents are proven statically from early-return request guards (including compound `!req.body || !req.body.field` checks) and defaulting expressions (`field || default`, `field ?? default`, and `cond ? field : literal`), so guarded fields (e.g. title) and default-backed fields (e.g. published via a ternary `: false`) are marked required while unguarded, non-defaulted fields (e.g. description) stay optional; the full database entity is never expanded beyond the serialized document. The ASP.NET Core MVC controller sample (Microsoft official TodoApiDTO, fixed commit, natively run on .NET 10 rolling forward to net9) adds 252 assertions covering per-return-branch controller results, DTO projection that hides the entity Secret field, [ApiController] automatic value-type/body 400 validation, .NET 9 RFC 7807 problem bodies for bodiless error results, and value-type request optionality; it reaches the gate with zero review gaps. The Micronaut 2.1.3 sample (nomemory/micronaut-crud-backend, fixed commit) adds 174 deterministic assertions covering HttpResponse<T> generic-entity fallback for method-call bodies (Optional.get(), service calls), the implicit unannotated POJO @Body, bodiless wildcard HttpResponse<?> successes, nested static DTO getter scoping (no inner-class property leakage), and ModelMapper target-DTO responses that never expand the JPA entities or the eager many-to-many graph; it is static-only because the 2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5 toolchain cannot run on the host's only JDK (25) with no Gradle installed, and it reaches the gate with zero review gaps. The Symfony FOSRest sample (demartis/symfony5-rest-api, fixed commit) adds 263 deterministic assertions covering FOSRest `type: rest` action-derived route recall, JMS reflection serialization of private Doctrine entity properties with Bazinga Hateoas _links, the Symfony Form request body wrapped in an outer data key (required/nullable field constraints), a static factory success/error envelope (JTTP) resolved from the registered view handler and kernel.exception listener, and static association of thrown classes to the listener's getStatusCode() branch and get_class() switch (FormException -> 400 error.form, ResourceNotFoundException -> 404 error.detail), including exceptions thrown from same-class private helpers; it is static-only because the host has no PHP/composer runtime (Homebrew blocked by a root-owned man directory) and no Docker, and it reaches the gate with zero review gaps.",
   "deterministic": {
    "routeRecall": 1.0,
    "routePrecision": 1.0,
@@ -13,7 +13,7 @@
    "constraintAccuracy": 1.0,
    "unresolvedRatio": 0.0,
    "overall": 1.0,
-   "totalAssertions": 852,
+   "totalAssertions": 1115,
    "totalMismatches": 0,
    "totalUnknown": 0,
    "totalExtra": 0,
@@ -174,6 +174,38 @@
     "contracts": "results/contracts-batch8-micronaut-static.json",
     "scan": "results/scan-batch8-micronaut.json",
     "assertions": 174,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGaps": 0,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
+    },
+    "passGate": true
+   }
+  },
+  {
+   "key": "symfony-fosrest",
+   "framework": "symfony",
+   "language": "php",
+   "repo": "demartis/symfony5-rest-api",
+   "commit": "815a082258ac9d087304db500bea1c1c7c388790",
+   "scanRoot": "",
+   "routesDetected": 4,
+   "routesExpected": 4,
+   "falseRoutes": 0,
+   "static": {
+    "baseline": "baselines/symfony-fosrest.static.baseline.json",
+    "contracts": "results/contracts-batch8-symfony-static.json",
+    "scan": "results/scan-batch8-symfony.json",
+    "assertions": 263,
     "mismatches": 0,
     "unknown": 0,
     "extra": 0,

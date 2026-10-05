@@ -27,6 +27,10 @@ export interface PhpClass {
   jsonSerializable?: boolean;
   /** Docblock @var tag per property name (e.g. "string[]"). */
   propertyDoc: Map<string, string>;
+  /** Raw class docblock, used for serializer/Hateoas metadata. */
+  classDoc: string;
+  /** `@method ReturnType name(...)` magic methods declared on the class docblock. */
+  magicMethods: Map<string, string>;
   /** FormRequest rules() entries, when present. */
   formRules: PhpRule[];
   /** Laravel API resource classification. */
@@ -105,6 +109,16 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[], imp
   let formRules: PhpRule[] = [];
 
   const classDoc = docblockAbove(lines, node.startPosition.row);
+
+  // Doctrine repository classes document inherited magic finders, e.g.
+  // `@method Book[] findAll()` and `@method Book|null find($id)`; these carry
+  // the precise return type the statically declared parent method lacks.
+  const magicMethods = new Map<string, string>();
+  for (const match of classDoc.matchAll(
+    /@method\s+(?:static\s+)?([\w\\?|[\]<> ,:]+?)\s*&?\$?(\w+)\s*\(/g,
+  )) {
+    magicMethods.set(match[2]!, match[1]!.trim());
+  }
   const mixinMatch = classDoc.match(/@mixin\s+([\\\w]+)/);
   const mixinModel = mixinMatch ? mixinMatch[1]!.split("\\").pop()! : null;
 
@@ -209,6 +223,8 @@ function parseClass(node: TsNode, namespace: string | null, lines: string[], imp
     methods,
     properties,
     propertyDoc,
+    classDoc,
+    magicMethods,
     formRules,
     resourceKind,
     mixinModel,
@@ -315,6 +331,22 @@ export function resolvePhpClass(name: string, analysis: PhpAnalysis, at?: TsNode
     return analysis.classes.get(qualified);
   }
   return analysis.classes.get(raw);
+}
+
+/** Resolve a short class name to its lexical FQCN string, including vendor classes absent from the index. */
+export function resolvePhpFqcn(name: string, analysis: PhpAnalysis, at?: TsNode): string {
+  let root = at;
+  while (root?.parent) root = root.parent;
+  const files = new Map([...analysis.files.values()].map((file) => [file.root.id, file]));
+  const file = root ? files.get(root.id) : undefined;
+  const raw = name.replace(/^\\/, "");
+  if (name.startsWith("\\")) return raw;
+  if (file) {
+    const parts = raw.split("\\");
+    const imported = file.imports.get(parts[0]!);
+    return imported ? [imported, ...parts.slice(1)].join("\\") : file.namespace ? `${file.namespace}\\${raw}` : raw;
+  }
+  return raw;
 }
 
 export function findPhpMethod(cls: PhpClass, name: string, analysis: PhpAnalysis): TsNode | undefined {

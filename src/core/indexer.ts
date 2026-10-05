@@ -196,7 +196,12 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
 
       const dot = entry.name.lastIndexOf(".");
       const ext = dot >= 0 ? entry.name.slice(dot).toLowerCase() : "";
-      const language = EXTENSION_LANGUAGE[ext]??(/(?:^|\/)config\/routes(?:\/[^]+)?\.ya?ml$/.test(rel)?'yaml':undefined);
+      // Symfony/Laravel-style framework config lives under config/: routing
+      // tables, the DI container (services.yaml) and package configuration
+      // (packages/*.yaml, e.g. fos_rest, serializer) that can define response
+      // handlers, exception listeners and validation. Index the whole tree.
+      const configYaml = /(?:^|\/)config\/.+\.ya?ml$/.test(rel);
+      const language = EXTENSION_LANGUAGE[ext] ?? (configYaml ? "yaml" : undefined);
       if (!language) continue;
       if (!options.includeTests && TEST_FILE.test(rel)) continue;
       if (ig.ignores(rel)) continue;
