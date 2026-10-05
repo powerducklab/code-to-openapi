@@ -111,6 +111,7 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
             joinRoute(groupPrefixChain(call), ""),
             only,
             except,
+            groupNamespaceChain(call),
           );
           candidates.push(...resource);
           continue;
@@ -134,6 +135,7 @@ export const laravelPack: FrameworkPack<PhpAnalysis> = {
               joinRoute(prefix, ""),
               rel,
               call,
+              groupNamespaceChain(call),
             );
             if (candidate) candidates.push(candidate);
           }
@@ -248,6 +250,39 @@ function groupOptionsPrefix(groupCall: TsNode): string {
   return "";
 }
 
+// Read the 'namespace' option of a Route::group([...], closure) call.
+function groupOptionsNamespace(groupCall: TsNode): string {
+  const args = callArguments(groupCall);
+  const options = args
+    .find((a) => a.namedChildren.some((c) => c.type === "array_creation_expression"))
+    ?.namedChildren.find((c) => c.type === "array_creation_expression");
+  if (!options) return "";
+  for (const element of childrenOfType(options, "array_element_initializer")) {
+    const strings = childrenOfType(element, "string");
+    if (phpStringText(strings[0]) === "namespace") {
+      return phpStringText(strings[1]) ?? "";
+    }
+  }
+  return "";
+}
+
+// Collect the namespace segments of every enclosing route group, outer-first.
+function groupNamespaceChain(call: TsNode): string {
+  const parts: string[] = [];
+  let current: TsNode | null = call.parent ?? null;
+  while (current) {
+    if (current.type === "anonymous_function_creation_expression" || current.type === "closure_expression") {
+      const groupCall = findEnclosingGroupCall(current);
+      if (groupCall) {
+        const namespace = groupOptionsNamespace(groupCall);
+        if (namespace) parts.unshift(namespace);
+      }
+    }
+    current = current.parent ?? null;
+  }
+  return parts.join("\\");
+}
+
 function expandMatchVerbs(name: string, args: TsNode[]): string[] {
   if (name !== "match") return [name];
   // Route::match(['get','post'], ...)
@@ -269,6 +304,7 @@ function buildRoute(
   groupPrefix: string,
   rel: string,
   call: TsNode,
+  groupNamespace = "",
 ): RouteCandidate | null {
   // The first argument is the path string (possibly wrapped in an argument
   // node); the handler is the second argument.
@@ -284,7 +320,7 @@ function buildRoute(
     [...fullPath.matchAll(/\{([^}?]+)\??\}/g)].map((m) => m[1]!),
   );
 
-  let handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
+  let handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports, groupNamespace);
   if (!handler) {
     // Route::controller(C::class)->prefix('x')->group(function () {
     //     Route::get('path', 'someMethod');   // bare string handler
@@ -360,10 +396,47 @@ interface ResolvedHandler {
   method: string | null;
 }
 
+/**
+ * Resolve a controller referenced by short name, relative namespace or FQCN in
+ * a string route action. The group namespace narrows the match when the same
+ * short controller name exists under more than one namespace.
+ */
+function resolveStringControllerClass(
+  analysis: PhpAnalysis,
+  classRef: string,
+  groupNamespace: string,
+): PhpClass | null {
+  const normalized = classRef.replace(/^\//, "").replace(/\//g, "\\").replace(/^\\+|\\+$/g, "");
+  const direct = analysis.classes.get(normalized);
+  if (direct) return direct;
+
+  const allClasses = [...new Set(analysis.classes.values())];
+  const namespaceSuffix = groupNamespace
+    .replace(/\//g, "\\")
+    .replace(/^\\+|\\+$/g, "");
+  if (namespaceSuffix) {
+    const suffix = `${namespaceSuffix}\\${normalized}`;
+    const namespaced = allClasses.filter((c) => c.fqcn === suffix || c.fqcn.endsWith(`\\${suffix}`));
+    if (namespaced.length === 1) return namespaced[0]!;
+    if (namespaced.length > 1) {
+      // Prefer the conventional HTTP controller location when ambiguous.
+      const preferred = namespaced.find((c) => c.fqcn.includes("Http\\Controllers"));
+      if (preferred) return preferred;
+    }
+  }
+  if (normalized.includes("\\")) {
+    const fqcn = allClasses.find((c) => c.fqcn === normalized || c.fqcn.endsWith(`\\${normalized}`));
+    if (fqcn) return fqcn;
+  }
+  const byShortName = allClasses.filter((c) => c.name === normalized);
+  return byShortName.length === 1 ? byShortName[0]! : null;
+}
+
 function resolveHandler(
   handlerArg: TsNode | undefined,
   analysis: PhpAnalysis,
   routeImports?: Map<string, string>,
+  groupNamespace = "",
 ): ResolvedHandler | null {
   if (!handlerArg) return null;
   const inner = handlerArg.namedChildren[0] ?? handlerArg;
@@ -379,6 +452,26 @@ function resolveHandler(
     if (!cls) return raw;
     return analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn;
   };
+
+  // String action reference: 'Controller@method', 'Api\\Controller@method' or a
+  // fully qualified class action. This is the classic Laravel route form and
+  // honors the enclosing group namespace.
+  if (inner.type === "string") {
+    const text = phpStringText(inner);
+    if (text && text.includes("@")) {
+      const at = text.lastIndexOf("@");
+      const classRef = text.slice(0, at).trim();
+      const actionMethod = text.slice(at + 1).trim();
+      const cls = resolveStringControllerClass(analysis, classRef, groupNamespace);
+      if (cls && actionMethod) {
+        const controllerKey = analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn;
+        const node = findPhpMethod(cls, actionMethod, analysis) ?? null;
+        if (node) return { node, controller: controllerKey, method: actionMethod };
+        return { node: null as unknown as TsNode, controller: controllerKey, method: actionMethod };
+      }
+    }
+    return null;
+  }
 
   // Read the class reference from a ::class constant access, excluding the
   // literal "class" keyword token that tree-sitter also exposes as a name.
@@ -498,6 +591,52 @@ function resolveInheritedController(
   return null;
 }
 
+/** Walk the extends chain to decide whether a class is a FormRequest descendant. */
+function isFormRequestDescendant(cls: PhpClass, analysis: PhpAnalysis): boolean {
+  let current: PhpClass | undefined = cls;
+  const seen = new Set<string>();
+  while (current && !seen.has(current.fqcn)) {
+    seen.add(current.fqcn);
+    if (current.name === "FormRequest" || current.fqcn.endsWith("\\FormRequest")) return true;
+    current = current.extends
+      ? resolvePhpClass(current.extends, analysis, current.node) ?? undefined
+      : undefined;
+  }
+  return false;
+}
+
+/**
+ * A FormRequest may validate a wrapped payload via validationData() returning
+ * `$this->get('article') ?: []`; nest the rules schema under that wrapper key.
+ */
+function wrapValidationData(rulesMethod: TsNode | undefined, schema: JsonSchema): JsonSchema {
+  if (!rulesMethod) return schema;
+  let owner: TsNode | null = rulesMethod.parent ?? null;
+  while (owner && owner.type !== "class_declaration") owner = owner.parent ?? null;
+  if (!owner) return schema;
+  const validationData = findAll(
+    owner,
+    (n) => n.type === "method_declaration" && /function\s+validationData\s*\(/.test(n.text),
+  )[0];
+  if (!validationData) return schema;
+  for (const call of findAll(validationData, (n) => n.type === "member_call_expression")) {
+    const methodName = call.namedChildren.find((c) => c.type === "name")?.text;
+    if (methodName !== "get") continue;
+    const args = call.namedChildren.find((c) => c.type === "arguments");
+    const keyArg = args ? childrenOfType(args, "argument")[0] : undefined;
+    const keyNode = keyArg
+      ? keyArg.type === "string"
+        ? keyArg
+        : findFirst(keyArg, (n) => n.type === "string")
+      : undefined;
+    const wrapper = keyNode ? phpStringText(keyNode) : null;
+    if (wrapper) {
+      return { type: "object", properties: { [wrapper]: schema }, required: [wrapper] };
+    }
+  }
+  return schema;
+}
+
 function collectParameters(
   handler: TsNode,
   analysis: PhpAnalysis,
@@ -552,8 +691,9 @@ function collectParameters(
     const cls = resolvePhpClass(typeName, analysis, typeNode);
 
     // FormRequest subclass -> JSON or multipart request body from rules().
+    const ownRulesMethod = cls ? cls.methods.get("rules") : undefined;
     const rulesMethod = cls ? findPhpMethod(cls, 'rules', analysis) : undefined;
-    if (cls && (rulesMethod || cls.extends?.endsWith("FormRequest"))) {
+    if (cls && (rulesMethod || cls.extends?.endsWith("FormRequest") || isFormRequestDescendant(cls, analysis))) {
       const rules = rulesMethod ? parseRulesMethod(rulesMethod) : cls.formRules;
       const schema = rules.length
         ? formRulesToSchema(rules, model)
@@ -573,13 +713,25 @@ function collectParameters(
         }
         requestBody = {
           required: Array.isArray(schema.required) && schema.required.length > 0,
-          content: [{ mediaType, schema }],
+          content: [{ mediaType, schema: wrapValidationData(rulesMethod, schema) }],
           confidence: "high",
         };
         // Register the request as a component too, for references elsewhere.
-      } else {
+      } else if (rules.length > 0) {
+        // Rules exist but their field sche could not be derived.
         gaps.push("body-schema-unknown");
+      } else if (ownRulesMethod) {
+        // The class declares rules() but returns no statically readable array
+        // (e.g. `return $this->customRules();`): the body shape is unprovable and
+        // must stay a gap rather than being treated as an empty/authorization
+        // request.
+        const returnsLiteralArray = findAll(ownRulesMethod, (n) => n.type === "return_statement")
+          .some((returnNode) => returnNode.namedChildren.some((c) => c.type === "array_creation_expression"));
+        if (!returnsLiteralArray) gaps.push("body-schema-unknown");
       }
+      // No own rules() and an empty inherited/placeholder ruleset means the
+      // request carries no validated body (typically authorization-only, e.g.
+      // DELETE), so no body gap is raised.
       continue;
     }
 
@@ -828,6 +980,10 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     }
   }
 
+  // Error branches never return normally: abort() helpers and thrown framework
+  // exceptions still produce documented error responses.
+  responses.push(...collectExceptionResponses(handler, model, gaps));
+
   if (!responses.length) {
     gaps.push("response-unknown");
     return [{ statusCode: "200", description: "", confidence: "low", content: [{ mediaType: "application/json" }] }];
@@ -841,6 +997,130 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
   }
   return [...merged.values()];
 }
+
+/**
+ * Resolve error responses produced without a normal return: the abort()/
+ * abort_if()/abort_unless() helpers, HttpResponseException carrying an explicit
+ * response, and framework exceptions mapped to a status by Laravel's default
+ * exception handler. Custom rendering in app/Exceptions/Handler.php is not
+ * statically resolved here.
+ */
+function collectExceptionResponses(
+  handler: TsNode,
+  model: PhpModelIndex,
+  gaps: GapCode[],
+): DiscoveredResponse[] {
+  const out: DiscoveredResponse[] = [];
+  const jsonError = (statusCode: string): DiscoveredResponse => ({
+    statusCode,
+    description: "",
+    confidence: "medium",
+    content: [
+      {
+        mediaType: "application/json",
+        schema: { type: "object", properties: { message: { type: "string" } } },
+      },
+    ],
+  });
+
+  // abort(code, ...), abort_if(condition, code, ...), abort_unless(condition, code, ...)
+  for (const call of findAll(handler, (n) => n.type === "function_call_expression")) {
+    if (!belongsToPhpFunction(call, handler)) continue;
+    const nameNode = call.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
+    const helper = nameNode?.text ?? "";
+    if (!/^abort(?:_if|_unless)?$/.test(helper)) continue;
+    const argumentList = call.namedChildren.find((c) => c.type === "arguments");
+    const args = argumentList ? childrenOfType(argumentList, "argument") : [];
+    const codeNode = helper === "abort" ? args[0] : args[1];
+    const code = integerText(codeNode);
+    if (code && /^[45]\d\d$/.test(code)) out.push(jsonError(code));
+  }
+
+  // Framework exception classes mapped to a status by Laravel's default handler.
+  const exceptionStatus = (simpleName: string): string | null => {
+    const map: Record<string, string> = {
+      AuthenticationException: "401",
+      UnauthorizedHttpException: "401",
+      AuthorizationException: "403",
+      AccessDeniedHttpException: "403",
+      ModelNotFoundException: "404",
+      RecordNotFoundException: "404",
+      NotFoundHttpException: "404",
+      MethodNotAllowedHttpException: "405",
+      ConflictHttpException: "409",
+      GoneHttpException: "410",
+      UnprocessableEntityHttpException: "422",
+      ValidationException: "422",
+      TooManyRequestsHttpException: "429",
+      BadRequestHttpException: "400",
+    };
+    return map[simpleName] ?? null;
+  };
+
+  for (const throwNode of findAll(handler, (n) => n.type === "throw_expression")) {
+    if (!belongsToPhpFunction(throwNode, handler)) continue;
+    const creation = findAll(throwNode, (n) => n.type === "object_creation_expression")[0];
+    if (!creation) continue;
+    const typeNode = creation.namedChildren.find(
+      (c) => c.type === "name" || c.type === "qualified_name" || c.type === "dynamic_type_name",
+    );
+    const simpleName = (typeNode?.text ?? "").replace(/^\\/, "").split("\\").pop() ?? "";
+    const argumentList = creation.namedChildren.find((c) => c.type === "arguments");
+    const ctorArgs = argumentList ? childrenOfType(argumentList, "argument") : [];
+
+    if (simpleName === "HttpResponseException") {
+      // Carries the exact response that will be sent; unwrap the argument node.
+      const responseArg = ctorArgs[0]?.namedChildren.find((c) =>
+        [
+          "member_call_expression",
+          "scoped_call_expression",
+          "function_call_expression",
+          "object_creation_expression",
+        ].includes(c.type),
+      );
+      if (responseArg) {
+        const response = interpretResponse(responseArg, model, gaps, handler);
+        if (response) out.push(response);
+      }
+      continue;
+    }
+
+    const mapped = exceptionStatus(simpleName);
+    if (mapped) {
+      out.push(jsonError(mapped));
+      continue;
+    }
+
+    if (simpleName === "HttpException") {
+      const code = integerText(ctorArgs[0]);
+      if (code && /^[45]\d\d$/.test(code)) out.push(jsonError(code));
+      continue;
+    }
+
+    // An unknown unhandled exception becomes a 500 in production, but the body
+    // changes with APP_DEBUG (trace page vs JSON message); flag it as uncertain.
+    if (/Exception$|Error$/.test(simpleName)) {
+      gaps.push("response-unknown");
+      out.push({
+        statusCode: "500",
+        description: "Unhandled exception; error body depends on Laravel debug mode",
+        confidence: "low",
+        content: [
+          {
+            mediaType: "application/json",
+            schema: { type: "object", properties: { message: { type: "string" } } },
+          },
+        ],
+      });
+    }
+  }
+
+  const merged = new Map<string, DiscoveredResponse>();
+  for (const response of out) {
+    const existing = merged.get(response.statusCode);
+    merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
+  }
+  return [...merged.values()];}
 
 function interpretResponse(
   expression: TsNode,
@@ -946,13 +1226,21 @@ function interpretResponse(
       return { statusCode: status, description: "", confidence: "high" };
     }
 
-    // Base-class response helpers such as $this->respondDownload($path): resolve
+    // Base-class response helpers such as $this->respondDownload($path),
+    // $this->respondWithTransformer($model) or $this->respondNotFound(): resolve
     // the helper on the enclosing controller (and its parent chain) and follow
     // the response its return statement builds.
     const receiverVar = expression.namedChildren.find((c) => c.type === "variable_name");
-    if (receiverVar?.text === "$this" && method && /^respond[A-Z]/.test(method)) {
-      const helper = resolveControllerHelper(method, model, gaps, handler, factoryVisited);
-      if (helper) return helper;
+    if (receiverVar?.text === "$this" && method && /^respond(?:[A-Z]|$)/.test(method)) {
+      const responder = resolveControllerResponder(
+        method,
+        argNodes,
+        handler,
+        model,
+        gaps,
+        factoryVisited,
+      );
+      if (responder) return responder;
     }
 
     const downloadLike = downloadLikeResponse(method ?? "", argNodes, gaps);
@@ -1601,6 +1889,309 @@ function resolveControllerHelper(
 }
 
 /**
+ * Resolve response helpers built on an injected presenter/transformer.
+ *
+ * A common Laravel pattern (Fractal-style and bespoke) injects a transformer
+ * into the controller and exposes base-class helpers such as
+ * `respondWithTransformer($model)` / `respondWithPagination($paginator)`. The
+ * transformer declares a resource name plus a `transform()` method that returns
+ * an associative array; a shared base class wraps that payload as
+ * `{resource: {...}}`, `{resources: [{...}]}` or `{resources: [...],
+ * resourcesCount: n}`. None of these classes extend the framework JsonResource,
+ * so they are resolved structurally rather than by a framework marker.
+ */
+
+type TransformerShape = "item" | "collection" | "paginate";
+
+function enclosingPhpClassName(node: TsNode): string | null {
+  let current: TsNode | null = node;
+  while (current && current.type !== "class_declaration") {
+    current = current.parent ?? null;
+  }
+  return current?.namedChildren.find((c) => c.type === "name")?.text ?? null;
+}
+
+function walkPhpClassChain(
+  startName: string | null,
+  model: PhpModelIndex,
+  visit: (cls: PhpClass) => boolean | void,
+): void {
+  let name = startName;
+  const seen = new Set<string>();
+  while (name && !seen.has(name)) {
+    seen.add(name);
+    const cls = model.analysis.classes.get(name);
+    if (!cls) break;
+    if (visit(cls)) return;
+    name = cls.extends?.split("\\").pop() ?? null;
+  }
+}
+
+/**
+ * Locate the transformer injected through the controller constructor. Matches
+ * constructor parameters (promoted or plain) whose type ends in `Transformer`
+ * and resolves the class through the file's import table.
+ */
+function findInjectedTransformerClass(handler: TsNode, model: PhpModelIndex): PhpClass | null {
+  let resolved: PhpClass | null = null;
+  walkPhpClassChain(enclosingPhpClassName(handler), model, (cls) => {
+    const ctor = cls.methods.get("__construct");
+    if (!ctor) return false;
+    const params = findFirst(ctor, (n) => n.type === "formal_parameters");
+    if (!params) return false;
+    for (const parameter of [
+      ...childrenOfType(params, "simple_parameter"),
+      ...childrenOfType(params, "property_promotion_parameter"),
+    ]) {
+      const typeNode =
+        parameter.namedChildren.find((c) => c.type === "named_type") ??
+        parameter.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
+      const shortName = typeNode?.text?.split("\\").pop();
+      if (!shortName || !/Transformer$/.test(shortName)) continue;
+      const byImport = resolvePhpClass(shortName, model.analysis, ctor);
+      const candidate = byImport
+        ? model.analysis.classes.get(byImport.name) ?? byImport
+        : model.analysis.classes.get(shortName);
+      if (candidate) {
+        resolved = candidate;
+        return true;
+      }
+    }
+    return false;
+  });
+  return resolved;
+}
+
+/** Read a declared string property default, walking the class chain. */
+function classStringProperty(cls: PhpClass, property: string, model: PhpModelIndex): string | undefined {
+  let value: string | undefined;
+  walkPhpClassChain(cls.fqcn.split("\\").pop() ?? cls.fqcn, model, (current) => {
+    for (const declaration of findAll(current.node, (n) => n.type === "property_declaration")) {
+      const variable = findFirst(declaration, (n) => n.type === "variable_name");
+      if (variable?.text !== `$${property}`) continue;
+      const literal = findFirst(declaration, (n) => n.type === "string");
+      if (literal) {
+        value = phpStringText(literal) ?? undefined;
+        return true;
+      }
+    }
+    return false;
+  });
+  return value;
+}
+
+function pluralizeResource(name: string): string {
+  if (/[aeiou]y$/i.test(name)) return `${name}s`;
+  if (/y$/i.test(name)) return `${name.slice(0, -1)}ies`;
+  if (/(s|x|z|ch|sh)$/i.test(name)) return `${name}es`;
+  return `${name}s`;
+}
+
+/** Infer the JSON type of a single value expression inside transform(). */
+function inferTransformValue(value: TsNode, key: string): JsonSchema {
+  if (value.type === "array_creation_expression") return buildTransformObject(value);
+  if (value.type === "integer" || value.type === "float") {
+    return { type: value.type === "integer" ? "integer" : "number" };
+  }
+  if (value.type === "string") return { type: "string" };
+  if (value.type === "boolean") return { type: "boolean" };
+  if (value.type === "member_call_expression") {
+    const method = value.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase() ?? "";
+    if (/(atomstring|tostring|format|tojsonstring|jsonserialize|implode|formatlocalized)/.test(method)) {
+      return { type: "string" };
+    }
+    if (/(count|total)/.test(method)) return { type: "integer" };
+  }
+  // List-shaped presenter fields expose arrays of records or scalars.
+  if (/(^|_)ids$/i.test(key)) return { type: "array", items: { type: "integer" } };
+  if (/(list$|tags$|names$|emails$|slugs$|categories$|collection$|items$)/i.test(key)) {
+    return { type: "array", items: { type: "string" } };
+  }
+  if (/(^|_)id$|count$|total$|quantity$|amount$|^num$|_num$/i.test(key)) return { type: "integer" };
+  if (/^(is|has|can|should|allow|enable|enabled|disable|disabled|active|deleted|favorited|following|locked|verified)[a-z]*$/i.test(key)) {
+    return { type: "boolean" };
+  }
+  // Scalar presenter fields default to string; this is an honest, non-leaking
+  // contract for values sourced from array access or model attributes.
+  return { type: "string" };
+}
+
+function buildTransformObject(arrayNode: TsNode): JsonSchema {
+  const properties: Record<string, JsonSchema> = {};
+  for (const element of childrenOfType(arrayNode, "array_element_initializer")) {
+    const keyNode = element.namedChildren.find((c) => c.type === "string");
+    if (!keyNode) continue;
+    const key = phpStringText(keyNode);
+    if (!key) continue;
+    const valueNode = element.namedChildren.find((c) => c !== keyNode);
+    if (!valueNode) continue;
+    properties[key] = inferTransformValue(valueNode, key);
+  }
+  return { type: "object", properties };
+}
+
+/** Schema produced by the transformer's transform() for one record. */
+function transformRecordSchema(transformer: PhpClass, model: PhpModelIndex): JsonSchema {
+  const method = findPhpMethod(transformer, "transform", model.analysis);
+  if (!method) return {};
+  for (const returnNode of findAll(method, (n) => n.type === "return_statement")) {
+    const arrayNode = returnNode.namedChildren.find((c) => c.type === "array_creation_expression");
+    if (arrayNode) return buildTransformObject(arrayNode);
+    // `return $data;` presents the scalar record as-is (e.g. a tag string).
+    if (returnNode.namedChildren.some((c) => c.type === "variable_name")) {
+      return { type: "string" };
+    }
+  }
+  return {};
+}
+
+function buildTransformerWrapper(
+  transformer: PhpClass,
+  shape: TransformerShape,
+  model: PhpModelIndex,
+): JsonSchema | null {
+  const resourceName = classStringProperty(transformer, "resourceName", model) ?? "data";
+  const record = transformRecordSchema(transformer, model);
+  if (!record || !Object.keys(record).length) return null;
+  if (shape === "item") {
+    return { type: "object", properties: { [resourceName]: record } };
+  }
+  const plural = pluralizeResource(resourceName);
+  const list: JsonSchema = { type: "array", items: record };
+  if (shape === "paginate") {
+    return {
+      type: "object",
+      properties: { [plural]: list, [`${plural}Count`]: { type: "integer" } },
+    };
+  }
+  return { type: "object", properties: { [plural]: list } };
+}
+
+const COLLECTION_SOURCE = /->(get|all|pluck|map|paginate|getcollection|cursor)\s*\(|::(all|get|paginate)\s*\(|new\s+[\w\\]*Collection|Collection::/;
+
+/** Heuristically decide whether a helper argument is a collection of records. */
+function argumentLooksCollection(arg: TsNode | undefined, handler: TsNode): boolean {
+  if (!arg) return false;
+  const node = arg.type === "argument" ? (arg.namedChildren[0] ?? arg) : arg;
+  if (COLLECTION_SOURCE.test(node.text)) return true;
+  if (node.type === "variable_name") {
+    for (const assignment of findAll(handler, (n) => n.type === "assignment_expression")) {
+      const lhs = assignment.namedChildren.find((c) => c.type === "variable_name");
+      if (lhs?.text === node.text && COLLECTION_SOURCE.test(assignment.text)) return true;
+    }
+  }
+  return false;
+}
+
+/** Literal payload of the first `$this->respond([...], code)` inside a method. */
+function findRespondCall(methodNode: TsNode): { payload?: TsNode; code?: TsNode } | null {
+  for (const call of findAll(methodNode, (n) => n.type === "member_call_expression")) {
+    const receiver = call.namedChildren.find((c) => c.type === "variable_name");
+    const methodName = call.namedChildren.find((c) => c.type === "name")?.text;
+    if (receiver?.text !== "$this" || methodName !== "respond") continue;
+    const args = call.namedChildren.find((c) => c.type === "arguments");
+    const argNodes = args ? childrenOfType(args, "argument") : [];
+    return { payload: argNodes[0], code: argNodes[1] };
+  }
+  return null;
+}
+
+/**
+ * Interpret a `$this->respondXxx(...)` controller helper, resolving injected
+ * transformers and named status helpers before falling back to generic
+ * return-statement inlining. Returns null when the contract cannot be proven.
+ */
+function resolveControllerResponder(
+  methodName: string,
+  argNodes: TsNode[],
+  handler: TsNode,
+  model: PhpModelIndex,
+  gaps: GapCode[],
+  visited: Set<TsNode>,
+): DiscoveredResponse | null {
+  const lower = methodName.toLowerCase();
+
+  if (lower === "respondwithtransformer" || lower === "respondwithpagination") {
+    const transformer = findInjectedTransformerClass(handler, model);
+    if (!transformer) return null;
+    const shape: TransformerShape =
+      lower === "respondwithpagination"
+        ? "paginate"
+        : argumentLooksCollection(argNodes[0], handler)
+          ? "collection"
+          : "item";
+    const schema = buildTransformerWrapper(transformer, shape, model);
+    if (!schema) return null;
+    return {
+      statusCode: "200",
+      description: "",
+      confidence: "medium",
+      content: [{ mediaType: "application/json", schema }],
+    };
+  }
+
+  if (lower === "respondsuccess") {
+    return {
+      statusCode: "200",
+      description: "",
+      confidence: "high",
+      content: [{ mediaType: "application/json", schema: { type: "object", nullable: true } }],
+    };
+  }
+  if (lower === "respondnocontent") {
+    return { statusCode: "204", description: "", confidence: "high" };
+  }
+
+  const namedErrorStatus: Record<string, string> = {
+    respondfailedlogin: "422",
+    respondnotfound: "404",
+    respondunauthorized: "401",
+    respondforbidden: "403",
+    respondinternalerror: "500",
+  };
+  if (lower in namedErrorStatus) {
+    // Resolve the helper on the class chain and read its literal respond() body.
+    let response: DiscoveredResponse | null = null;
+    walkPhpClassChain(enclosingPhpClassName(handler), model, (cls) => {
+      const helper = cls.methods.get(methodName);
+      if (!helper) return false;
+      const direct = findRespondCall(helper);
+      let payloadNode = direct?.payload;
+      let codeNode = direct?.code;
+      // Named error helpers delegate to a shared respondError($message, $code).
+      if (!payloadNode) {
+        const errorHelper = cls.methods.get("respondError");
+        const inner = errorHelper ? findRespondCall(errorHelper) : null;
+        if (inner) {
+          payloadNode = inner.payload;
+          codeNode = inner.code ?? codeNode;
+        }
+      }
+      const arrayNode = payloadNode
+        ? (findFirst(payloadNode, (n) => n.type === "array_creation_expression") ??
+          (payloadNode.type === "array_creation_expression" ? payloadNode : undefined))
+        : undefined;
+      const schema = arrayNode ? inferArraySchema(arrayNode, model, helper) : undefined;
+      const status = codeNode?.type === "integer" ? codeNode.text : namedErrorStatus[lower];
+      if (schema && Object.keys(schema).length) {
+        response = {
+          statusCode: status ?? namedErrorStatus[lower],
+          description: "",
+          confidence: "medium",
+          content: [{ mediaType: "application/json", schema }],
+        };
+        return true;
+      }
+      return false;
+    });
+    if (response) return response;
+  }
+
+  // Generic fallback: inline the helper's return statement.
+  return resolveControllerHelper(methodName, model, gaps, handler, visited);
+}
+
+/**
  * Resolve chains rooted in a static resource factory, e.g.
  * `SongResource::make($model)->for($user)` or
  * `SongResource::collection($models)->additional(['meta' => true])`.
@@ -1922,10 +2513,11 @@ function parseResourceCall(
   groupPrefix: string,
   onlyActions: Set<string> | null = null,
   exceptActions: Set<string> = new Set(),
+  groupNamespace = "",
 ): RouteCandidate[] {
   const pathArg = args[0]?.namedChildren.find((c) => c.type === "string");
   const handlerArg = args[1];
-  const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports);
+  const handler = resolveHandler(handlerArg, analysis, analysis.files.get(rel)?.imports, groupNamespace);
   // Resource controllers are passed as a bare `PostController::class`. Resolve
   // the short name through the route file's import table so namespaced or
   // name-colliding controllers (Admin vs Api vs root) still locate their class.
@@ -1934,28 +2526,49 @@ function parseResourceCall(
     handler?.controller ??
     (resourceRawName
       ? (() => {
-          const cls = resolvePhpClass(resourceRawName, analysis, handlerArg);
-          if (!cls) return resourceRawName;
-          return analysis.classes.get(cls.name) === cls ? cls.name : cls.fqcn;
+          const resolved =
+            resolveStringControllerClass(analysis, resourceRawName, groupNamespace) ??
+            (() => {
+              const cls = resolvePhpClass(resourceRawName, analysis, handlerArg);
+              return cls ? analysis.classes.get(cls.name) === cls ? cls : cls : null;
+            })();
+          if (!resolved) return resourceRawName;
+          return analysis.classes.get(resolved.name) === resolved ? resolved.name : resolved.fqcn;
         })()
       : null);
 
-  // Dot-nested resources ('albums.songs') expand to a nested URI: the
-  // collection route is /albums/{album}/songs and the item route appends
-  // /{song}. One route binding is derived per resource segment.
+  // Resources nest two ways: dot notation ('albums.songs') expands to
+  // /albums/{album}/songs, while an explicit slash path already contains the
+  // parent binding ('articles/{article}/comments'). Both yield the same nested
+  // URI, with one route binding per literal resource segment.
   const resourceName = phpStringText(pathArg) ?? "";
-  const segments = resourceName
-    .split(".")
-    .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean);
-  const bindings = segments.map((seg) => resourceBinding(seg));
-
   let collectionPath = "";
-  segments.forEach((seg, i) => {
-    collectionPath += `/${seg}`;
-    if (i < segments.length - 1) collectionPath += `/{${bindings[i]}}`;
-  });
-  const childBinding = bindings[bindings.length - 1] ?? "resource";
+  let childBinding = "resource";
+  if (resourceName.includes("/")) {
+    const slashSegments = resourceName
+      .split("/")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const literalResources: string[] = [];
+    for (const segment of slashSegments) {
+      collectionPath += `/${segment}`;
+      const bindingMatch = segment.match(/^\{([^}?]+)\??\}$/);
+      if (!bindingMatch) literalResources.push(segment);
+    }
+    const lastLiteral = literalResources[literalResources.length - 1];
+    childBinding = lastLiteral ? resourceBinding(lastLiteral) : "resource";
+  } else {
+    const segments = resourceName
+      .split(".")
+      .map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
+      .filter(Boolean);
+    const bindings = segments.map((seg) => resourceBinding(seg));
+    segments.forEach((seg, i) => {
+      collectionPath += `/${seg}`;
+      if (i < segments.length - 1) collectionPath += `/{${bindings[i]}}`;
+    });
+    childBinding = bindings[bindings.length - 1] ?? "resource";
+  }
   const basePath = joinRoute(groupPrefix, collectionPath || "/");
   const itemPath = `${basePath}/{${childBinding}}`;
 
@@ -2042,6 +2655,33 @@ function parseResourceCall(
 function resourceModifiers(call: TsNode): { only: Set<string> | null; except: Set<string> } {
   const only: string[] = [];
   const except: string[] = [];
+
+  // Options array passed as the third argument:
+  // Route::resource('x', 'XController', ['only' => [...], 'except' => [...]]).
+  const optionArg = callArguments(call)[2];
+  if (optionArg) {
+    const optionArray =
+      optionArg.type === "array_creation_expression"
+        ? optionArg
+        : optionArg.namedChildren?.find((c: TsNode) => c.type === "array_creation_expression");
+    if (optionArray) {
+      for (const element of childrenOfType(optionArray, "array_element_initializer")) {
+        const keyNode = element.namedChildren.find((c: TsNode) => c.type === "string");
+        const valueNode = element.namedChildren.find((c: TsNode) => c.type === "array_creation_expression");
+        if (!keyNode || !valueNode) continue;
+        const key = phpStringText(keyNode);
+        const values = [...childrenOfType(valueNode, "array_element_initializer")]
+          .map((item) => {
+            const textNode = item.namedChildren.find((c: TsNode) => c.type === "string");
+            return textNode ? phpStringText(textNode) : null;
+          })
+          .filter((v): v is string => Boolean(v));
+        if (key === "only") only.push(...values);
+        else if (key === "except") except.push(...values);
+      }
+    }
+  }
+
   let cursor: TsNode | null = call.parent ?? null;
   for (let depth = 0; depth < 6 && cursor; depth += 1) {
     if (cursor.type === "member_call_expression") {
@@ -2076,9 +2716,16 @@ function resourceModifiers(call: TsNode): { only: Set<string> | null; except: Se
   };
 }
 
-function resourceControllerName(handlerArg: TsNode | undefined): string | null {  if (!handlerArg) return null;
+function resourceControllerName(handlerArg: TsNode | undefined): string | null {
+  if (!handlerArg) return null;
   const access = findFirst(handlerArg, (n) => n.type === "class_constant_access_expression");
-  return access ? childrenOfType(access, "name")[0]?.text ?? null : null;
+  if (access) return childrenOfType(access, "name")[0]?.text ?? null;
+  // A bare string also names a resource controller; the action is implied by
+  // the resource verb, so it never contains '@'.
+  const stringNode =
+    handlerArg.type === "string" ? handlerArg : findFirst(handlerArg, (n) => n.type === "string");
+  const text = stringNode ? phpStringText(stringNode) : null;
+  return text && !text.includes("@") ? text.trim() : null;
 }
 
 function singular(word: string): string {

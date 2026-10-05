@@ -30,6 +30,7 @@ import type { JavaAnalysis } from "../lang/java/index.js";
 import { childrenOfType, findAll, findFirst } from "../lang/treesitter/ast.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
+  annotationElement,
   annotationStringArg,
   buildJavaModelIndex,
   javaTypeToSchema,
@@ -91,6 +92,43 @@ function emptyResult() {
   };
 }
 
+/**
+ * Built-in Micronaut HTTP status exceptions (io.micronaut.http.exceptions),
+ * keyed by simple class name. Only trusted when the name is imported from a
+ * micronaut package, so user exceptions sharing a name are not coerced.
+ */
+const MICRONAUT_HTTP_EXCEPTION_STATUS: Record<string, string> = {
+  BadRequestException: "400",
+  UnauthorizedException: "401",
+  ForbiddenException: "403",
+  NotFoundException: "404",
+  MethodNotAllowedException: "405",
+  NotAcceptableException: "406",
+  ConflictException: "409",
+  GoneException: "410",
+  UnsupportedMediaException: "415",
+  UnprocessableEntityException: "422",
+  InternalServerException: "500",
+  ServiceUnavailableException: "503",
+};
+
+/** A resolved error-producing Java method (handler body) and its source file. */
+interface ErrorHandlerRef {
+  method: TsNode;
+  rel: string;
+}
+
+interface ErrorHandlerIndex {
+  /** Global ExceptionHandler<ExceptionType, …> beans keyed by exception name. */
+  exceptionHandlers: Map<string, ErrorHandlerRef>;
+  /** @Error(exception = X.class) methods not local to a controller. */
+  byException: Map<string, ErrorHandlerRef>;
+  /** @Error(status = HttpStatus.N) methods not local to a controller. */
+  byStatus: Map<string, ErrorHandlerRef>;
+  /** @Error methods declared inside a controller, keyed by controller class id. */
+  local: Map<number, { byException: Map<string, ErrorHandlerRef>; byStatus: Map<string, ErrorHandlerRef> }>;
+}
+
 export const micronautPack: FrameworkPack<JavaAnalysis> = {
   id: "micronaut",
   language: "java",
@@ -108,6 +146,7 @@ export const micronautPack: FrameworkPack<JavaAnalysis> = {
     const unresolved: DiscoveredUnresolved[] = [];
     const candidates: RouteCandidate[] = [];
     const model = buildJavaModelIndex(analysis);
+    const errorIndex = buildErrorHandlerIndex(analysis);
 
     for (const [rel, file] of analysis.files) {
       const classes = findAll(file.root, (n) => n.type === "class_declaration");
@@ -116,7 +155,7 @@ export const micronautPack: FrameworkPack<JavaAnalysis> = {
         const controllerAnn = anns.find((a) => a.name === "Controller");
         if (!controllerAnn) continue;
         const basePath = normalizePath(annotationStringArg(controllerAnn.node) ?? "");
-        scanController(cls, basePath, analysis, model, rel, candidates);
+        scanController(cls, basePath, analysis, model, rel, candidates, errorIndex);
       }
     }
 
@@ -136,6 +175,7 @@ function scanController(
   model: JavaModelIndex,
   rel: string,
   candidates: RouteCandidate[],
+  errorIndex: ErrorHandlerIndex,
 ): void {
   const className =
     cls.namedChildren.find((c) => c.type === "identifier")?.text ?? "controller";
@@ -167,11 +207,29 @@ function scanController(
     const returnType = declaredReturnType(method);
     const isHttpResponseReturn = returnsHttpResponse(returnType, analysis, rel);
 
+    const errorResponses = collectErrorResponses(
+      method,
+      cls,
+      rel,
+      analysis,
+      model,
+      errorIndex,
+      gaps,
+    );
+
     const throwing = hasOnlyThrowingExit(method);
-    if (throwing) gaps.push("response-unknown");
-    const responses: DiscoveredResponse[] = throwing ? [{statusCode:"default",description:"Exception response requires handler resolution",confidence:"low"}] : isHttpResponseReturn
-      ? collectHttpResponses(method, returnType, model, gaps, rel, analysis)
-      : collectBareResponses(method, returnType, model, gaps, rel, fieldTypes);
+    let responses: DiscoveredResponse[];
+    if (throwing) {
+      responses = errorResponses.length
+        ? errorResponses
+        : [{ statusCode: "default", description: "Exception response requires handler resolution", confidence: "low" }];
+      if (!responses.some((r) => r.statusCode !== "default")) gaps.push("response-unknown");
+    } else {
+      const success = isHttpResponseReturn
+        ? collectHttpResponses(method, returnType, model, gaps, rel, analysis)
+        : collectBareResponses(method, returnType, model, gaps, rel, fieldTypes);
+      responses = mergeErrorResponses(success, errorResponses);
+    }
 
     const methodName =
       method.namedChildren.find((c) => c.type === "identifier")?.text ?? "op";
@@ -573,4 +631,264 @@ function collectBareResponses(
       content: [{ mediaType: "application/json", schema }],
     },
   ];
+}
+
+// --- Exception handler resolution ---------------------------------------
+
+/** Merge error responses into success responses, combining shared statuses. */
+function mergeErrorResponses(
+  success: DiscoveredResponse[],
+  errors: DiscoveredResponse[],
+): DiscoveredResponse[] {
+  const byStatus = new Map<string, DiscoveredResponse>();
+  for (const response of success) byStatus.set(response.statusCode, response);
+  for (const response of errors) {
+    const existing = byStatus.get(response.statusCode);
+    byStatus.set(
+      response.statusCode,
+      existing ? mergeResponseVariants(existing, response) : response,
+    );
+  }
+  return [...byStatus.values()];
+}
+
+/** Convert a handler method's HttpResponse builder chains to responses. */
+function handlerMethodResponses(
+  ref: ErrorHandlerRef,
+  model: JavaModelIndex,
+  analysis: JavaAnalysis,
+): DiscoveredResponse[] {
+  const built = collectBuiltResponses(ref.method, model, ref.rel, analysis);
+  if (!built.length) return [];
+  const byStatus = new Map<string, DiscoveredResponse>();
+  for (const b of built) {
+    const response: DiscoveredResponse = {
+      statusCode: b.status,
+      description: "",
+      confidence: "high",
+      ...(b.entity
+        ? { content: [{ mediaType: "application/json", schema: b.entity }] }
+        : b.bodyless
+          ? {}
+          : { content: [{ mediaType: "application/json", schema: {} }] }),
+    };
+    const existing = byStatus.get(b.status);
+    byStatus.set(b.status, existing ? mergeResponseVariants(existing, response) : response);
+  }
+  return [...byStatus.values()];
+}
+
+/** Parse an @Error annotation into an exception-class and/or status selector. */
+function errorAnnotationSpec(method: TsNode): { exception?: string; status?: string } | null {
+  const error = listAnnotations(method).find((a) => a.name === "Error");
+  if (!error) return null;
+  const spec: { exception?: string; status?: string } = {};
+  const exceptionNode = annotationElement(error.node, "exception");
+  if (exceptionNode) {
+    const simple = exceptionNode.text.replace(/\.class\b/g, "").split(".").pop();
+    if (simple) spec.exception = simple;
+  }
+  const statusNode = annotationElement(error.node, "status");
+  if (statusNode) {
+    const status = parseStatusArg(statusNode);
+    if (status) spec.status = status;
+  }
+  return spec;
+}
+
+/** First generic argument of `implements ExceptionHandler<Exc, Response>`. */
+function implementedExceptionType(cls: TsNode): string | null {
+  for (const superInterfaces of childrenOfType(cls, "super_interfaces")) {
+    for (const generic of findAll(superInterfaces, (n) => n.type === "generic_type")) {
+      const base = generic.namedChildren.find((c) => c.type === "type_identifier");
+      if (base?.text !== "ExceptionHandler") continue;
+      const typeArguments = childrenOfType(generic, "type_arguments")[0];
+      const first = typeArguments?.namedChildren[0];
+      const simple = typeNameOf(first ?? null);
+      if (simple && !["Object", "Throwable", "Exception", "RuntimeException"].includes(simple)) {
+        return simple;
+      }
+    }
+  }
+  return null;
+}
+
+function findHandleMethod(cls: TsNode): TsNode | null {
+  const body = childrenOfType(cls, "class_body")[0];
+  if (!body) return null;
+  const methods = childrenOfType(body, "method_declaration").filter(
+    (m) => m.namedChildren.find((c) => c.type === "identifier")?.text === "handle",
+  );
+  return (
+    methods.find((m) => {
+      const params = childrenOfType(m, "formal_parameters")[0];
+      const count = params
+        ? childrenOfType(params, "formal_parameter").length
+        : 0;
+      return count === 2;
+    }) ??
+    methods[0] ??
+    null
+  );
+}
+
+function buildErrorHandlerIndex(analysis: JavaAnalysis): ErrorHandlerIndex {
+  const exceptionHandlers = new Map<string, ErrorHandlerRef>();
+  const byException = new Map<string, ErrorHandlerRef>();
+  const byStatus = new Map<string, ErrorHandlerRef>();
+  const local = new Map<
+    number,
+    { byException: Map<string, ErrorHandlerRef>; byStatus: Map<string, ErrorHandlerRef> }
+  >();
+
+  for (const [rel, file] of analysis.files) {
+    for (const cls of findAll(file.root, (n) => n.type === "class_declaration")) {
+      const isController = listAnnotations(cls).some((a) => a.name === "Controller");
+      const body = childrenOfType(cls, "class_body")[0];
+      if (body) {
+        // A @Error method is only activated inside a @Controller bean. A controller
+        // that declares route methods scopes its @Error handlers locally; a controller
+        // with no route methods acts as a global error handler. @Error methods on plain
+        // classes are not registered by Micronaut and are intentionally ignored.
+        const hasRouteMethod = childrenOfType(body, "method_declaration").some((m) =>
+          listAnnotations(m).some((a) => Boolean(VERB_ANNOTATIONS[a.name])),
+        );
+        for (const method of childrenOfType(body, "method_declaration")) {
+          const spec = errorAnnotationSpec(method);
+          if (!spec || !isController) continue;
+          const ref: ErrorHandlerRef = { method, rel };
+          if (hasRouteMethod) {
+            let bucket = local.get(cls.id);
+            if (!bucket) {
+              bucket = { byException: new Map(), byStatus: new Map() };
+              local.set(cls.id, bucket);
+            }
+            if (spec.exception) bucket.byException.set(spec.exception, ref);
+            if (spec.status) bucket.byStatus.set(spec.status, ref);
+          } else {
+            if (spec.exception) byException.set(spec.exception, ref);
+            if (spec.status) byStatus.set(spec.status, ref);
+          }
+        }
+      }
+      const exceptionType = implementedExceptionType(cls);
+      if (exceptionType) {
+        const handle = findHandleMethod(cls);
+        if (handle && !exceptionHandlers.has(exceptionType)) {
+          exceptionHandlers.set(exceptionType, { method: handle, rel });
+        }
+      }
+    }
+  }
+
+  return { exceptionHandlers, byException, byStatus, local };
+}
+
+interface ThrownException {
+  name: string;
+  statusArg?: TsNode;
+}
+
+/** Exceptions constructed and thrown directly in this method (not nested helpers). */
+function directThrownCreations(method: TsNode): ThrownException[] {
+  const out: ThrownException[] = [];
+  for (const throwStatement of findAll(method, (n) => n.type === "throw_statement")) {
+    let owner = throwStatement.parent;
+    while (
+      owner &&
+      owner.id !== method.id &&
+      !["lambda_expression", "method_declaration", "class_body"].includes(owner.type)
+    ) {
+      owner = owner.parent;
+    }
+    if (owner?.id !== method.id) continue;
+    const creation = findAll(throwStatement, (n) => n.type === "object_creation_expression")[0];
+    if (!creation) continue;
+    const typeNode = creation.namedChildren.find((c) =>
+      ["type_identifier", "generic_type", "scoped_type_identifier"].includes(c.type),
+    );
+    const name = typeNameOf(typeNode ?? null);
+    if (!name) continue;
+    const argumentList = childrenOfType(creation, "argument_list")[0];
+    const statusArg = argumentList?.namedChildren[0];
+    out.push({ name, ...(statusArg ? { statusArg } : {}) });
+  }
+  return out;
+}
+
+/** Resolve every direct throw site to the handler or framework error contract. */
+function collectErrorResponses(
+  method: TsNode,
+  cls: TsNode,
+  rel: string,
+  analysis: JavaAnalysis,
+  model: JavaModelIndex,
+  errorIndex: ErrorHandlerIndex,
+  gaps: GapCode[],
+): DiscoveredResponse[] {
+  const localHandlers = errorIndex.local.get(cls.id);
+  const importTable = analysis.imports.get(rel);
+  const fromMicronaut = (simple: string): boolean => {
+    const fq = importTable?.explicit.get(simple);
+    if (fq && fq.includes("micronaut")) return true;
+    return (importTable?.wildcards ?? []).some((w) => /micronaut\.http\.exceptions/.test(w));
+  };
+
+  const byStatus = new Map<string, DiscoveredResponse>();
+  const addHandler = (ref: ErrorHandlerRef | undefined): boolean => {
+    if (!ref) return false;
+    const resolved = handlerMethodResponses(ref, model, analysis);
+    if (!resolved.length) return false;
+    for (const response of resolved) {
+      const existing = byStatus.get(response.statusCode);
+      byStatus.set(
+        response.statusCode,
+        existing ? mergeResponseVariants(existing, response) : response,
+      );
+    }
+    return true;
+  };
+  const addJsonError = (status: string): void => {
+    if (byStatus.has(status)) return;
+    byStatus.set(status, {
+      statusCode: status,
+      description: "",
+      confidence: "medium",
+      content: [{ mediaType: "application/json", schema: {} }],
+    });
+    gaps.push(status === "default" ? "response-unknown" : "response-schema-unknown");
+  };
+
+  for (const thrown of directThrownCreations(method)) {
+    const exceptionRef =
+      localHandlers?.byException.get(thrown.name) ??
+      errorIndex.exceptionHandlers.get(thrown.name) ??
+      errorIndex.byException.get(thrown.name);
+    if (addHandler(exceptionRef)) continue;
+
+    const explicitStatus = thrown.statusArg ? parseStatusArg(thrown.statusArg) : null;
+    if (explicitStatus) {
+      const statusRef =
+        localHandlers?.byStatus.get(explicitStatus) ?? errorIndex.byStatus.get(explicitStatus);
+      if (addHandler(statusRef)) continue;
+      addJsonError(explicitStatus);
+      continue;
+    }
+
+    if (thrown.name === "HttpStatusException") {
+      addJsonError("default");
+      continue;
+    }
+
+    const builtin = MICRONAUT_HTTP_EXCEPTION_STATUS[thrown.name];
+    if (builtin && fromMicronaut(thrown.name)) {
+      addJsonError(builtin);
+      continue;
+    }
+
+    // An unhandled domain exception surfaces as a framework 500 JSON error.
+    addJsonError("500");
+  }
+
+  return [...byStatus.values()];
 }

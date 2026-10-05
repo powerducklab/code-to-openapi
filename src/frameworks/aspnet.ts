@@ -198,16 +198,18 @@ export const aspnetPack: FrameworkPack<CSharpAnalysis> = {
     const unresolved: DiscoveredUnresolved[] = [];
     const candidates: RouteCandidate[] = [];
     const model = buildCsModelIndex(analysis);
+    const exceptionIndex = buildAspNetExceptionIndex(analysis, model);
+    const fvIndex = buildFluentValidationIndex(analysis);
 
     const convention=controllerPrefix(analysis);
     for (const [rel, file] of analysis.files) {
       const start=candidates.length;
-      extractControllers(file.root, rel, model, candidates);
+      extractControllers(file.root, rel, model, candidates, exceptionIndex, fvIndex);
       if(convention)for(const route of candidates.slice(start)){
         route.path=('/'+convention.prefix+'/'+route.path).replace(/\/+/g,'/');route.fullPath=route.path;
         if(convention.dynamic)route.gaps=[...new Set([...(route.gaps??[]),'path-dynamic' as const])];
       }
-      extractMinimalApis(file.root, rel, model, candidates);
+      extractMinimalApis(file.root, rel, model, candidates, exceptionIndex);
     }
 
     const components = [...model.components.entries()].map(([name, schema]) => ({
@@ -344,6 +346,8 @@ function extractControllers(
   rel: string,
   model: CsModelIndex,
   out: RouteCandidate[],
+  exceptionIndex: AspNetExceptionIndex,
+  fvIndex: FluentValidationIndex,
 ): void {
   const classes = findAll(root, (n) => n.type === "class_declaration");
   for (const cls of classes) {
@@ -399,11 +403,12 @@ function extractControllers(
 
       const origin: SourceLocation = { file: rel, line: method.startPosition.row + 1 };
       const paramsNode = method.namedChildren.find((c) => c.type === "parameter_list");
-      const { parameters, requestBody } = collectParameters(
+      const { parameters, requestBody, bodyDtoName } = collectParameters(
         paramsNode,
         model,
         pathParams,
         isApiController,
+        fvIndex,
       );
 
       const returnType = method.namedChildren.find(
@@ -416,7 +421,25 @@ function extractControllers(
       );
 
       const gaps: GapCode[] = [];
-      const responses = collectControllerResponses(method, verb, returnType, csSerializationIndex(model), gaps);
+      let responses = collectControllerResponses(method, verb, returnType, csSerializationIndex(model), gaps, exceptionIndex);
+      if (
+        fvIndex.enabled &&
+        bodyDtoName &&
+        fvIndex.validators.has(bodyDtoName) &&
+        !responses.some((r) => r.statusCode === "400")
+      ) {
+        // Registered FluentValidation auto-validation turns an invalid [FromBody]
+        // DTO into a 400 ValidationProblemDetails before the action executes.
+        responses = [
+          ...responses,
+          {
+            statusCode: "400",
+            description: "Request body failed FluentValidation rules",
+            confidence: "medium" as Confidence,
+            content: [{ mediaType: "application/problem+json", schema: validationProblemSchema() }],
+          },
+        ];
+      }
       const isSse = responses.some((r) =>
         r.content?.some((media) => media.mediaType === "text/event-stream"),
       );
@@ -450,6 +473,19 @@ function collectControllerResponses(
   returnType: TsNode | undefined,
   model: CsModelIndex,
   gaps: GapCode[],
+  exceptionIndex: AspNetExceptionIndex,
+): DiscoveredResponse[] {
+  const success = collectControllerSuccessResponses(method, verb, returnType, model, gaps);
+  const thrown = collectThrownErrorResponses(method, model, exceptionIndex, gaps);
+  return mergeResponses([...success, ...thrown]);
+}
+
+function collectControllerSuccessResponses(
+  method: TsNode,
+  verb: string,
+  returnType: TsNode | undefined,
+  model: CsModelIndex,
+  gaps: GapCode[],
 ): DiscoveredResponse[] {
   const explicit = listAttributes(method)
     .filter((a) => a.name === "ProducesResponseType" || a.name === "Produces")
@@ -457,7 +493,9 @@ function collectControllerResponses(
 
   if (explicit.length) return mergeResponses(explicit);
 
-  // MVC's NoContent() remains 204 when wrapped in Task/ValueTask<IActionResult>.
+  // An action that only throws has no success response; the exception handler
+  // chain (IExceptionHandler / ProblemDetails) supplies the error responses.
+  if (cSharpOnlyThrowing(method)) return [];
   // Only inspect returns belonging to this method, never nested lambdas/helpers.
   const controller = enclosingNode(method, 'class_declaration');
   const ownedReturns = findAll(method, n => n.type === 'return_statement').filter(n => {
@@ -679,6 +717,7 @@ function extractMinimalApis(
   rel: string,
   model: CsModelIndex,
   out: RouteCandidate[],
+  exceptionIndex: AspNetExceptionIndex,
 ): void {
   const invocations = findAll(root, (n) => n.type === "invocation_expression");
   const groupVarPrefixes = collectGroupVarPrefixes(root);
@@ -801,7 +840,13 @@ function extractMinimalApis(
     );
 
     const gaps: GapCode[] = [];
-    const responses = inferMinimalResponses(handlerSource, csSerializationIndex(model), gaps);
+    const successResponses = cSharpOnlyThrowing(handlerSource)
+      ? []
+      : inferMinimalResponses(handlerSource, csSerializationIndex(model), gaps);
+    const responses = mergeResponses([
+      ...successResponses,
+      ...collectThrownErrorResponses(handlerSource, model, exceptionIndex, gaps),
+    ]);
     const withName = findChainedString(invocation, "WithName");
     const isSse = responses.some((r) =>
       r.content?.some((media) => media.mediaType === "text/event-stream"),
@@ -1469,6 +1514,594 @@ function problemDetailsSchema(): JsonSchema {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Exception handler chain (.NET 8+ IExceptionHandler + AddProblemDetails)
+// ---------------------------------------------------------------------------
+
+interface AspNetExceptionHandler {
+  /** Exception simple names this handler matches; "*" means catch-all. */
+  exceptions: Set<string>;
+  responses: DiscoveredResponse[];
+}
+
+interface AspNetExceptionIndex {
+  /** AddProblemDetails() is registered, so unhandled exceptions become 500 problems. */
+  problemDetails: boolean;
+  /** Only handlers registered through AddExceptionHandler<T>() are activated. */
+  handlers: Map<string, AspNetExceptionHandler>;
+}
+
+const CSHARP_TYPE_PATTERN_NODES = new Set([
+  "constant_pattern",
+  "declaration_pattern",
+  "recursive_pattern",
+]);
+const NON_TYPE_PATTERNS = new Set([
+  "null",
+  "true",
+  "false",
+  "string",
+  "int",
+  "long",
+  "short",
+  "byte",
+  "bool",
+  "decimal",
+  "double",
+  "float",
+  "object",
+  "Guid",
+  "DateTime",
+  "DateTimeOffset",
+  "DateOnly",
+  "TimeOnly",
+]);
+
+function simpleCsTypeName(text: string): string {
+  return text.replace(/[?()]/g, "").split(".").pop()?.split("<")[0]?.trim() ?? "";
+}
+
+/** Resolve a status code literal or StatusCodes.StatusNNN* expression. */
+function csStatusCode(node: TsNode | undefined): string | null {
+  if (!node) return null;
+  const text = node.text.trim();
+  const named = /Status(\d{3})/.exec(text);
+  if (named) return named[1]!;
+  const numeric = /\b([1-5]\d{2})\b/.exec(text);
+  if (numeric) return numeric[1]!;
+  return null;
+}
+
+/** Exception types matched inside an IExceptionHandler.TryHandleAsync body. */
+function handlerExceptionTypes(method: TsNode): Set<string> {
+  const types = new Set<string>();
+  for (const pattern of findAll(method, (n) => n.type === "is_pattern_expression")) {
+    for (const inner of findAll(pattern, (n) => CSHARP_TYPE_PATTERN_NODES.has(n.type))) {
+      const typeNode =
+        inner.namedChildren.find((c) =>
+          ["identifier", "generic_name", "qualified_name"].includes(c.type),
+        ) ?? (inner.type === "constant_pattern" ? inner.namedChildren[0] : undefined);
+      const name = typeNode ? simpleCsTypeName(typeNode.text) : "";
+      if (name && !NON_TYPE_PATTERNS.has(name) && /^[A-Z]/.test(name)) types.add(name);
+    }
+  }
+  if (!types.size) types.add("*");
+  return types;
+}
+
+interface HandlerWrite {
+  kind: "json" | "problem" | "text";
+  schema?: JsonSchema;
+  status?: string;
+}
+
+/** Responses an IExceptionHandler.TryHandleAsync method actually writes. */
+function parseHandlerResponses(method: TsNode, model: CsModelIndex): DiscoveredResponse[] {
+  const statusAssignments: string[] = [];
+  for (const assignment of findAll(method, (n) => n.type === "assignment_expression")) {
+    // The "=" operator can surface as a named child in some grammar versions,
+    // so prefer the declared left/right fields with an operator-filtered fallback.
+    let left = assignment.childForFieldName("left");
+    let right = assignment.childForFieldName("right");
+    if (!left || !right) {
+      const operands = assignment.namedChildren.filter((c) => c.text !== "=");
+      left = operands[0];
+      right = operands[1];
+    }
+    if (left && /\.StatusCode$/.test(left.text) && right) {
+      const code = csStatusCode(right);
+      if (code) statusAssignments.push(code);
+    }
+  }
+
+  const writes: HandlerWrite[] = [];
+  for (const awaited of findAll(method, (n) => n.type === "await_expression")) {
+    const invocations = findAll(awaited, (n) => n.type === "invocation_expression");
+    const call = invocations[invocations.length - 1];
+    if (!call) continue;
+    const text = call.text;
+    const args = call.namedChildren.find((c) => c.type === "argument_list");
+    const argNodes = args ? childrenOfType(args, "argument") : [];
+
+    if (/\bResults\.Problem\b|\bTypedResults\.Problem\b|\bTypedResults\.ValidationProblem\b/.test(text)) {
+      // The status argument belongs to the Problem(...) call, not a trailing
+      // .ExecuteAsync(ctx) in the same awaited expression.
+      const problemCall = findAll(awaited, (n) => n.type === "invocation_expression").find((n) => {
+        const memberAccess = n.namedChildren.find((c) => c.type === "member_access_expression");
+        const methodName = memberAccess?.namedChildren.at(-1)?.text ?? "";
+        return methodName === "Problem" || methodName === "ValidationProblem";
+      });
+      const problemArgs = problemCall
+        ? childrenOfType(problemCall.namedChildren.find((c) => c.type === "argument_list")!, "argument")
+        : argNodes;
+      let status: string | undefined;
+      for (const arg of problemArgs) {
+        const nameNode = findFirst(arg, (n) => n.type === "identifier" && n.text === "statusCode");
+        if (!nameNode) continue;
+        const operands = arg.namedChildren.filter((c) => c.type !== "name_colon");
+        const value = operands.at(-1);
+        if (value) status = csStatusCode(value) ?? undefined;
+      }
+      writes.push({ kind: "problem", ...(status ? { status } : {}) });
+      continue;
+    }
+    if (/\.WriteAsJsonAsync\b/.test(text)) {
+      const payload = argNodes[0];
+      let schema: JsonSchema | undefined;
+      if (payload) {
+        const created = findFirst(payload, (n) => n.type === "object_creation_expression");
+        const createdType = created ? simpleCsTypeName(created.childForFieldName("type")?.text ?? "") : "";
+        if (createdType === "ProblemDetails" || createdType === "ValidationProblemDetails") {
+          schema = problemDetailsSchema();
+        } else {
+          schema = inferExpressionSchema(payload, model, method);
+        }
+      }
+      writes.push({ kind: "json", ...(schema && Object.keys(schema).length ? { schema } : {}) });
+      continue;
+    }
+    if (/\.WriteAsync\b/.test(text)) {
+      writes.push({ kind: "text" });
+      continue;
+    }
+  }
+
+  const responses: DiscoveredResponse[] = [];
+  let assignmentCursor = 0;
+  for (const write of writes) {
+    if (write.kind === "problem") {
+      responses.push({
+        statusCode: write.status ?? "500",
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "application/problem+json", schema: problemDetailsSchema() }],
+      });
+      continue;
+    }
+    const status = statusAssignments[assignmentCursor++] ?? "500";
+    if (write.kind === "json") {
+      responses.push({
+        statusCode: status,
+        description: "",
+        confidence: write.schema ? "high" : "medium",
+        content: write.schema
+          ? [{ mediaType: "application/json", schema: write.schema }]
+          : [{ mediaType: "application/json" }],
+      });
+    } else {
+      responses.push({
+        statusCode: status,
+        description: "",
+        confidence: "high",
+        content: [{ mediaType: "text/plain", schema: { type: "string" } }],
+      });
+    }
+  }
+  if (!writes.length && statusAssignments.length) {
+    for (const status of [...new Set(statusAssignments)]) {
+      responses.push({ statusCode: status, description: "", confidence: "high" });
+    }
+  }
+  return responses;
+}
+
+function buildAspNetExceptionIndex(
+  analysis: CSharpAnalysis,
+  model: CsModelIndex,
+): AspNetExceptionIndex {
+  let problemDetails = false;
+  const registered = new Set<string>();
+  for (const file of analysis.files.values()) {
+    for (const invocation of findAll(file.root, (n) => n.type === "invocation_expression")) {
+      const text = invocation.text;
+      if (/\bAddProblemDetails\s*\(/.test(text)) problemDetails = true;
+      const generic = /\bAddExceptionHandler\s*<\s*([A-Za-z_]\w*)\s*>/.exec(text);
+      if (generic) registered.add(generic[1]!);
+    }
+  }
+
+  const handlers = new Map<string, AspNetExceptionHandler>();
+  for (const file of analysis.files.values()) {
+    for (const cls of findAll(file.root, (n) => n.type === "class_declaration")) {
+      const baseList = cls.namedChildren.find((n) => n.type === "base_list");
+      if (!baseList || !/\bIExceptionHandler\b/.test(baseList.text)) continue;
+      const className = cls.childForFieldName("name")?.text ?? "";
+      const body = childrenOfType(cls, "declaration_list")[0];
+      const method = body
+        ? childrenOfType(body, "method_declaration").find(
+            (m) => m.childForFieldName("name")?.text === "TryHandleAsync",
+          )
+        : undefined;
+      if (!className || !method) continue;
+      const responses = parseHandlerResponses(method, model);
+      const exceptions = handlerExceptionTypes(method);
+      // A handler only runs when registered through AddExceptionHandler<T>().
+      if (registered.has(className)) {
+        handlers.set(className, { exceptions, responses });
+      }
+    }
+  }
+  return { problemDetails, handlers };
+}
+
+/** Exceptions constructed and thrown directly in the given action/lambda body. */
+/**
+ * True when an action/lambda has no reachable success return and only exits by
+ * throwing (covers block bodies and expression-bodied `=> throw` members).
+ */
+function cSharpOnlyThrowing(owner: TsNode): boolean {
+  const owned = (types: string[]) =>
+    findAll(owner, (n) => types.includes(n.type)).filter((n) => {
+      let parent = n.parent;
+      while (parent && parent.id !== owner.id) {
+        if (["lambda_expression", "anonymous_method_expression", "local_function_statement"].includes(parent.type)) {
+          return false;
+        }
+        parent = parent.parent;
+      }
+      return parent?.id === owner.id;
+    });
+  const returns = owned(["return_statement"]);
+  const throws = owned(["throw_statement", "throw_expression"]);
+  return throws.length > 0 && returns.length === 0;
+}
+
+/** Exceptions constructed and thrown directly in the given action/lambda body. */
+function directThrownExceptionNames(owner: TsNode): string[] {
+  const names: string[] = [];
+  for (const throwNode of findAll(
+    owner,
+    (n) => n.type === "throw_statement" || n.type === "throw_expression",
+  )) {
+    let parent = throwNode.parent;
+    while (parent && parent.id !== owner.id) {
+      if (["lambda_expression", "anonymous_method_expression", "local_function_statement"].includes(parent.type)) {
+        parent = null;
+        break;
+      }
+      parent = parent.parent;
+    }
+    if (parent?.id !== owner.id) continue;
+    const creation = findAll(throwNode, (n) => n.type === "object_creation_expression")[0];
+    const typeName = creation ? simpleCsTypeName(creation.childForFieldName("type")?.text ?? "") : "";
+    if (typeName) names.push(typeName);
+  }
+  return [...new Set(names)];
+}
+
+/**
+ * Resolve every direct throw of an action/lambda to a registered IExceptionHandler
+ * response, or the framework 500 ProblemDetails fallback when AddProblemDetails is
+ * registered. KeyNotFound and other domain exceptions are NOT auto-mapped to 404.
+ */
+function collectThrownErrorResponses(
+  owner: TsNode,
+  model: CsModelIndex,
+  index: AspNetExceptionIndex,
+  gaps: GapCode[],
+): DiscoveredResponse[] {
+  const byStatus = new Map<string, DiscoveredResponse>();
+  const add = (response: DiscoveredResponse) => {
+    const existing = byStatus.get(response.statusCode);
+    byStatus.set(
+      response.statusCode,
+      existing ? mergeResponseVariants(existing, response) : response,
+    );
+  };
+
+  for (const exceptionName of directThrownExceptionNames(owner)) {
+    let handled = false;
+    for (const handler of index.handlers.values()) {
+      if (!handler.exceptions.has(exceptionName) && !handler.exceptions.has("*")) continue;
+      for (const response of handler.responses) add(response);
+      handled = handler.responses.length > 0;
+      if (handler.responses.length) break;
+    }
+    if (handled) continue;
+    if (index.problemDetails) {
+      add({
+        statusCode: "500",
+        description: "",
+        confidence: "medium",
+        content: [{ mediaType: "application/problem+json", schema: problemDetailsSchema() }],
+      });
+    } else {
+      gaps.push("response-unknown");
+      add({ statusCode: "default", description: "Unhandled exception contract unknown", confidence: "low" });
+    }
+  }
+  return [...byStatus.values()];
+}
+
+// ---------------------------------------------------------------------------
+// FluentValidation: AbstractValidator<T> rule extraction and the auto-
+// validation registration chain. A validator class alone is not enough: it
+// must be registered (AddValidatorsFromAssembly*/AddValidator/IValidator DI)
+// together with AddFluentValidationAutoValidation for [ApiController] actions
+// to return 400 ValidationProblemDetails automatically.
+// ---------------------------------------------------------------------------
+
+interface FvPropertyRules {
+  required: boolean;
+  constraints: JsonSchema;
+}
+
+export interface FluentValidationIndex {
+  enabled: boolean;
+  validators: Map<string, Map<string, FvPropertyRules>>;
+}
+
+/** Extract the validated DTO name from `class V : AbstractValidator<Dto>`. */
+function fvValidatedDto(baseList: TsNode | undefined): string | undefined {
+  if (!baseList) return undefined;
+  for (const base of baseList.namedChildren) {
+    if (base.type !== "generic_name") continue;
+    const head = base.namedChildren.find((c) => c.type === "identifier")?.text ?? "";
+    if (head !== "AbstractValidator") continue;
+    const typeArgs = base.namedChildren.find((c) => c.type === "type_argument_list");
+    const dto = typeArgs?.namedChildren.find((c) =>
+      ["identifier", "generic_name", "qualified_name"].includes(c.type),
+    );
+    if (dto) return simpleCsTypeName(dto.text);
+  }
+  return undefined;
+}
+
+/** Resolve the member selected by `x => x.Property` (single level only). */
+function fvLambdaProperty(lambda: TsNode | null | undefined): string | undefined {
+  if (!lambda) return undefined;
+  const body = lambda.childForFieldName("body") ?? lambda.namedChildren.at(-1);
+  if (body?.type === "member_access_expression") {
+    return body.namedChildren.at(-1)?.text;
+  }
+  return undefined;
+}
+
+function fvInvocationName(inv: TsNode): string | undefined {
+  const memberAccess = inv.namedChildren.find((c) => c.type === "member_access_expression");
+  if (memberAccess) return memberAccess.namedChildren.at(-1)?.text;
+  const head = inv.namedChildren[0];
+  if (head?.type === "generic_name") return head.namedChildren.find((c) => c.type === "identifier")?.text;
+  if (head?.type === "identifier") return head.text;
+  return undefined;
+}
+
+function fvIntArg(args: TsNode[], index = 0): number | undefined {
+  const raw = args[index]?.text.trim();
+  if (raw && /^-?\d+$/.test(raw)) return Number(raw);
+  return undefined;
+}
+
+function fvStringArg(args: TsNode[], index = 0): string | undefined {
+  const raw = args[index]?.text.trim();
+  if (raw && raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1);
+  return undefined;
+}
+
+/** Map a single FluentValidation rule call onto a JSON Schema fragment. */
+function fvApplyRule(prop: FvPropertyRules, rule: string, args: TsNode[], conditional: boolean): void {
+  switch (rule) {
+    case "NotNull":
+    case "NotEmpty":
+      // A required assertion gated behind When/Unless cannot be proven
+      // unconditionally, so it does not force the property to be required.
+      if (!conditional) prop.required = true;
+      break;
+    case "MinimumLength": {
+      const value = fvIntArg(args);
+      if (value != null) prop.constraints.minLength = value;
+      break;
+    }
+    case "MaximumLength": {
+      const value = fvIntArg(args);
+      if (value != null) prop.constraints.maxLength = value;
+      break;
+    }
+    case "Length": {
+      const min = fvIntArg(args, 0);
+      const max = fvIntArg(args, 1);
+      if (min != null) prop.constraints.minLength = min;
+      if (max != null) prop.constraints.maxLength = max;
+      break;
+    }
+    case "EmailAddress":
+      prop.constraints.format = "email";
+      break;
+    case "Url":
+      prop.constraints.format = "uri";
+      break;
+    case "Matches": {
+      const pattern = fvStringArg(args);
+      if (pattern != null) prop.constraints.pattern = pattern;
+      break;
+    }
+    case "InclusiveBetween": {
+      const min = fvIntArg(args, 0);
+      const max = fvIntArg(args, 1);
+      if (min != null) prop.constraints.minimum = min;
+      if (max != null) prop.constraints.maximum = max;
+      break;
+    }
+    case "GreaterThanOrEqualTo": {
+      const value = fvIntArg(args);
+      if (value != null) prop.constraints.minimum = value;
+      break;
+    }
+    case "LessThanOrEqualTo": {
+      const value = fvIntArg(args);
+      if (value != null) prop.constraints.maximum = value;
+      break;
+    }
+    default:
+      // Exclusive bounds, custom Must() predicates, rule sets and transforms
+      // cannot be mapped to a provable static constraint; leave them unknown.
+      break;
+  }
+}
+
+/** Collect per-property rules from a validator constructor's RuleFor chains. */
+function fvRulesFromConstructor(ctor: TsNode): Map<string, FvPropertyRules> {
+  const result = new Map<string, FvPropertyRules>();
+  for (const inv of findAll(ctor, (n) => n.type === "invocation_expression")) {
+    const rootRule = fvInvocationName(inv);
+    if (rootRule !== "RuleFor") continue;
+
+    const rootArgList = inv.namedChildren.find((c) => c.type === "argument_list");
+    const firstArg = rootArgList ? childrenOfType(rootArgList, "argument")[0] : undefined;
+    const lambda = firstArg ? findFirst(firstArg, (n) => n.type === "lambda_expression") : undefined;
+    const property = fvLambdaProperty(lambda);
+    if (!property) continue;
+
+    // Walk up the fluent receiver chain. The AST nests as
+    // invocation -> member_access -> invocation, so each step crosses two
+    // levels: RuleFor(...) is the receiver of the .Rule member access, which
+    // is the function of the next rule invocation.
+    const chained: { rule: string; args: TsNode[] }[] = [];
+    let conditional = false;
+    let node: TsNode = inv;
+    while (true) {
+      const memberAccess = node.parent;
+      if (memberAccess?.type !== "member_access_expression") break;
+      if (memberAccess.namedChildren[0]?.id !== node.id) break;
+      const call = memberAccess.parent;
+      if (call?.type !== "invocation_expression") break;
+      const ruleName = memberAccess.namedChildren.at(-1)?.text ?? "";
+      if (ruleName === "When" || ruleName === "Unless") conditional = true;
+      const argList = call.namedChildren.find((c) => c.type === "argument_list");
+      chained.push({ rule: ruleName, args: argList ? childrenOfType(argList, "argument") : [] });
+      node = call;
+    }
+
+    // When/Unless only relaxes the required aspect; length/format constraints
+    // are harmless when the value is absent and remain enforceable.
+    let entry = result.get(property);
+    if (!entry) {
+      entry = { required: false, constraints: {} };
+      result.set(property, entry);
+    }
+    for (const link of chained) fvApplyRule(entry, link.rule, link.args, conditional);
+  }
+  return result;
+}
+
+function buildFluentValidationIndex(analysis: CSharpAnalysis): FluentValidationIndex {
+  const validators = new Map<string, Map<string, FvPropertyRules>>();
+  let autoValidation = false;
+  let registered = false;
+
+  const mergeInto = (dto: string, rules: Map<string, FvPropertyRules>) => {
+    const existing = validators.get(dto);
+    if (!existing) {
+      validators.set(dto, rules);
+      return;
+    }
+    for (const [prop, incoming] of rules) {
+      const current = existing.get(prop) ?? { required: false, constraints: {} };
+      current.required = current.required || incoming.required;
+      current.constraints = { ...current.constraints, ...incoming.constraints };
+      existing.set(prop, current);
+    }
+  };
+
+  for (const file of analysis.files.values()) {
+    for (const cls of findAll(file.root, (n) => n.type === "class_declaration")) {
+      const dto = fvValidatedDto(cls.namedChildren.find((c) => c.type === "base_list"));
+      const body = cls.namedChildren.find((c) => c.type === "declaration_list");
+      const ctor = body ? childrenOfType(body, "constructor_declaration")[0] : undefined;
+      if (!dto) continue;
+      if (!ctor) continue;
+      const rules = fvRulesFromConstructor(ctor);
+      if (rules.size) mergeInto(dto, rules);
+    }
+    for (const inv of findAll(file.root, (n) => n.type === "invocation_expression")) {
+      const text = inv.text;
+      if (/AddFluentValidationAutoValidation\s*\(/.test(text)) autoValidation = true;
+      if (
+        /AddValidatorsFromAssembly\w*\s*(<[^>]*>)?\s*\(/.test(text) ||
+        /\bAddValidator\s*(<[^>]*>)?\s*\(/.test(text) ||
+        /Add(?:Scoped|Transient|Singleton)\s*<\s*IValidator\s*</.test(text)
+      ) {
+        registered = true;
+      }
+    }
+  }
+
+  return { enabled: autoValidation && registered && validators.size > 0, validators };
+}
+
+/** Resolve a C# member name to its serialized JSON property (camelCase by default). */
+function fvResolveJsonProperty(member: string, properties: Record<string, JsonSchema>): string | undefined {
+  if (member in properties) return member;
+  const camel = member.charAt(0).toLowerCase() + member.slice(1);
+  if (camel in properties) return camel;
+  const lower = member.toLowerCase();
+  return Object.keys(properties).find((key) => key.toLowerCase() === lower);
+}
+
+/** Deep-clone a component schema for a DTO and overlay FluentValidation rules. */
+function applyFvRulesToBodySchema(
+  schema: JsonSchema | undefined,
+  rules: Map<string, FvPropertyRules>,
+  model: CsModelIndex,
+): JsonSchema {
+  let base: JsonSchema | undefined;
+  if (schema && "$ref" in schema) {
+    const refName = String(schema.$ref).split("/").pop();
+    const component = refName ? model.components.get(refName) : undefined;
+    base = component ? structuredClone(component) : { type: "object" };
+  } else {
+    base = schema ? structuredClone(schema) : { type: "object" };
+  }
+  const objectSchema = base as JsonSchema & { properties?: Record<string, JsonSchema>; required?: string[] };
+  if (objectSchema.type !== "object" || !objectSchema.properties) return base;
+  const required = new Set<string>(Array.isArray(objectSchema.required) ? objectSchema.required : []);
+  for (const [member, rule] of rules) {
+    const jsonProperty = fvResolveJsonProperty(member, objectSchema.properties);
+    if (!jsonProperty) continue;
+    const existing = objectSchema.properties[jsonProperty] ?? {};
+    objectSchema.properties[jsonProperty] = { ...existing, ...rule.constraints };
+    if (rule.required) required.add(jsonProperty);
+  }
+  objectSchema.required = [...required];
+  return objectSchema;
+}
+
+function validationProblemSchema(): JsonSchema {
+  return {
+    type: "object",
+    properties: {
+      type: { type: "string" },
+      title: { type: "string" },
+      status: { type: "number", enum: [400] },
+      errors: {
+        type: "object",
+        additionalProperties: { type: "array", items: { type: "string" } },
+      },
+      traceId: { type: "string" },
+    },
+  };
+}
+
 export function inferExpressionSchema(
   node: TsNode,
   model: CsModelIndex,
@@ -1635,8 +2268,10 @@ function collectParameters(
   model: CsModelIndex,
   pathParams: Set<string>,
   apiController: boolean,
+  fvIndex?: FluentValidationIndex,
 ): {
   parameters: RouteParameter[];
+  bodyDtoName?: string;
   requestBody?: {
     required: boolean;
     content: DiscoveredMediaType[];
@@ -1644,9 +2279,21 @@ function collectParameters(
   };
 } {
   const parameters: RouteParameter[] = [];
+  let bodyDtoName: string | undefined;
   let requestBody:
     | { required: boolean; content: DiscoveredMediaType[]; confidence: Confidence }
     | undefined;
+
+  // Apply registered FluentValidation rules to a JSON body DTO schema. Rules
+  // are only enforceable when the auto-validation pipeline is actually enabled
+  // and the validator is registered; a validator class alone changes nothing.
+  const bodySchemaFor = (typeNode: TsNode, baseSchema: JsonSchema | undefined) => {
+    const dtoName = simpleCsTypeName(typeNode.text.replace(/\?.*$/, ""));
+    const rules = fvIndex?.enabled ? fvIndex.validators.get(dtoName) : undefined;
+    if (!rules) return { dtoName, schema: baseSchema };
+    bodyDtoName = dtoName;
+    return { dtoName, schema: applyFvRulesToBodySchema(baseSchema, rules, model) };
+  };
 
   const addParam = (
     location: RouteParameter["in"],
@@ -1663,6 +2310,29 @@ function collectParameters(
       ...(schema && Object.keys(schema).length ? { schema } : {}),
       confidence,
     });
+  };
+
+  // Merge one multipart/form-data field (scalar, file or a flattened DTO) into
+  // a single shared form schema so mixed scalar + file parameters stay together.
+  const addFormField = (fieldName: string, fieldSchema: JsonSchema, fieldRequired: boolean) => {
+    const previous = requestBody?.content.find(
+      (content) => content.mediaType === "multipart/form-data",
+    )?.schema as JsonSchema & { properties?: Record<string, JsonSchema>; required?: string[] } | undefined;
+    const properties = { ...(previous?.properties ?? {}), [fieldName]: fieldSchema };
+    const requiredSet = new Set<string>(Array.isArray(previous?.required) ? previous.required : []);
+    if (fieldRequired) requiredSet.add(fieldName);
+    requestBody = {
+      required: requiredSet.size > 0,
+      content: [{
+        mediaType: "multipart/form-data",
+        schema: {
+          type: "object",
+          properties,
+          ...(requiredSet.size ? { required: [...requiredSet] } : {}),
+        },
+      }],
+      confidence: "high",
+    };
   };
 
   if (!paramsNode) return { parameters };
@@ -1763,6 +2433,26 @@ function collectParameters(
     const optional = nullable || hasDefault;
     const schema = csTypeToSchema(typeNode, model);
 
+    // Explicit [FromForm] on a scalar binds a multipart form field; on a complex
+    // DTO it flattens every property (including nested files) into one form schema.
+    // IFormFile/IFormFileCollection/IFormCollection are already handled above.
+    const explicitForm = findAttribute(param, new Set(["FromForm"]));
+    if (explicitForm) {
+      const bare = typeNode.text.replace(/\?.*$/, "");
+      if (bare !== "IFormCollection") {
+        if (isComplexType(typeNode, model)) {
+          for (const field of formDtoFields(typeNode, model)) {
+            addFormField(field.name, field.schema, field.required);
+          }
+        } else {
+          const alias = attributeStringArg(explicitForm);
+          const fieldRequired = !optional && !isCsValueType(typeNode, model);
+          addFormField(alias ?? name, schema ?? { type: "string" }, fieldRequired);
+        }
+      }
+      continue;
+    }
+
     if (fromRoute) {
       const explicit = attributeStringArg(fromRoute);
       addParam("path", explicit ?? name, schema, "high", true);
@@ -1809,9 +2499,10 @@ function collectParameters(
       continue;
     }
     if (fromBody) {
+      const { schema: bodySchema } = bodySchemaFor(typeNode, schema);
       requestBody = {
         required: !optional,
-        content: [{ mediaType: "application/json", schema }],
+        content: [{ mediaType: "application/json", schema: bodySchema }],
         confidence: "high",
       };
       continue;
@@ -1827,9 +2518,10 @@ function collectParameters(
     if (apiController) {
       const isComplex = isComplexType(typeNode, model);
       if (isComplex && !requestBody) {
+        const { schema: bodySchema } = bodySchemaFor(typeNode, schema);
         requestBody = {
           required: !optional,
-          content: [{ mediaType: "application/json", schema }],
+          content: [{ mediaType: "application/json", schema: bodySchema }],
           confidence: "medium",
         };
         continue;
@@ -1848,7 +2540,7 @@ function collectParameters(
     }
   }
 
-  return { parameters, ...(requestBody ? { requestBody } : {}) };
+  return { parameters, ...(bodyDtoName ? { bodyDtoName } : {}), ...(requestBody ? { requestBody } : {}) };
 }
 
 function isComplexType(typeNode: TsNode, model: CsModelIndex): boolean {
@@ -1875,8 +2567,109 @@ function isComplexType(typeNode: TsNode, model: CsModelIndex): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// multipart/form-data DTO flattening ([FromForm] on a complex type). Form model
+// binding preserves the original C# property names (no camelCase policy) and
+// binds IFormFile / collections of files alongside scalar properties.
 // ---------------------------------------------------------------------------
+
+const CS_VALUE_STRUCTS = new Set([
+  "DateTime", "DateTimeOffset", "DateOnly", "TimeOnly", "TimeSpan", "Guid",
+  "IntPtr", "UIntPtr",
+]);
+
+/** Value types bind a default when absent, so a missing form field is not 400. */
+function isCsValueType(typeNode: TsNode, model: CsModelIndex): boolean {
+  const simple = simpleCsTypeName(typeNode.text.replace(/\?.*$/, ""));
+  if (typeNode.type === "predefined_type" && !/^(?:string|object|dynamic)$/.test(simple)) return true;
+  if (CS_VALUE_STRUCTS.has(simple)) return true;
+  const def = model.byName.get(simple) as { kind?: string } | undefined;
+  return def?.kind === "enum";
+}
+
+function formGeneric(typeNode: TsNode): { head: string; inner: TsNode | undefined } | undefined {
+  const generic =
+    typeNode.type === "generic_name"
+      ? typeNode
+      : typeNode.namedChildren.find((c) => c.type === "generic_name");
+  if (!generic) return undefined;
+  const head = generic.namedChildren.find((c) => c.type === "identifier")?.text ?? "";
+  const typeArgs = generic.namedChildren.find((c) => c.type === "type_argument_list");
+  return { head, inner: typeArgs?.namedChildren[0] };
+}
+
+function isFormFileCollectionType(typeNode: TsNode): boolean {
+  if (typeNode.text.replace(/\?.*$/, "") === "IFormFileCollection") return true;
+  const generic = formGeneric(typeNode);
+  if (!generic) return false;
+  const collectionHeads = new Set([
+    "List", "IList", "ICollection", "IReadOnlyList", "IEnumerable", "Collection",
+    "HashSet", "ISet", "IFormFileCollection",
+  ]);
+  if (!collectionHeads.has(generic.head)) return false;
+  return generic.inner ? simpleCsTypeName(generic.inner.text) === "IFormFile" : false;
+}
+
+interface FormDtoField {
+  name: string;
+  schema: JsonSchema;
+  required: boolean;
+}
+
+/** Flatten a [FromForm] DTO into multipart fields using original property names. */
+function formDtoFields(typeNode: TsNode, model: CsModelIndex): FormDtoField[] {
+  const dtoName = simpleCsTypeName(typeNode.text.replace(/\?.*$/, ""));
+  const def = model.byName.get(dtoName) as { node?: TsNode } | undefined;
+  const classNode = def?.node;
+  const body = classNode?.namedChildren.find((c) => c.type === "declaration_list");
+  if (!classNode || !body) return [];
+
+  const fields: FormDtoField[] = [];
+  for (const prop of childrenOfType(body, "property_declaration")) {
+    const isStatic = prop.namedChildren.some(
+      (c) => c.type === "modifier" && /\bstatic\b/.test(c.text),
+    );
+    if (isStatic) continue;
+    const terminator = prop.namedChildren.find(
+      (c) =>
+        c.type === "accessor_list" ||
+        c.type === "equals_value_clause" ||
+        c.type === "expression_body",
+    );
+    const beforeTerminator = (c: TsNode) =>
+      !terminator ||
+      c.startPosition.row < terminator.startPosition.row ||
+      (c.startPosition.row === terminator.startPosition.row &&
+        c.startPosition.column < terminator.startPosition.column);
+    const nameNode = prop.namedChildren
+      .filter((c) => c.type === "identifier" && beforeTerminator(c))
+      .pop();
+    const propType = prop.namedChildren.find((c) =>
+      ["predefined_type", "identifier", "generic_name", "array_type", "nullable_type", "qualified_name"].includes(c.type),
+    );
+    if (!nameNode || !propType) continue;
+
+    const fieldName = nameNode.text;
+    const nullable = propType.type === "nullable_type" || /\?$/.test(propType.text.trim());
+    const initializer = prop.namedChildren.find((c) => c.type === "equals_value_clause");
+    // `= null!` is a null-forgiving assignment, not a real default; the field
+    // is still required by model binding.
+    const realDefault = Boolean(initializer) && !/null!\s*;?\s*$/.test(initializer?.text ?? "");
+    const bare = simpleCsTypeName(propType.text);
+    let schema: JsonSchema;
+    if (bare === "IFormFile") {
+      schema = { type: "string", format: "binary" };
+    } else if (isFormFileCollectionType(propType)) {
+      schema = { type: "array", items: { type: "string", format: "binary" } };
+    } else {
+      schema = csTypeToSchema(propType, model) ?? { type: "string" };
+    }
+    const required = !nullable && !realDefault && !isCsValueType(propType, model);
+    fields.push({ name: fieldName, schema, required });
+  }
+  return fields;
+}
+
+
 
 function literalValueSchema(node: TsNode): JsonSchema | null {
   if (node.type === "string_literal") return { type: "string" };

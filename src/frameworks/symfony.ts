@@ -431,6 +431,10 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     if (response) responses.push(response);
   }
 
+  // Thrown HttpKernel exceptions are converted to error responses by the
+  // kernel.exception listener rather than returning from the controller.
+  responses.push(...collectExceptionResponses(handler, gaps));
+
   if (!responses.length) {
     gaps.push("response-unknown");
     return [{ statusCode: "200", description: "", confidence: "low" }];
@@ -438,6 +442,92 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
 
   const merged = new Map<string, DiscoveredResponse>();
   for (const response of responses) {
+    const existing = merged.get(response.statusCode);
+    merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
+  }
+  return [...merged.values()];
+}
+
+/**
+ * Resolve error responses from thrown Symfony HttpKernel exceptions. The
+ * exception subclass fixes the status code; the exact error body depends on the
+ * registered error renderer and content negotiation, so it is kept generic and
+ * custom kernel.exception listeners are not statically resolved here.
+ */
+function collectExceptionResponses(handler: TsNode, gaps: GapCode[]): DiscoveredResponse[] {
+  const exceptionStatus: Record<string, string> = {
+    BadRequestHttpException: "400",
+    UnauthorizedHttpException: "401",
+    AccessDeniedHttpException: "403",
+    NotFoundHttpException: "404",
+    MethodNotAllowedHttpException: "405",
+    NotAcceptableHttpException: "406",
+    ConflictHttpException: "409",
+    GoneHttpException: "410",
+    LengthRequiredHttpException: "411",
+    PreconditionFailedHttpException: "412",
+    UnprocessableEntityHttpException: "422",
+    TooManyRequestsHttpException: "429",
+    ServiceUnavailableHttpException: "503",
+    GatewayTimeoutHttpException: "504",
+  };
+
+  const out: DiscoveredResponse[] = [];
+  for (const throwNode of findAll(handler, (n) => n.type === "throw_expression")) {
+    if (!belongsToPhpFunction(throwNode, handler)) continue;
+    const creation = findAll(throwNode, (n) => n.type === "object_creation_expression")[0];
+    if (!creation) continue;
+    const typeNode = creation.namedChildren.find(
+      (c) => c.type === "name" || c.type === "qualified_name" || c.type === "dynamic_type_name",
+    );
+    const simpleName = (typeNode?.text ?? "").replace(/^\\/, "").split("\\").pop() ?? "";
+    const argumentList = creation.namedChildren.find((c) => c.type === "arguments");
+    const ctorArgs = argumentList ? childrenOfType(argumentList, "argument") : [];
+
+    let status: string | null = exceptionStatus[simpleName] ?? null;
+    if (!status && simpleName === "HttpException") {
+      const raw = ctorArgs[0]?.text.trim() ?? "";
+      if (/^[45]\d\d$/.test(raw)) status = raw;
+    }
+
+    if (status) {
+      out.push({
+        statusCode: status,
+        description: "",
+        confidence: "medium",
+        content: [
+          {
+            mediaType: "application/json",
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" }, status: { type: "integer" } },
+            },
+          },
+        ],
+      });
+    } else if (/Exception$|Error$/.test(simpleName)) {
+      // An unhandled non-HTTP exception becomes a 500 outside debug mode; the
+      // body changes with kernel.debug and the error renderer.
+      gaps.push("response-unknown");
+      out.push({
+        statusCode: "500",
+        description: "Unhandled exception; error body depends on kernel debug and error renderer",
+        confidence: "low",
+        content: [
+          {
+            mediaType: "application/json",
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" }, status: { type: "integer" } },
+            },
+          },
+        ],
+      });
+    }
+  }
+
+  const merged = new Map<string, DiscoveredResponse>();
+  for (const response of out) {
     const existing = merged.get(response.statusCode);
     merged.set(response.statusCode, existing ? mergeResponseVariants(existing, response) : response);
   }

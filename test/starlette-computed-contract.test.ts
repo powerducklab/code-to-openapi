@@ -41,8 +41,8 @@ async def write(request):
  expect(Object.keys(doc.paths['/owned'].get.responses)).toEqual(['201']);
  expect(doc.paths['/owned'].get.responses['201'].content['application/json'].schema.properties).toEqual({actual:{type:'boolean'}});
  expect(doc.paths['/fail'].get.responses['200']).toBeUndefined();
- expect(doc.paths['/fail'].get.responses.default).toBeDefined();
- expect(doc.paths['/fail'].get.responses.default.content).toBeUndefined();
+ expect(doc.paths['/fail'].get.responses['500']).toBeDefined();
+ expect(doc.paths['/fail'].get.responses['500'].content['text/plain; charset=utf-8'].schema).toEqual({type:'string'});
  expect(doc.paths['/html'].get.responses['200'].content['text/html'].schema.type).toBe('string');
  expect(doc.paths['/item'].put.requestBody.content['application/json'].schema).toEqual({type:'object',properties:{name:{}},required:['name']});
  expect(doc.paths['/item'].put.responses['200'].content['application/json'].schema.properties).toEqual({label:{type:'string'},value:{type:'string'}});

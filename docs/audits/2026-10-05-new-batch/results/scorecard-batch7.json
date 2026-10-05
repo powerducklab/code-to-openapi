@@ -1,0 +1,49 @@
+{
+  "summary": {
+    "gate": 0.96,
+    "projects": 2,
+    "routeRecall": 1.0,
+    "routePrecision": 1.0,
+    "requestCompleteness": 1.0,
+    "responseCompletenessDeterministic": 1.0,
+    "aiReviewRoutesTotal": 0,
+    "note": "responseCompletenessDeterministic excludes contracts proven only via the interactive AI review.",
+    "deterministicPass96": true
+  },
+  "projects": [
+    {
+      "key": "rw-node",
+      "framework": "express",
+      "repo": "gothinkster/node-express-realworld-example-app",
+      "commit": "30b68e1e881462b2f4164ea09ab4c4f5699c7b0b",
+      "scanRoot": "",
+      "routesDetected": 20,
+      "routesExpected": 20,
+      "falseRoutes": 0,
+      "routeRecall": 1.0,
+      "routePrecision": 1.0,
+      "requestCompleteness": 1.0,
+      "responseCompletenessDeterministic": 1.0,
+      "aiReviewRoutes": 0,
+      "unresolvedRatio": 0.0,
+      "gapCounts": {}
+    },
+    {
+      "key": "rw-laravel",
+      "framework": "laravel",
+      "repo": "gothinkster/laravel-realworld-example-app",
+      "commit": "e45c37c8a5f57131c9d239f1fc104c227e66b6ee",
+      "scanRoot": "",
+      "routesDetected": 22,
+      "routesExpected": 22,
+      "falseRoutes": 0,
+      "routeRecall": 1.0,
+      "routePrecision": 1.0,
+      "requestCompleteness": 1.0,
+      "responseCompletenessDeterministic": 1.0,
+      "aiReviewRoutes": 0,
+      "unresolvedRatio": 0.0,
+      "gapCounts": {}
+    }
+  ]
+}

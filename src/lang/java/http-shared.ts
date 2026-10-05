@@ -39,7 +39,18 @@ export const HTTP_STATUS: Record<string, string> = {
   UNPROCESSABLE_ENTITY: "422",
   INTERNAL_SERVER_ERROR: "500",
   NOT_IMPLEMENTED: "501",
+  BAD_GATEWAY: "502",
   SERVICE_UNAVAILABLE: "503",
+  GATEWAY_TIMEOUT: "504",
+  HTTP_VERSION_NOT_SUPPORTED: "505",
+  LOCKED: "423",
+  FAILED_DEPENDENCY: "424",
+  TOO_MANY_REQUESTS: "429",
+  REQUEST_HEADER_FIELDS_TOO_LARGE: "431",
+  UNAVAILABLE_FOR_LEGAL_REASONS: "451",
+  // Micronaut names the 418 enum constant IM_A_TEAPOT; Spring uses I_AM_A_TEAPOT.
+  IM_A_TEAPOT: "418",
+  I_AM_A_TEAPOT: "418",
 };
 
 /** Best-effort extraction of the simple type name from a type node. */

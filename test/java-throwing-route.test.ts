@@ -13,8 +13,18 @@ ${spring?'@RestController @RequestMapping("/api")':jaxrs?'@Path("/api")':'@Contr
  ${spring?'@GetMapping("/mixed")':jaxrs?'@GET @Path("/mixed")':'@Get("/mixed")'} public String mixed(){if(System.nanoTime()>0)return "ok";throw new IllegalStateException();}
 }`);
  const result=await scanProject({root});const doc=(await result.convert()).document as any;
- expect(Object.keys(doc.paths['/api/fail'].get.responses)).toEqual(['default']);
- expect(doc.paths['/api/mixed'].get.responses['200']).toBeDefined();
- expect(result.project.operations.find(o=>(o.fullPath??o.path)==='/api/fail')?.gaps).toContain('response-unknown');
+ const failGaps=result.project.operations.find(o=>(o.fullPath??o.path)==='/api/fail')?.gaps;
+ if(framework==='micronaut'){
+  // Micronaut's default ExceptionHandler renders any unhandled domain exception
+  // as a 500 JSON error; the error body shape is not statically proven.
+  expect(Object.keys(doc.paths['/api/fail'].get.responses)).toEqual(['500']);
+  expect(doc.paths['/api/mixed'].get.responses['200']).toBeDefined();
+  expect(doc.paths['/api/mixed'].get.responses['500']).toBeDefined();
+  expect(failGaps).toContain('response-schema-unknown');
+ }else{
+  expect(Object.keys(doc.paths['/api/fail'].get.responses)).toEqual(['default']);
+  expect(doc.paths['/api/mixed'].get.responses['200']).toBeDefined();
+  expect(failGaps).toContain('response-unknown');
+ }
  }finally{await rm(root,{recursive:true,force:true});}
 });

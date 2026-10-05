@@ -108,6 +108,191 @@ function numericForwardedQueryFields(
   return numeric;
 }
 
+const STRING_FIELD_METHODS = new Set([
+  "trim", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase",
+  "split", "replace", "replaceAll", "startsWith", "endsWith", "substring",
+  "substr", "charAt", "charCodeAt", "codePointAt", "padStart", "padEnd",
+  "repeat", "normalize", "match", "matchAll", "search", "localeCompare", "includes",
+]);
+const ARRAY_FIELD_METHODS = new Set([
+  "map", "filter", "forEach", "reduce", "reduceRight", "push", "pop", "shift",
+  "unshift", "slice", "splice", "concat", "find", "findIndex", "findLast",
+  "findLastIndex", "flat", "flatMap", "keys", "values", "entries", "at",
+  "indexOf", "lastIndexOf", "join", "sort", "reverse", "copyWithin", "fill",
+  "some", "every",
+]);
+// Evidence rank: explicit conversions outrank a guessed scalar default.
+const TYPE_RANK: Record<string, number> = { boolean: 3, number: 3, array: 3, string: 2 };
+
+/**
+ * Infer wire types for the fields of an untyped (`any`) request DTO parameter by
+ * observing how the service body uses each field (string/array methods, numeric
+ * wrappers, boolean comparisons, destructuring). A field whose existence is
+ * proven but whose type cannot be observed defaults to string, which is the
+ * dominant scalar for hand-validated JSON bodies; the request stays at medium
+ * confidence. Existence without any usable type is never fabricated as a
+ * precise high-confidence contract.
+ */
+function inferForwardedBodyFieldSchemas(
+  analysis: TsAnalysis,
+  method: any,
+  parameter: any,
+): Map<string, JsonSchema> {
+  const { ts, checker } = analysis;
+  const types = new Map<string, JsonSchema>();
+  const visited = new Set<any>();
+
+  const mark = (field: string, schema: JsonSchema): void => {
+    const current = types.get(field);
+    const currentType = current && !Array.isArray(current.type) ? (current.type as string) : undefined;
+    const nextType = !Array.isArray(schema.type) ? (schema.type as string) : undefined;
+    if (!current || (TYPE_RANK[nextType ?? ""] ?? 1) > (TYPE_RANK[currentType ?? ""] ?? 0)) {
+      types.set(field, schema);
+    }
+  };
+
+  const walk = (fn: any, param: any, depth: number): void => {
+    if (!fn.body || depth > 12 || visited.has(param)) return;
+    visited.add(param);
+    const rootSymbol = checker.getSymbolAtLocation(param.name);
+    if (!rootSymbol) return;
+    const rootAliases = new Set<any>([rootSymbol]);
+    // Binding/property alias symbol -> wire field name.
+    const fieldOf = new Map<any, string>();
+
+    const isRoot = (n: any): boolean =>
+      ts.isIdentifier(n) && rootAliases.has(checker.getSymbolAtLocation(n));
+    const fieldFromExpr = (n: any): string | undefined => {
+      // input.field
+      if (ts.isPropertyAccessExpression(n) && isRoot(n.expression)) return n.name.text;
+      if (
+        ts.isElementAccessExpression(n) &&
+        isRoot(n.expression) &&
+        ts.isStringLiteralLike(n.argumentExpression)
+      ) {
+        return n.argumentExpression.text;
+      }
+      // Destructured or aliased scalar binding.
+      if (ts.isIdentifier(n)) return fieldOf.get(checker.getSymbolAtLocation(n));
+      return undefined;
+    };
+
+    const visit = (n: any): void => {
+      if (n !== fn.body && ts.isFunctionLike(n)) return;
+
+      if (ts.isVariableDeclaration(n) && n.initializer) {
+        // const { a, b: c } = input
+        if (isRoot(n.initializer) && ts.isObjectBindingPattern(n.name)) {
+          for (const element of n.name.elements) {
+            if (ts.isBindingElement(element) && (ts.isIdentifier(element.name) || ts.isStringLiteralLike(element.name))) {
+              const wireKey = element.propertyName && ts.isIdentifier(element.propertyName)
+                ? element.propertyName.text
+                : ts.isIdentifier(element.name) ? element.name.text : (element.name as any).text;
+              if (ts.isIdentifier(element.name)) fieldOf.set(checker.getSymbolAtLocation(element.name), wireKey);
+            }
+          }
+        }
+        // const alias = input
+        if (isRoot(n.initializer) && ts.isIdentifier(n.name)) {
+          rootAliases.add(checker.getSymbolAtLocation(n.name));
+        }
+        // const email = input.email
+        const propField = fieldFromExpr(n.initializer);
+        if (propField && ts.isIdentifier(n.name)) {
+          fieldOf.set(checker.getSymbolAtLocation(n.name), propField);
+        }
+      }
+
+      if (ts.isCallExpression(n)) {
+        const calleeName = ts.isIdentifier(n.expression)
+          ? n.expression.text
+          : ts.isPropertyAccessExpression(n.expression)
+            ? n.expression.name.text
+            : undefined;
+        const firstArg = n.arguments[0];
+
+        const isArrayCall =
+          ts.isPropertyAccessExpression(n.expression) &&
+          ts.isIdentifier(n.expression.expression) &&
+          n.expression.expression.text === "Array" &&
+          n.expression.name.text === "isArray";
+
+        if (isArrayCall) {
+          const field = fieldFromExpr(n.arguments[0]);
+          if (field) mark(field, { type: "array", items: { type: "string" } });
+        } else if (calleeName === "Number" || calleeName === "parseInt" || calleeName === "parseFloat") {
+          const field = fieldFromExpr(firstArg);
+          if (field) mark(field, { type: "number" });
+        } else if (calleeName === "String") {
+          const field = fieldFromExpr(firstArg);
+          if (field) mark(field, { type: "string" });
+        } else if (calleeName === "Boolean") {
+          const field = fieldFromExpr(firstArg);
+          if (field) mark(field, { type: "boolean" });
+        } else if (calleeName && ts.isPropertyAccessExpression(n.expression)) {
+          const receiver = n.expression.expression;
+          const field = fieldFromExpr(receiver);
+          if (field) {
+            if (ARRAY_FIELD_METHODS.has(calleeName)) {
+              mark(field, { type: "array", items: { type: "string" } });
+            } else if (STRING_FIELD_METHODS.has(calleeName)) {
+              mark(field, { type: "string" });
+            }
+          }
+        }
+
+        // Follow forwarded fields into nested local service helpers.
+        const target = localImplementation(analysis, n);
+        if (target) {
+          n.arguments.forEach((arg: any, index: number) => {
+            if (!target.parameters[index]) return;
+            if (isRoot(arg)) {
+              walk(target, target.parameters[index], depth + 1);
+            } else {
+              const field = fieldFromExpr(arg);
+              if (field) mark(field, { type: "string" });
+            }
+          });
+        }
+      }
+
+      // field === true/false / numeric / string literal
+      if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken || n.operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken)) {
+        const sides: [any, any][] = [[n.left, n.right], [n.right, n.left]];
+        for (const [expr, literal] of sides) {
+          const field = fieldFromExpr(expr);
+          if (field) {
+            if (literal.kind === ts.SyntaxKind.TrueKeyword || literal.kind === ts.SyntaxKind.FalseKeyword) mark(field, { type: "boolean" });
+            else if (ts.isNumericLiteral(literal)) mark(field, { type: "number" });
+            else if (ts.isStringLiteralLike(literal)) mark(field, { type: "string" });
+          }
+        }
+      }
+
+      // Template string interpolation proves a string usage.
+      if (ts.isTemplateExpression(n)) {
+        const checkSpan = (expr: any): void => {
+          const field = fieldFromExpr(expr);
+          if (field) mark(field, { type: "string" });
+        };
+        checkSpan(n.head);
+        for (const span of n.templateSpans) checkSpan(span.expression);
+      }
+
+      ts.forEachChild(n, visit);
+    };
+    visit(fn.body);
+  };
+
+  walk(method, parameter, 0);
+
+  // Ensure every observed field (including plain property access) has a type.
+  for (const field of localObjectFields(analysis, method, parameter)) {
+    if (!types.has(field)) types.set(field, { type: "string" });
+  }
+  return types;
+}
+
 /**
  * A monkey-patched Express Response method, e.g.
  *   response.customSuccess = function (status, message, data = null) {
@@ -718,8 +903,94 @@ function mergeFields(fields: CollectedField[]): JsonSchema | undefined {
   return { type: "object", properties };
 }
 
+/**
+ * Add a collected request field, or merge with the existing entry so a later
+ * untyped property access cannot overwrite a schema already proven by a
+ * conversion or a typed service-parameter forward with an opaque empty value.
+ */
+function upsertField(fields: CollectedField[], name: string, schema: JsonSchema | undefined): void {
+  const existing = fields.find((f) => f.name === name);
+  if (existing) {
+    if (schema) existing.schema = schema;
+  } else {
+    fields.push({ name, schema });
+  }
+}
+
+/**
+ * Deep-merge two object schemas that describe the same wire wrapper (for
+ * example when one handler passes `req.body.comment.body` and another reads the
+ * wrapper directly). Existing proven properties win; new properties are added.
+ */
+function mergeObjectSchemas(base: JsonSchema | undefined, extra: JsonSchema): JsonSchema {
+  if (!base || Object.keys(base).length === 0) return extra;
+  if (base.type !== "object" || extra.type !== "object") return base;
+  const properties: Record<string, JsonSchema> = { ...(base.properties as Record<string, JsonSchema>) };
+  const extraProperties = (extra.properties ?? {}) as Record<string, JsonSchema>;
+  for (const [key, value] of Object.entries(extraProperties)) {
+    properties[key] = key in properties ? mergeObjectSchemas(properties[key], value) : value;
+  }
+  return { ...base, properties };
+}
+
 function responseKey(status: string, mediaType: string): string {
   return `${status}:${mediaType}`;
+}
+
+/** Find the initializer of a local `const code = ...` binding in scope. */
+function findConstInitializer(analysis: TsAnalysis, ident: any): any | undefined {
+  const { ts, checker } = analysis;
+  const symbol = checker.getSymbolAtLocation(ident);
+  const decl = symbol?.valueDeclaration;
+  if (decl && ts.isVariableDeclaration(decl) && decl.initializer) return decl.initializer;
+  return undefined;
+}
+
+/**
+ * Resolve a dynamic `res.status(x)` argument to a concrete HTTP code or to
+ * "default". Express error handlers commonly write `err.status || 500`,
+ * `err.statusCode ?? 500`, a ternary, or a local constant. The numeric fallback
+ * is the proven default; a bare `err.status` with no fallback maps to "default"
+ * rather than a fabricated code.
+ */
+function resolveStatusCode(analysis: TsAnalysis, node: any, depth = 0): string | undefined {
+  if (!node || depth > 6) return undefined;
+  const { ts } = analysis;
+  if (ts.isNumericLiteral(node)) {
+    return /^\d{3}$/.test(node.text) ? node.text : undefined;
+  }
+  if (ts.isParenthesizedExpression(node)) {
+    return resolveStatusCode(analysis, node.expression, depth + 1);
+  }
+  if (
+    ts.isBinaryExpression(node) &&
+    (node.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+      node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+  ) {
+    return (
+      resolveStatusCode(analysis, node.right, depth + 1) ??
+      resolveStatusCode(analysis, node.left, depth + 1)
+    );
+  }
+  if (ts.isConditionalExpression(node)) {
+    return (
+      resolveStatusCode(analysis, node.whenFalse, depth + 1) ??
+      resolveStatusCode(analysis, node.whenTrue, depth + 1)
+    );
+  }
+  if (ts.isIdentifier(node)) {
+    const init = findConstInitializer(analysis, node);
+    if (init) return resolveStatusCode(analysis, init, depth + 1);
+    return "default";
+  }
+  if (
+    ts.isPropertyAccessExpression(node) ||
+    ts.isElementAccessExpression(node) ||
+    ts.isCallExpression(node)
+  ) {
+    return "default";
+  }
+  return undefined;
 }
 
 /**
@@ -744,6 +1015,9 @@ export function analyzeHandler(
       query?: JsonSchema;
       params?: JsonSchema;
     };
+    /** Four-argument Express error handler `(err, req, res, next)`. The error
+     * argument shifts req/res by one; request contracts are not produced. */
+    errorHandler?: boolean;
   },
 ): HandlerFacts {
   const { ts, checker } = analysis;
@@ -751,13 +1025,15 @@ export function analyzeHandler(
   const parameters: RouteParameter[] = [];
   const paramNames = new Map<string, RouteParameter>();
 
-  const reqName = handler.parameters?.[0]?.name?.getText?.(file) ?? "req";
-  const resName = handler.parameters?.[1]?.name?.getText?.(file) ?? "res";
+  const reqIndex = context.errorHandler ? 1 : 0;
+  const resIndex = context.errorHandler ? 2 : 1;
+  const reqName = handler.parameters?.[reqIndex]?.name?.getText?.(file) ?? "req";
+  const resName = handler.parameters?.[resIndex]?.name?.getText?.(file) ?? "res";
 
   // In plain JavaScript the checker only knows Express's library-wide
   // generics (query: string | Query | Array, etc.). Those are not user
   // contracts and must not be reported as typed fields; rely on syntax.
-  const reqParam = handler.parameters?.[0];
+  const reqParam = handler.parameters?.[reqIndex];
   const hasJsDocType = Boolean(
     reqParam?.jsDoc?.some?.((d: any) =>
       d.tags?.some?.((tag: any) => tag.tagName?.text === "param" || tag.typeExpression),
@@ -801,8 +1077,8 @@ export function analyzeHandler(
   let genericBody: JsonSchema | undefined;
   let genericQuery: JsonSchema | undefined;
   let genericResponse: JsonSchema | undefined;
-  const reqType = handler.parameters?.[0]?.type;
-  const resType = handler.parameters?.[1]?.type;
+  const reqType = handler.parameters?.[reqIndex]?.type;
+  const resType = handler.parameters?.[resIndex]?.type;
   if (reqType && ts.isTypeReferenceNode(reqType) && reqType.typeArguments?.length) {
     const [p, resBody, reqBody, reqQuery] = reqType.typeArguments;
     if (p) applyGenericParams(p, "path");
@@ -1142,22 +1418,24 @@ export function analyzeHandler(
             if (fullText === "req.query" && destructured) {
               collectDestructure(node, queryFields, false, { type: "string" });
             } else if (member && member !== "query") {
-              queryFields.push({ name: member, schema });
+              upsertField(queryFields, member, schema);
             }
           } else if (/^req\.headers(\.|\[|$)/.test(fullText)) {
             if (member && member !== "headers") {
-              headerFields.push({ name: member, schema });
+              upsertField(headerFields, member, schema);
             }
           } else if (/^req\.cookies(\.|\[|$)/.test(fullText)) {
             if (member && member !== "cookies") {
-              cookieFields.push({ name: member, schema });
+              upsertField(cookieFields, member, schema);
             }
           } else if (/^req\.body(\.|\[|$)/.test(fullText)) {
             bodyReferenced = true;
             if (fullText === "req.body" && destructured) {
               collectDestructure(node, bodyFields, true);
             } else if (member && member !== "body") {
-              bodyFields.push({ name: member, schema });
+              // Merge with a schema already proven by a typed service-parameter
+              // forward instead of appending a duplicate untyped field.
+              upsertField(bodyFields, member, schema);
             }
           }
         }
@@ -1203,6 +1481,40 @@ export function analyzeHandler(
 
     // Follow forwarded query objects by resolved parameter symbols, including service helpers.
     if (ts.isCallExpression(node)) {
+      // Locate `req.body.<wrapper>` (optionally followed by nested property
+      // access such as `req.body.comment.body`) inside a call argument,
+      // including spread-wrapped object literals. Returns the wire wrapper name
+      // and the property path nested beneath it.
+      const forwardedBodyTarget = (
+        arg: any,
+      ): { wrapper: string; path: string[] } | undefined => {
+        const direct = (n: any): { wrapper: string; path: string[] } | undefined => {
+          if (ts.isPropertyAccessExpression(n)) {
+            const match = n
+              .getText(file)
+              .match(new RegExp(`^${reqName}\\.body\\.([A-Za-z0-9_$]+)((?:\\.[A-Za-z0-9_$]+)*)$`));
+            if (match) {
+              return {
+                wrapper: match[1]!,
+                path: match[2] ? match[2].split(".").filter(Boolean) : [],
+              };
+            }
+          }
+          return undefined;
+        };
+        const directTarget = direct(arg);
+        if (directTarget) return directTarget;
+        if (ts.isObjectLiteralExpression(arg)) {
+          for (const prop of arg.properties) {
+            if (ts.isSpreadAssignment(prop)) {
+              const spreadTarget = direct(prop.expression);
+              if (spreadTarget) return spreadTarget;
+            }
+          }
+        }
+        return undefined;
+      };
+
       const target = localImplementation(analysis, node);
       if (target) node.arguments.forEach((arg: any, index: number) => {
         if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === reqName && arg.name.text === "query" && target.parameters[index]) {
@@ -1213,6 +1525,57 @@ export function analyzeHandler(
               queryFields.push({ name, schema: numeric.get(name) ?? { type: "string" } });
             }
             if (!numeric.size) gaps.add("query-unknown");
+          }
+        }
+
+        // Typed body forwarding: a wrapped `req.body.<name>` is passed to a
+        // service parameter with a declared DTO type (e.g. createUser(input:
+        // RegisterInput)). The parameter type fixes the request fields without
+        // expanding an entire database entity.
+        const bodyTarget = forwardedBodyTarget(arg);
+        if (bodyTarget && target.parameters[index]) {
+          const { wrapper, path } = bodyTarget;
+          const parameter = target.parameters[index];
+          let paramSchema: JsonSchema | undefined;
+          try {
+            const paramType = checker.getTypeAtLocation(parameter.name ?? parameter);
+            if (
+              paramType &&
+              !(paramType.flags & ts.TypeFlags.Any) &&
+              !(paramType.flags & ts.TypeFlags.Unknown)
+            ) {
+              const resolved = typeToSchema(paramType, analysis.schemaContext);
+              if (resolved && Object.keys(resolved).length) paramSchema = resolved;
+            }
+          } catch {
+            // No usable parameter type; fall back to observed fields below.
+          }
+          // Untyped DTO parameter (e.g. `article: any`): recover the field set
+          // and infer wire types from destructuring, property access and
+          // runtime conversions in the service body, so the request contract
+          // stays complete without fabricating high-confidence field types.
+          if (!paramSchema && path.length === 0) {
+            const fieldSchemas = inferForwardedBodyFieldSchemas(analysis, target, parameter);
+            if (fieldSchemas.size) {
+              const properties: Record<string, JsonSchema> = {};
+              for (const [fieldName, fieldSchema] of fieldSchemas) properties[fieldName] = fieldSchema;
+              paramSchema = { type: "object", properties };
+            }
+          }
+          if (paramSchema) {
+            // Nest the proven schema under `wrapper` and any deeper path
+            // (`req.body.comment.body` -> { comment: { body: <schema> } }).
+            let wireSchema = paramSchema;
+            for (let p = path.length - 1; p >= 0; p--) {
+              wireSchema = { type: "object", properties: { [path[p]!]: wireSchema } };
+            }
+            bodyReferenced = true;
+            const existing = bodyFields.find((f) => f.name === wrapper);
+            if (existing) {
+              existing.schema = mergeObjectSchemas(existing.schema, wireSchema);
+            } else {
+              bodyFields.push({ name: wrapper, schema: wireSchema });
+            }
           }
         }
       });
@@ -1319,8 +1682,14 @@ export function analyzeHandler(
     };
     for (const step of chain) {
       if (step.name === "status") {
-        const raw = step.args[0]?.getText(file);
-        if (raw && HTTP_VERB_LITERAL.test(raw)) status = raw;
+        const arg = step.args[0];
+        const raw = arg?.getText(file);
+        if (raw && HTTP_VERB_LITERAL.test(raw.trim())) {
+          status = raw.trim();
+        } else {
+          const resolved = resolveStatusCode(analysis, arg);
+          if (resolved) status = resolved;
+        }
       }
       if (step.name === "sendStatus") {
         const raw = step.args[0]?.getText(file);
@@ -1615,6 +1984,19 @@ export function analyzeHandler(
     ) {
       gaps.add("response-schema-unknown");
     }
+  }
+
+  if (context.errorHandler) {
+    // Error handlers define no request contract; surface only the error
+    // responses they actually write.
+    return {
+      parameters: [],
+      responses: [...responses.values()],
+      gaps: [...gaps].filter(
+        (g) => g === "response-unknown" || g === "response-schema-unknown",
+      ),
+      sse: false,
+    };
   }
 
   return {

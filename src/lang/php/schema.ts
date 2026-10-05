@@ -36,6 +36,22 @@ const SCALAR_NAMES: Record<string, JsonSchema> = {
   null: { type: "null" },
 };
 
+/**
+ * A Laravel `array` rule without a matching `field.*` rule does not constrain
+ * element values, so the array may hold any JSON value. This explicit union
+ * records that contract instead of pretending the element type is unknown.
+ */
+const UNCONSTRAINED_ARRAY_ITEMS: JsonSchema = {
+  anyOf: [
+    { type: "string" },
+    { type: "number" },
+    { type: "boolean" },
+    { type: "object" },
+    { type: "array", items: {} },
+    { type: "null" },
+  ],
+};
+
 export function phpTypeToSchema(
   node: TsNode | undefined,
   index: PhpModelIndex,
@@ -603,6 +619,20 @@ export function formRulesToSchema(rules: PhpRule[], index: PhpModelIndex): JsonS
   for (const [field, items] of arrayItems) {
     if (properties[field]?.type === "array" || (Array.isArray(properties[field]?.type) && properties[field]!.type.includes("array"))) {
       properties[field]!.items = Object.keys(items).length ? items : {};
+    }
+  }
+
+  // Bare `array` rules with no `field.*` item rules accept any JSON value.
+  for (const fieldSchema of Object.values(properties)) {
+    if (
+      fieldSchema &&
+      fieldSchema.type === "array" &&
+      fieldSchema.items &&
+      typeof fieldSchema.items === "object" &&
+      !Array.isArray(fieldSchema.items) &&
+      Object.keys(fieldSchema.items).length === 0
+    ) {
+      fieldSchema.items = UNCONSTRAINED_ARRAY_ITEMS;
     }
   }
 

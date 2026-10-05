@@ -126,6 +126,174 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
       return matches.length === 1 ? matches[0] : undefined;
     }
 
+    // --- Exception handling -------------------------------------------------
+    // Starlette dispatches raised exceptions through handlers registered via
+    // the `exception_handlers=` mapping, the @app.exception_handler decorator or
+    // app.add_exception_handler. Handlers keyed by integer status code receive
+    // the matching HTTPException; handlers keyed by an exception class receive
+    // that exception (resolved by leaf class name statically).
+    const statusHandlers = new Map<string, PyFunction>();
+    const exceptionHandlers = new Map<string, PyFunction>();
+    // Global error responses produced by middleware except blocks.
+    const middlewareFragments: ExceptionResponse[] = [];
+
+    function resolveHandlerFunction(node: TsNode | null): PyFunction | undefined {
+      if (!node || node.type !== "identifier") return undefined;
+      const file = bindings.fileOf(node);
+      const binding = file ? bindings.resolve(file, node.text) : undefined;
+      const target = binding ?? (file ? { file, name: node.text } : undefined);
+      if (!target) return undefined;
+      const matches = analysis.functions.filter(
+        (fn) => fn.file === target.file && fn.name === target.name && isModuleDefinition(fn.node),
+      );
+      return matches.length === 1 ? matches[0] : undefined;
+    }
+
+    function registerHandler(keyNode: TsNode, fn: PyFunction | undefined): void {
+      if (!fn) return;
+      if (keyNode.type === "integer") {
+        const code = literalInteger(keyNode);
+        if (code !== null && !statusHandlers.has(String(code))) statusHandlers.set(String(code), fn);
+        return;
+      }
+      if (keyNode.type === "identifier" || keyNode.type === "attribute") {
+        const leaf = keyNode.type === "attribute" ? keyNode.namedChildren[1]?.text : keyNode.text;
+        if (leaf && !exceptionHandlers.has(leaf)) exceptionHandlers.set(leaf, fn);
+      }
+    }
+
+    // Determine the effective debug mode. Production default is false (plain
+    // 500); debug=True replaces the 500 body with a traceback page.
+    let debugTrue = false;
+    let debugFalse = false;
+
+    for (const file of analysis.files.values()) {
+      for (const call of findAll(file.root, (n) => n.type === "call")) {
+        if (callName(call.namedChildren[0] ?? null) !== "Starlette") continue;
+        const debugNode = keywordArgument(call, "debug");
+        if (debugNode?.type === "true") debugTrue = true;
+        else if (debugNode?.type === "false") debugFalse = true;
+
+        const handlersNode = keywordArgument(call, "exception_handlers");
+        if (handlersNode?.type === "dictionary") {
+          for (const pair of handlersNode.namedChildren) {
+            if (pair.type !== "pair") continue;
+            const keyNode = pair.namedChildren[0];
+            const valueNode = pair.namedChildren[1];
+            if (keyNode) registerHandler(keyNode, resolveHandlerFunction(valueNode ?? null));
+          }
+        }
+
+        const middlewareNode = keywordArgument(call, "middleware");
+        if (middlewareNode?.type === "list") collectMiddlewareFallback(listElements(middlewareNode));
+      }
+
+      // app.add_exception_handler(status_or_exc, handler)
+      for (const call of findAll(file.root, (n) => n.type === "call")) {
+        const target = call.namedChildren[0];
+        if (target?.type !== "attribute" || callName(target) !== "add_exception_handler") continue;
+        const args = positionalArguments(call);
+        const keyNode = args[0];
+        if (keyNode) registerHandler(keyNode, resolveHandlerFunction(args[1] ?? null));
+      }
+    }
+
+    // @app.exception_handler(key) decorated functions.
+    for (const fn of analysis.functions) {
+      for (const decorator of fn.decorators) {
+        const call = decorator.namedChildren[0];
+        if (call?.type !== "call") continue;
+        const target = call.namedChildren[0];
+        if (target?.type !== "attribute" || callName(target) !== "exception_handler") continue;
+        const keyNode = positionalArguments(call)[0];
+        if (keyNode) registerHandler(keyNode, fn);
+      }
+      // @app.middleware("http") functions that convert exceptions to responses.
+      for (const decorator of fn.decorators) {
+        const call = decorator.namedChildren[0];
+        if (call?.type !== "call") continue;
+        const target = call.namedChildren[0];
+        if (target?.type !== "attribute" || callName(target) !== "middleware") continue;
+        middlewareFragments.push(...exceptClauseReturns(fn));
+      }
+    }
+
+    // Global error responses produced by middleware except blocks.
+    function collectMiddlewareFallback(elements: TsNode[]): void {
+      for (const element of elements) {
+        if (element.type !== "call" || callName(element.namedChildren[0] ?? null) !== "Middleware") continue;
+        const className = positionalArguments(element)[0];
+        if (className?.type !== "identifier") continue;
+        const cls = analysis.classes.find(
+          (c) => c.name === className.text && analysis.files.has(c.file),
+        );
+        if (!cls) continue;
+        const dispatch = analysis.functions.find(
+          (f) => f.name === "dispatch" && findWithin(cls, f.node),
+        );
+        middlewareFragments.push(...exceptClauseReturns(dispatch));
+      }
+    }
+
+    // Resolve every raise site in an endpoint to a concrete error contract.
+    function endpointErrorResponses(fn: PyFunction | undefined): ExceptionResponse[] {
+      if (!fn?.body) return [];
+      const fragments: ExceptionResponse[] = [];
+      const seen = new Set<string>();
+      const push = (fragment: ExceptionResponse): void => {
+        const key = `${fragment.statusCode}:${fragment.mediaType}:${JSON.stringify(fragment.schema)}`;
+        if (!seen.has(key)) { seen.add(key); fragments.push(fragment); }
+      };
+      for (const raise of ownedNodes(fn.body, (n) => n.type === "raise_statement")) {
+        const exc = raise.namedChildren[0];
+        if (!exc) {
+          push({ statusCode: "default", mediaType: "text/plain; charset=utf-8", schema: {} });
+          continue;
+        }
+        const call = exc.type === "call" ? exc : null;
+        const excName = call
+          ? callName(call.namedChildren[0] ?? null)
+          : exc.type === "identifier" || exc.type === "attribute"
+            ? callName(exc)
+            : null;
+        if (excName === "HTTPException") {
+          const statusArg = call
+            ? keywordArgument(call, "status_code") ?? positionalArguments(call)[0] ?? null
+            : null;
+          const code = statusArg ? literalInteger(statusArg) : null;
+          const codeStr = code ? String(code) : null;
+          const custom = (codeStr && statusHandlers.get(codeStr)) || exceptionHandlers.get("HTTPException");
+          const resolved = custom ? handlerReturns(custom) : [];
+          if (resolved.length) resolved.forEach(push);
+          else push({ statusCode: codeStr ?? "default", mediaType: "text/plain; charset=utf-8", schema: { type: "string" } });
+        } else if (excName) {
+          const custom = exceptionHandlers.get(excName);
+          const resolved = custom ? handlerReturns(custom) : [];
+          if (resolved.length) {
+            resolved.forEach(push);
+          } else if (middlewareFragments.length) {
+            // A user HTTP middleware wraps ExceptionMiddleware: an unregistered
+            // exception propagates to its except block before the built-in 500.
+            middlewareFragments.forEach(push);
+          } else if (debug) {
+            // debug=True content-negotiates the 500 traceback: HTML for
+            // Accept: text/html, plain-text traceback otherwise.
+            push({ statusCode: "500", mediaType: "text/html; charset=utf-8", schema: { type: "string" } });
+            push({ statusCode: "500", mediaType: "text/plain; charset=utf-8", schema: { type: "string" } });
+          } else {
+            push({ statusCode: "500", mediaType: "text/plain; charset=utf-8", schema: { type: "string" } });
+          }
+        } else {
+          push({ statusCode: "default", mediaType: "text/plain; charset=utf-8", schema: {} });
+        }
+      }
+      return fragments;
+    }
+
+    // Any explicit debug=True without an explicit debug=False selects traceback
+    // bodies for uncaught exceptions; otherwise the production default applies.
+    const debug = debugTrue && !debugFalse;
+
     // Locate the routes list literal for a Starlette(...) call or a Mount's
     // `routes=` / `app=Starlette(routes=...)` argument.
     const routesListOf = (node: TsNode | null): TsNode | null => {
@@ -251,6 +419,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
                 symbol: endpointName ?? "endpoint",
                 statuses,
                 handler: endpointFn,
+                errorFragments: endpointErrorResponses(endpointFn),
               }),
             );
           }
@@ -350,7 +519,8 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
           .filter((m): m is string => !!m && HTTP_METHODS.has(m)) : ["get"];
         for (const method of methods) {
           const route = buildRoute({ method, path, line: call.startPosition.row + 1,
-            symbol: fn.name, statuses: scanStatuses(fn), handler: fn });
+            symbol: fn.name, statuses: scanStatuses(fn), handler: fn,
+            errorFragments: endpointErrorResponses(fn) });
           route.origin = { ...route.origin, file: fn.file };
           routes.push(route);
         }
@@ -432,20 +602,108 @@ function returnedCalls(body: TsNode): TsNode[] {
   return calls;
 }
 
-// Collect explicit status codes from returned `JSONResponse(..., status_code=N)` calls
-// in an endpoint body. Falls back to 200 when none are proven.
+// Explicit status codes from successful `return JSONResponse/Response(...)` calls.
+// Raised exceptions are handled separately via registered/built-in exception
+// handlers, so a terminal raise no longer collapses the contract to "default".
 function scanStatuses(fn: PyFunction): string[] {
   if (!fn.body) return ["200"];
-  if (fn.body.namedChildren.at(-1)?.type === "raise_statement" && !ownedNodes(fn.body, n => n.type === "return_statement").length) return ["default"];
   const statuses = new Set<string>();
   for (const call of returnedCalls(fn.body)) {
     const name = callName(call.namedChildren[0] ?? null);
     if (name !== "JSONResponse" && name !== "Response") continue;
     const kw = keywordArgument(call, "status_code");
     const code = kw ? literalInteger(kw) : null;
-    if (code) statuses.add(String(code));
+    statuses.add(code ? String(code) : "200");
   }
-  return statuses.size ? [...statuses] : ["200"];
+  return [...statuses];
+}
+
+interface ExceptionResponse {
+  statusCode: string;
+  mediaType: string;
+  schema: JsonSchemaLocal;
+}
+
+/**
+ * Map a single Response-constructing call to a contract fragment. Starlette's
+ * built-in HTTP exception / not-found / server-error handlers emit text/plain,
+ * while user handlers typically return JSONResponse. A status that is passed
+ * through dynamically (e.g. status_code=exc.status_code) cannot be proven and
+ * becomes "default" rather than a fabricated code.
+ */
+function responseFromCall(call: TsNode): ExceptionResponse | null {
+  const name = callName(call.namedChildren[0] ?? null);
+  let mediaType: string | null = null;
+  if (name === "JSONResponse") mediaType = "application/json";
+  else if (name === "PlainTextResponse") mediaType = "text/plain; charset=utf-8";
+  else if (name === "HTMLResponse") mediaType = "text/html; charset=utf-8";
+  if (!mediaType) return null;
+  const statusNode = keywordArgument(call, "status_code");
+  let statusCode = "200";
+  if (statusNode) {
+    const code = literalInteger(statusNode);
+    statusCode = code ? String(code) : "default";
+  }
+  let schema: JsonSchemaLocal = { type: "string" };
+  if (name === "JSONResponse") {
+    const payload = keywordArgument(call, "content") ?? positionalArguments(call)[0] ?? null;
+    schema = payload ? literalSchema(payload) : {};
+  }
+  return { statusCode, mediaType, schema };
+}
+
+/** All Response returns in a handler function body, de-duplicated. */
+function handlerReturns(fn: PyFunction | undefined): ExceptionResponse[] {
+  if (!fn?.body) return [];
+  const out: ExceptionResponse[] = [];
+  const seen = new Set<string>();
+  for (const call of returnedCalls(fn.body)) {
+    const fragment = responseFromCall(call);
+    if (!fragment) continue;
+    const key = `${fragment.statusCode}:${fragment.mediaType}:${JSON.stringify(fragment.schema)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(fragment);
+  }
+  return out;
+}
+
+/** Response fragments returned from inside `except` clauses of a function body. */
+function exceptClauseReturns(fn: PyFunction | undefined): ExceptionResponse[] {
+  if (!fn?.body) return [];
+  const out: ExceptionResponse[] = [];
+  const seen = new Set<string>();
+  for (const clause of findAll(fn.body, (n) => n.type === "except_clause")) {
+    for (const ret of findAll(clause, (n) => n.type === "return_statement")) {
+      const value = ret.namedChildren[0];
+      if (value?.type !== "call") continue;
+      const fragment = responseFromCall(value);
+      if (!fragment) continue;
+      const key = `${fragment.statusCode}:${fragment.mediaType}:${JSON.stringify(fragment.schema)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(fragment);
+    }
+  }
+  return out;
+}
+
+function mergeExceptionResponses(target: RouteCandidate["responses"], fragments: ExceptionResponse[]): void {
+  for (const fragment of fragments) {
+    const existing = target.find((r) => r.statusCode === fragment.statusCode);
+    const media = { mediaType: fragment.mediaType, schema: fragment.schema };
+    if (existing) {
+      const list = existing.content ?? (existing.content = []);
+      if (!list.some((c) => c.mediaType === fragment.mediaType)) list.push(media);
+    } else {
+      target.push({
+        statusCode: fragment.statusCode,
+        description: "",
+        confidence: "medium",
+        content: [media],
+      });
+    }
+  }
 }
 
 function buildRoute(input: {
@@ -455,11 +713,11 @@ function buildRoute(input: {
   symbol: string;
   statuses: string[];
   handler?: PyFunction;
+  errorFragments?: ExceptionResponse[];
 }): RouteCandidate {
   const gaps = new Set<GapCode>();
   const parameters = pathParams(input.path);
   gaps.add("response-schema-unknown");
-  if (input.statuses.includes("default")) gaps.add("response-unknown");
   const handlerBody = input.handler?.body;
   const requestName = input.handler?.params.find(param => !["self", "cls"].includes(param.name))?.name;
   const jsonReads = handlerBody && requestName ? ownedNodes(handlerBody, node =>
@@ -511,6 +769,14 @@ function buildRoute(input: {
       if (previous && evidence.has(statusCode)) previous.content?.push(...response.content);
       else responses = [...responses.filter(r => r.statusCode !== statusCode), response];
     }
+  }
+
+  // Raised exceptions resolved through registered/built-in exception handlers.
+  const errorFragments = input.errorFragments ?? [];
+  mergeExceptionResponses(responses, errorFragments);
+  if (errorFragments.some((f) => f.statusCode === "default")) gaps.add("response-unknown");
+  if (!responses.length) {
+    responses.push({ statusCode: "200", description: "", confidence: "medium", content: [] });
   }
   return {
     method: input.method,

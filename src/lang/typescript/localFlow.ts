@@ -3,6 +3,7 @@ import type {TsAnalysis} from './index.js';
 import {typeToSchema} from './typeSchema.js';
 import {resolveStaticValue} from './staticValue.js';
 import {prismaProjection} from './prismaProjection.js';
+import {mongooseProjection} from './mongoose.js';
 
 /** Method names that never mutate their receiver; a call like `arr.map(fn)`
  * returns a fresh value, so the receiver is not escaping/mutated by the call. */
@@ -12,6 +13,28 @@ const PURE_READONLY_CALLS = new Set([
   "includes", "keys", "values", "entries", "at", "findLast", "findLastIndex",
   "toSorted", "toReversed", "toSpliced", "with",
 ]);
+
+/** Return the type-annotation text of an Error-like handler parameter. */
+function errorParameterTypeText(ts: any, checker: any, node: any): string | undefined {
+  if (!ts.isIdentifier(node)) return undefined;
+  const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration;
+  if (declaration && ts.isParameter(declaration)) {
+    if (declaration.type) return declaration.type.getText();
+    // Unannotated first parameter of a four-argument handler follows the
+    // Express error-middleware / Node error-callback convention (err, req,
+    // res, next), so it is treated as an Error even when contextual typing
+    // leaves it implicitly any.
+    const owner = declaration.parent;
+    if (
+      ts.isFunctionLike(owner) &&
+      owner.parameters.length === 4 &&
+      owner.parameters[0] === declaration
+    ) {
+      return "Error";
+    }
+  }
+  return undefined;
+}
 
 /** Follow only resolved local implementations. External libraries remain opaque. */
 export function localImplementation(analysis: TsAnalysis, call: any): any | undefined {
@@ -97,8 +120,21 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
      return undefined;
     };
     const obj=objectBranch(shape);
-    if(obj?.properties&&typeof obj.properties==='object'&&property in obj.properties)return (obj.properties as Record<string,JsonSchema>)[property];
+    const errorTypeText=errorParameterTypeText(ts,checker,node.expression);
+    const isErrorParam=!!errorTypeText&&/(Error|Exception)/.test(errorTypeText);
+    const direct=obj?.properties&&typeof obj.properties==='object'?(obj.properties as Record<string,JsonSchema>)[property]:undefined;
+    // A subtype member annotated `any` yields an empty schema; fall through to the
+    // built-in Error contract instead of returning an opaque empty shape.
+    if(direct&&Object.keys(direct).length)return direct;
     if(shape?.type==='array'&&property==='length')return {type:'number'};
+    // Error-like handler parameter (`err: Error | HttpException`): the built-in
+    // Error contract fixes message/name/stack as strings and the conventional
+    // HTTP status fields as integers, even when the concrete subtype annotates a
+    // member as `any` (which otherwise collapses the whole union to any).
+    if(isErrorParam){
+      if(property==='message'||property==='name'||property==='stack'){onEvidence?.();return {type:'string'};}
+      if(property==='status'||property==='statusCode'||property==='errorCode'){onEvidence?.();return {type:'integer'};}
+    }
    }
   }
   if(ts.isCallExpression(node)){
@@ -172,6 +208,7 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     }
    }
    const projection=prismaProjection(analysis,node);if(projection){onEvidence?.();return projection;}
+   const mongoose=mongooseProjection(analysis,node);if(mongoose){onEvidence?.();return mongoose;}
    const fn=localImplementation(analysis,node);
    if(fn){
     onEvidence?.();const saved=new Map(bindings);const values=node.arguments.map((arg:any)=>infer(arg,next,depth+1));
@@ -307,6 +344,17 @@ export function localObjectFields(analysis:TsAnalysis,method:any,parameter:any):
   const visit=(n:any)=>{
    if(n!==fn.body&&ts.isFunctionLike(n))return;
    if(ts.isVariableDeclaration(n)&&n.initializer&&isQuery(n.initializer)&&(n.parent.flags&ts.NodeFlags.Const)&&ts.isIdentifier(n.name))aliases.add(checker.getSymbolAtLocation(n.name));
+   // Destructuring `const { a, b } = input` (or aliased query/body bag) exposes
+   // each binding name as a field of the parameter.
+   if(ts.isVariableDeclaration(n)&&n.initializer&&isQuery(n.initializer)&&ts.isObjectBindingPattern(n.name)){
+    for(const element of n.name.elements){
+     if(ts.isBindingElement(element)&&(ts.isIdentifier(element.name)||ts.isStringLiteralLike(element.name))){
+      const key=element.propertyName?element.propertyName.text:element.name.text;
+      fields.add(key);
+      if(ts.isIdentifier(element.name))aliases.add(checker.getSymbolAtLocation(element.name));
+     }
+    }
+   }
    if(ts.isPropertyAccessExpression(n)&&isQuery(n.expression))fields.add(n.name.text);
    if(ts.isElementAccessExpression(n)&&isQuery(n.expression)&&ts.isStringLiteralLike(n.argumentExpression))fields.add(n.argumentExpression.text);
    if(ts.isCallExpression(n)){

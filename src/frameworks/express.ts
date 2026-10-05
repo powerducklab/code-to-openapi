@@ -45,6 +45,9 @@ interface MountEdge {
   prefix: string;
   /** Path-scoped middleware on this mount (X.use(prefix, mw)). */
   middleware: MiddlewareRef[];
+  /** The argument originally believed to be a router; retained so a mount that
+   * resolves to no router can reclaim it as plain middleware/error handler. */
+  routerArgNode?: any;
 }
 
 interface MiddlewareRef {
@@ -52,6 +55,8 @@ interface MiddlewareRef {
   node: any;
   file: string;
   scopePath?: string;
+  /** Source position of the use() registration, for handler ordering. */
+  pos?: number;
 }
 
 interface RouteCall {
@@ -63,6 +68,8 @@ interface RouteCall {
   handlers: Array<{ node: any; file: string }>;
   middleware: MiddlewareRef[];
   origin: SourceLocation;
+  /** Source position of the route registration call, for handler ordering. */
+  pos: number;
 }
 
 interface FileModel {
@@ -79,6 +86,8 @@ interface FileModel {
   mounts: MountEdge[];
   unscopedMiddleware: MiddlewareRef[];
   scopedMiddleware: Array<MiddlewareRef & { scopePath: string }>;
+  /** Four-argument error handlers `(err, req, res, next)` registered via use(). */
+  errorHandlers: Array<MiddlewareRef & { routerId: string; pos: number }>;
   routes: RouteCall[];
   unresolved: DiscoveredUnresolved[];
   listenPorts: number[];
@@ -185,7 +194,47 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
     for (const model of models.values()) {
       for (const mount of model.mounts) {
         const resolved = resolveMountTarget(analysis, model, mount, models);
-        if (resolved) edges.push({ ...mount, child: resolved });
+        if (resolved) {
+          edges.push({ ...mount, child: resolved });
+          continue;
+        }
+        // The optimistic "router" argument resolves to no router. It is a plain
+        // function (middleware or four-arg error handler) obtained via import
+        // or require; reclaim it and sibling args as ordinary use() middleware
+        // so it is analyzed instead of being silently dropped.
+        const reclaimed: any[] = [];
+        if (mount.routerArgNode) reclaimed.push(mount.routerArgNode);
+        for (const sibling of mount.middleware) reclaimed.push(sibling.node);
+        for (const node of reclaimed) {
+          const ref: MiddlewareRef = {
+            routerId: mount.parent,
+            node,
+            file: model.rel,
+            scopePath: mount.prefix || undefined,
+            pos: node.pos,
+          };
+          if (mount.prefix) model.scopedMiddleware.push({ ...ref, scopePath: mount.prefix });
+          else model.unscopedMiddleware.push(ref);
+        }
+      }
+    }
+
+    // Identify four-argument error handlers after every model (and its import
+    // bindings) is built, so handlers required/imported from other files resolve.
+    for (const model of models.values()) {
+      const seen = new Set<string>();
+      for (const ref of [...model.unscopedMiddleware, ...model.scopedMiddleware]) {
+        if (!ref.routerId || !isFourArgHandler(analysis, model, ref.node)) continue;
+        const key = `${ref.routerId}:${ref.pos ?? 0}:${ref.scopePath ?? ""}:${ref.node.pos ?? 0}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        model.errorHandlers.push({
+          node: ref.node,
+          file: ref.file,
+          routerId: ref.routerId,
+          ...(ref.scopePath ? { scopePath: ref.scopePath } : {}),
+          pos: ref.pos ?? 0,
+        });
       }
     }
 
@@ -203,6 +252,12 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
 
     const candidates: RouteCandidate[] = [];
     let bearerAuth = false;
+    const appIds = new Set<string>();
+    for (const m of models.values()) {
+      for (const rv of m.routers.values()) {
+        if (rv.kind === "app") appIds.add(rv.id);
+      }
+    }
 
     for (const route of routes) {
       const mounts = prefixes.get(route.routerId) ??
@@ -281,6 +336,28 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
               if (!existing) { (previous.content ??= []).push(media); continue; }
               if (existing.schema && media.schema && JSON.stringify(existing.schema) !== JSON.stringify(media.schema)) {
                 existing.schema = {anyOf: [existing.schema, media.schema]};
+              }
+            }
+          }
+        }
+
+        // Four-argument error handlers registered after the route (same
+        // router) or as global app-level fallbacks. Their written responses are
+        // real error contracts (throw / next(err) reaches them at runtime).
+        for (const resolved of collectErrorHandlers(analysis, models, route, fullPath, appIds)) {
+          const ehFacts = analyzeHandler(analysis, resolved.file, resolved.node, route.origin, {
+            pathParams, validators: [], customResponseMethods, errorHandler: true,
+          });
+          for (const response of ehFacts.responses) {
+            if (!response.content?.length || response.confidence === "low") continue;
+            if (!/^([45]\d\d|default)$/.test(response.statusCode)) continue;
+            const previous = facts.responses.find((r) => r.statusCode === response.statusCode);
+            if (!previous) { facts.responses.push(response); continue; }
+            for (const media of response.content) {
+              const existing = previous.content?.find((c) => c.mediaType === media.mediaType);
+              if (!existing) { (previous.content ??= []).push(media); continue; }
+              if (existing.schema && media.schema && JSON.stringify(existing.schema) !== JSON.stringify(media.schema)) {
+                existing.schema = { anyOf: [existing.schema, media.schema] };
               }
             }
           }
@@ -381,6 +458,7 @@ function modelFile(
     mounts: [],
     unscopedMiddleware: [],
     scopedMiddleware: [],
+    errorHandlers: [],
     routes: [],
     unresolved: [],
     listenPorts: [],
@@ -776,16 +854,18 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
         parent: router.id,
         child: routerArg.getText(model.source),
         prefix,
+        routerArgNode: routerArg,
         middleware: handlerArgs
           .filter((arg: any) => arg !== routerArg)
           .map((arg: any) => ({ node: arg, file: model.rel, scopePath: prefix || undefined })),
       });
     } else {
-      const middleware = handlerArgs.map((arg: any) => ({
+      const middleware = handlerArgs.map((arg: any): MiddlewareRef => ({
         routerId: router.id,
         node: arg,
         file: model.rel,
         scopePath: prefix || undefined,
+        pos: node.pos,
       }));
       if (prefix) {
         for (const mw of middleware) {
@@ -858,6 +938,61 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
   }
 }
 
+function isFourArgHandler(analysis: TsAnalysis, model: FileModel, arg: any): boolean {
+  const { ts } = analysis;
+  const arityFour = (fn: any): boolean => fn?.parameters?.length === 4;
+  if (
+    ts.isArrowFunction(arg) ||
+    ts.isFunctionExpression(arg) ||
+    ts.isFunctionDeclaration(arg)
+  ) {
+    return arityFour(arg);
+  }
+  if (ts.isIdentifier(arg)) {
+    const resolved = resolveHandler(analysis, model.source, arg);
+    return arityFour(resolved?.node);
+  }
+  return false;
+}
+
+/** Resolve the error handlers that can receive a route's thrown/next(err) error:
+ * same-router handlers registered after the route, plus global app fallbacks. */
+function collectErrorHandlers(
+  analysis: TsAnalysis,
+  models: Map<string, FileModel>,
+  route: RouteCall,
+  fullPath: string,
+  appIds: Set<string>,
+): Array<{ file: any; node: any }> {
+  const seen = new Set<any>();
+  const out: Array<{ file: any; node: any }> = [];
+  const resolve = (ref: MiddlewareRef): void => {
+    const source = analysis.sourceByPath.get(ref.file) ?? models.get(ref.file)?.source;
+    const resolved = resolveHandler(analysis, source, ref.node);
+    if (resolved?.node && !seen.has(resolved.node)) {
+      seen.add(resolved.node);
+      out.push(resolved);
+    }
+  };
+
+  const ownModel = models.get(route.file);
+  for (const eh of ownModel?.errorHandlers ?? []) {
+    if (eh.routerId !== route.routerId) continue;
+    if (eh.pos <= route.pos) continue;
+    if (eh.scopePath && !route.rawPath.startsWith(eh.scopePath)) continue;
+    resolve(eh);
+  }
+
+  for (const m of models.values()) {
+    for (const eh of m.errorHandlers) {
+      if (!appIds.has(eh.routerId)) continue;
+      if (eh.scopePath && !fullPath.startsWith(eh.scopePath)) continue;
+      resolve(eh);
+    }
+  }
+  return out;
+}
+
 function routerArgument(ts: any, arg: any, model: FileModel): boolean {
   if (ts.isIdentifier(arg)) {
     if (model.routers.has(arg.text)) return true;
@@ -926,6 +1061,7 @@ function buildRoute(
     handlers: handlerArgs.map((node: any) => ({ node, file: model.rel })),
     middleware: [],
     origin,
+    pos: call.pos,
   };
 }
 

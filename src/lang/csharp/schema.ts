@@ -435,6 +435,24 @@ function buildTypeSchema(
   }
   const schema: JsonSchema = { type: "object", properties };
   if (required.length) schema.required = required;
+  // A non-built-in class-level JsonConverter can reshape the serialized output
+  // in ways that cannot be proven statically. Keep the discovered fields (they
+  // still document the DTO) but flag the type for runtime verification instead
+  // of claiming a high-confidence exact shape.
+  if (index.serialization) {
+    const classConverter = listAttributes(def.node).find(
+      (a) => /(?:^|\.)JsonConverter(?:Attribute)?$/.test(a.name),
+    );
+    if (
+      classConverter &&
+      !/typeof\s*\(\s*(?:System\.Text\.Json\.Serialization\.)?JsonStringEnumConverter/.test(
+        classConverter.node.text,
+      )
+    ) {
+      schema.description =
+        "A custom JsonConverter controls serialization of this type; verify the runtime response shape.";
+    }
+  }
   return schema;
 }
 
