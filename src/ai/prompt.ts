@@ -260,12 +260,57 @@ export function sanitizeSchema(
     if (items) schema.items = items;
   }
 
+  // Open objects: `true` or an empty schema means any additional property;
+  // a typed value is sanitized recursively. This keeps a verbatim-insert row
+  // open instead of narrowing it to the named properties only.
+  if (source.type === "object" || (!schema.type && source.properties)) {
+    if (source.additionalProperties === true) {
+      schema.additionalProperties = {};
+    } else if (
+      source.additionalProperties &&
+      typeof source.additionalProperties === "object" &&
+      !Array.isArray(source.additionalProperties)
+    ) {
+      const additional = sanitizeSchema(
+        source.additionalProperties,
+        depth + 1,
+        allowedRefs,
+      );
+      schema.additionalProperties = additional ?? {};
+    }
+  }
+
+  // Composition keywords, including nullable unions expressed as
+  // anyOf/oneOf with a `{ type: "null" }` branch. anyOf/oneOf keep every
+  // branch that survives sanitizing (at least one is required); allOf keeps
+  // the keyword only when every branch survives so its intersection meaning
+  // is not silently weakened.
+  for (const keyword of ["anyOf", "oneOf"] as const) {
+    if (Array.isArray(source[keyword])) {
+      const branches = (source[keyword] as unknown[])
+        .map((branch) => sanitizeSchema(branch, depth + 1, allowedRefs))
+        .filter((branch): branch is JsonSchema => branch !== null);
+      if (branches.length) schema[keyword] = branches;
+    }
+  }
+  if (Array.isArray(source.allOf)) {
+    const branches = (source.allOf as unknown[])
+      .map((branch) => sanitizeSchema(branch, depth + 1, allowedRefs));
+    if (branches.every((branch): branch is JsonSchema => branch !== null) && branches.length) {
+      schema.allOf = branches;
+    }
+  }
+
   // A schema with no structural signal is noise.
   if (
     !schema.type &&
     schema.const === undefined &&
     !schema.enum &&
-    !schema.nullable
+    !schema.nullable &&
+    !schema.anyOf &&
+    !schema.oneOf &&
+    !schema.allOf &&
+    schema.additionalProperties === undefined
   ) {
     return null;
   }

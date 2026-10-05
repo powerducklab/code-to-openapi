@@ -1,0 +1,97 @@
+{
+  "summary": {
+    "gate": 0.96,
+    "batch": 8,
+    "projects": 1,
+    "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness.",
+    "deterministic": {
+      "routeRecall": 1.0,
+      "routePrecision": 1.0,
+      "requestCompleteness": 1.0,
+      "responseCompleteness": 1.0,
+      "parameterCompleteness": 1.0,
+      "constraintAccuracy": 1.0,
+      "unresolvedRatio": 0.0,
+      "overall": 1.0,
+      "totalAssertions": 172,
+      "totalMismatches": 0,
+      "totalUnknown": 0,
+      "totalExtra": 0,
+      "allSamplesPassGate": true,
+      "fieldLevelPass96": true
+    },
+    "aiReviewedRuntime": {
+      "routeRecall": 1.0,
+      "routePrecision": 1.0,
+      "requestCompleteness": 1.0,
+      "responseCompleteness": 1.0,
+      "parameterCompleteness": 1.0,
+      "constraintAccuracy": 1.0,
+      "unresolvedRatio": 0.0,
+      "overall": 1.0,
+      "totalAssertions": 172,
+      "totalMismatches": 0,
+      "totalUnknown": 0,
+      "totalExtra": 0,
+      "reviewGapsPresented": 4,
+      "reviewGapsAccepted": 4,
+      "aiTaggedMediaSchemas": 5,
+      "allSamplesPassGate": true
+    }
+  },
+  "projects": [
+    {
+      "key": "starlette-crud",
+      "framework": "starlette",
+      "repo": "gtfisher/starlette-example-crud",
+      "commit": "d948b7b",
+      "scanRoot": "",
+      "routesDetected": 9,
+      "routesExpected": 9,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/starlette-crud.static.baseline.json",
+        "contracts": "results/contracts-batch8-starlette-static.json",
+        "assertions": 172,
+        "mismatches": 0,
+        "unknown": 0,
+        "extra": 0,
+        "reviewGaps": 4,
+        "axes": {
+          "routeRecall": 1,
+          "routePrecision": 1,
+          "requestCompleteness": 1,
+          "responseCompleteness": 1,
+          "parameterCompleteness": 1,
+          "constraintAccuracy": 1,
+          "unresolvedRatio": 0,
+          "overall": 1
+        },
+        "passGate": true
+      },
+      "aiReviewedRuntime": {
+        "baseline": "baselines/starlette-crud.runtime.baseline.json",
+        "aiReviewedScan": "results/scan-batch8-starlette-ai-reviewed.json",
+        "contracts": "results/contracts-batch8-starlette-runtime.json",
+        "assertions": 172,
+        "mismatches": 0,
+        "unknown": 0,
+        "extra": 0,
+        "reviewGapsPresented": 4,
+        "reviewGapsAccepted": 4,
+        "aiTaggedMediaSchemas": 5,
+        "axes": {
+          "routeRecall": 1,
+          "routePrecision": 1,
+          "requestCompleteness": 1,
+          "responseCompleteness": 1,
+          "parameterCompleteness": 1,
+          "constraintAccuracy": 1,
+          "unresolvedRatio": 0,
+          "overall": 1
+        },
+        "passGate": true
+      }
+    }
+  ]
+}

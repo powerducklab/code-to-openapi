@@ -28,6 +28,7 @@ import type {
 import type { PythonAnalysis, PyClass, PyFunction } from "../lang/python/index.js";
 import {pythonBindingResolver, isModuleDefinition} from "../lang/python/symbols.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
+import { hasUnknownSchema } from "../core/completeness.js";
 import {
   findAll,
   keywordArgument,
@@ -109,6 +110,9 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
     const routes: RouteCandidate[] = [];
     const unresolved: ExtractionResult["unresolved"] = [];
     const servers: ExtractionResult["servers"] = [];
+    // Schema-less table gateway index (e.g. `dataset`) shared by every route,
+    // so a read handler inherits column names proven by write dictionaries.
+    const gateway = collectTableGateway(analysis);
 
     const bindings = pythonBindingResolver(analysis);
     function endpointBinding(node: TsNode | null) {
@@ -420,6 +424,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
                 statuses,
                 handler: endpointFn,
                 errorFragments: endpointErrorResponses(endpointFn),
+                gateway,
               }),
             );
           }
@@ -520,7 +525,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
         for (const method of methods) {
           const route = buildRoute({ method, path, line: call.startPosition.row + 1,
             symbol: fn.name, statuses: scanStatuses(fn), handler: fn,
-            errorFragments: endpointErrorResponses(fn) });
+            errorFragments: endpointErrorResponses(fn), gateway });
           route.origin = { ...route.origin, file: fn.file };
           routes.push(route);
         }
@@ -714,6 +719,7 @@ function buildRoute(input: {
   statuses: string[];
   handler?: PyFunction;
   errorFragments?: ExceptionResponse[];
+  gateway: TableGatewayIndex;
 }): RouteCandidate {
   const gaps = new Set<GapCode>();
   const parameters = pathParams(input.path);
@@ -730,7 +736,6 @@ function buildRoute(input: {
         .some(node => ownedNodes(node, child => child.type === "return_statement" || child.type === "raise_statement").length);
   });
   if (jsonReads.length) gaps.add("body-schema-unknown");
-  const confidence: Confidence = gaps.size ? "medium" : "high";
   let responses: RouteCandidate["responses"] = input.statuses.map((status) => ({
     statusCode: status,
     description: "",
@@ -744,7 +749,9 @@ function buildRoute(input: {
       const code = keywordArgument(call, "status_code");
       const status = String(code ? literalInteger(code) ?? "default" : 200);
       const payload = keywordArgument(call, "content") ?? positionalArguments(call)[0];
-      const schema = payload ? literalSchema(payload) : {};
+      const schema = payload
+        ? (inferGatewayResponse(payload, input.handler, input.gateway) ?? literalSchema(payload))
+        : {};
       const alternatives = evidence.get(status) ?? [];
       if (!alternatives.some(s => JSON.stringify(s) === JSON.stringify(schema))) alternatives.push(schema);
       evidence.set(status, alternatives);
@@ -778,6 +785,39 @@ function buildRoute(input: {
   if (!responses.length) {
     responses.push({ statusCode: "200", description: "", confidence: "medium", content: [] });
   }
+
+  // Reconcile the provisional unknown markers against the final evidence.
+  // JSONResponse/TemplateResponse payloads and registered exception handlers
+  // can fully describe a route, so keep an unknown gap only when a surviving
+  // body is genuinely untyped. This mirrors the engine completeness gate and
+  // prevents a known payload from being reported as unresolved.
+  const isBodylessStatus = (statusCode: string): boolean =>
+    /^(1\d\d|204|205|304)$/.test(statusCode);
+  const isTextMedia = (mediaType: string): boolean => {
+    const baseMediaType = mediaType.split(";")[0]!.trim();
+    return (
+      baseMediaType === "text/html" ||
+      baseMediaType === "text/plain" ||
+      baseMediaType === "text/css"
+    );
+  };
+  const responsesKnown = responses.every((response) =>
+    isBodylessStatus(response.statusCode) ||
+    (response.content !== undefined &&
+      response.content.length > 0 &&
+      response.content.every(
+        (media) =>
+          isTextMedia(media.mediaType) ||
+          (media.schema !== undefined && !hasUnknownSchema(media.schema)),
+      )),
+  );
+  if (responsesKnown) gaps.delete("response-schema-unknown");
+  if (jsonReads.length) {
+    const bodySchema = requestKeys(input.handler);
+    if (!hasUnknownSchema(bodySchema)) gaps.delete("body-schema-unknown");
+  }
+  const confidence: Confidence = gaps.size ? "medium" : "high";
+
   return {
     method: input.method,
     path: input.path.replace(/\{([^}:]+):[^}]+\}/g, "{$1}"),
@@ -799,39 +839,61 @@ function buildRoute(input: {
     confidence,
     gaps: [...gaps],
     components: [],
+    // Surface the handler source so the host can open an interactive AI review
+    // for any contract that static analysis could not fully resolve (for
+    // example schema-less table gateways such as the `dataset` library).
+    ...(input.handler
+      ? { handlerSource: (input.handler.decorated ?? input.handler.node).text.slice(0, 8192) }
+      : {}),
   };
 }
 
-/** Direct JSON key reads; writes and conditional/nested bodies are not required evidence. */
+/**
+ * Request body shape from direct `await request.json()` usage. Direct key reads
+ * prove required object properties (values stay holes without a static type);
+ * subscript writes or `.update()` prove an open object the caller can extend
+ * (e.g. a record inserted verbatim with server-generated columns).
+ */
 function requestKeys(handler: PyFunction | undefined): JsonSchemaLocal {
   if (!handler?.body) return {};
   const body = handler.body;
-  const aliases = new Set<string>();
   const request = handler.params.find(p => p.name !== "self" && p.name !== "cls")?.name;
   if (!request || findAll(body, n => n.type === "assignment" && n.namedChildren[0]?.text === request).length) return {};
-  for (const statement of body.namedChildren) {
-    const assignment = statement.type === "expression_statement" ? statement.namedChildren[0] : statement;
-    if (assignment?.type !== "assignment") continue;
-    const left = assignment.namedChildren[0], right = assignment.namedChildren.at(-1);
-    if (left?.type === "identifier" && right?.type === "await" && right.text.replace(/\s/g, "") === `await${request}.json()`) {
-      const writes = findAll(body, n => (n.type === "assignment" || n.type === "augmented_assignment") &&
-        (n.namedChildren[0]?.text === left.text || n.namedChildren[0]?.namedChildren[0]?.text === left.text));
-      if (writes.length === 1) aliases.add(left.text);
+  const aliases = new Set<string>();
+  for (const assignment of findAll(body, n => n.type === "assignment")) {
+    const left = assignment.namedChildren[0];
+    const right = assignment.namedChildren.at(-1);
+    if (left?.type === "identifier" && right?.type === "await" &&
+        right.text.replace(/\s/g, "") === `await${request}.json()`) {
+      aliases.add(left.text);
     }
   }
+  if (!aliases.size) return {};
+  const aliasSubscript = (node: TsNode): boolean =>
+    node.type === "subscript" && aliases.has(node.namedChildren[0]?.text ?? "");
   const properties: Record<string, JsonSchemaLocal> = {};
-  for (const statement of body.namedChildren) {
-    if (statement.type !== "expression_statement" && statement.type !== "return_statement") continue;
-    const expression = statement.namedChildren[0];
-    const value = expression?.type === "assignment" ? expression.namedChildren.at(-1) : expression;
-    if (!value) continue;
-    for (const read of findAll(value, n => n.type === "subscript")) {
-      const target = read.namedChildren[0], key = read.namedChildren[1];
-      const name = key ? literalString(key) : null;
-      if (target && aliases.has(target.text) && name !== null) properties[name] = {};
+  let open = false;
+  for (const subscript of findAll(body, n => n.type === "subscript" && aliasSubscript(n))) {
+    const written = subscript.parent?.type === "assignment" && subscript.parent.namedChildren[0]?.id === subscript.id;
+    if (written) {
+      open = true; // body["key"] = value mutates the decoded object
+      continue;
+    }
+    const name = literalString(subscript.namedChildren[1] ?? null);
+    if (name !== null) properties[name] = {};
+  }
+  for (const call of findAll(body, n => n.type === "call")) {
+    const target = call.namedChildren[0];
+    if (target?.type === "attribute" && target.namedChildren[1]?.text === "update" &&
+        aliases.has(target.namedChildren[0]?.text ?? "")) {
+      open = true;
     }
   }
-  return Object.keys(properties).length ? {type:"object",properties,required:Object.keys(properties)} : {};
+  if (Object.keys(properties).length) {
+    return { type: "object", properties, required: Object.keys(properties), ...(open ? { additionalProperties: {} } : {}) };
+  }
+  if (open) return { type: "object", additionalProperties: {} };
+  return {};
 }
 
 /** Literal response evidence only; dynamic expressions remain explicit holes. */
@@ -888,4 +950,243 @@ function literalSchema(node: TsNode, depth = 0): JsonSchemaLocal {
     return { type: "object", properties, ...(Object.keys(properties).length ? { required: Object.keys(properties) } : {}) };
   }
   return {};
+}
+
+// Schema-less table gateway modeling (e.g. the `dataset` library and other
+// `db["table"].method(...)` document stores). Unlike a schema-bound ORM, each
+// row is a plain object whose property names are only knowable from explicit
+// write dictionaries in the source. When a decoded request body is inserted
+// verbatim the row is open (additionalProperties). Values without a static
+// type stay explicit holes for the interactive AI review instead of being
+// fabricated, so the analyzer never invents field types it cannot prove.
+const TABLE_READ_ONE = new Set(["find_one"]);
+const TABLE_READ_MANY = new Set(["find", "find_many", "all"]);
+const TABLE_WRITE = new Set(["insert", "insert_ignore", "upsert", "update", "insert_many", "update_many"]);
+
+interface TableGatewayIndex {
+  columns: Map<string, Map<string, TsNode[]>>;
+  open: Set<string>;
+  arrayHelpers: Set<string>;
+  aliases: Map<string, string>;
+}
+
+/**
+ * Parses `receiver["table"].method(...)` into its literal table and method.
+ * A receiver that is a local handle (`table = db["name"]; table.method(...)`)
+ * is resolved through the alias map.
+ */
+function tableCallHead(
+  node: TsNode | null | undefined,
+  aliases?: Map<string, string>,
+): { table: string; method: string } | null {
+  if (!node || node.type !== "attribute") return null;
+  const method = node.namedChildren[1]?.text ?? "";
+  if (!TABLE_READ_ONE.has(method) && !TABLE_READ_MANY.has(method) && !TABLE_WRITE.has(method)) return null;
+  const receiver = node.namedChildren[0];
+  if (!receiver) return null;
+  if (receiver.type === "subscript") {
+    const table = literalString(receiver.namedChildren[1] ?? null);
+    return table === null ? null : { table, method };
+  }
+  if (receiver.type === "identifier" && aliases?.has(receiver.text)) {
+    return { table: aliases.get(receiver.text)!, method };
+  }
+  return null;
+}
+
+/** Extracts static `{key: value}` / `dict(key=value)` entries, or null for dynamic shapes. */
+function dictEntries(node: TsNode | null | undefined): { key: string; value: TsNode }[] | null {
+  if (!node) return null;
+  if (node.type === "dictionary") {
+    const entries: { key: string; value: TsNode }[] = [];
+    for (const pair of node.namedChildren) {
+      if (pair.type !== "pair") return null; // dictionary unpacking is dynamic
+      const key = literalString(pair.namedChildren[0] ?? null);
+      const value = pair.namedChildren[1];
+      if (key === null || !value) return null;
+      entries.push({ key, value });
+    }
+    return entries;
+  }
+  if (node.type === "call" && callName(node.namedChildren[0] ?? null) === "dict") {
+    const entries: { key: string; value: TsNode }[] = [];
+    const argumentList = node.namedChildren.find((child) => child.type === "argument_list");
+    const args = argumentList ? argumentList.namedChildren : node.namedChildren.slice(1);
+    for (const arg of args) {
+      if (arg.type !== "keyword_argument") return null; // **kwargs / positional are dynamic
+      const key = arg.namedChildren[0]?.text ?? null;
+      const value = arg.namedChildren[1];
+      if (!key || !value) return null;
+      entries.push({ key, value });
+    }
+    return entries.length ? entries : null;
+  }
+  return null;
+}
+
+/**
+ * Resolves a table write payload. An identifier is traced to its defining
+ * dict/dictionary inside the enclosing function (e.g. `data = dict(...)`);
+ * a decoded request body or other dynamic expression marks the row open.
+ */
+function resolveWritePayload(
+  payload: TsNode | null,
+): { entries?: { key: string; value: TsNode }[]; open?: boolean } {
+  if (!payload) return {};
+  let node: TsNode | null = payload;
+  if (node.type === "identifier") {
+    let scope: TsNode | null = node.parent;
+    while (scope && scope.type !== "function_definition") scope = scope.parent;
+    const roots: TsNode[] = [];
+    if (scope) roots.push(scope);
+    let moduleScope: TsNode | null = node;
+    while (moduleScope?.parent) moduleScope = moduleScope.parent;
+    if (moduleScope) roots.push(moduleScope);
+    let traced: TsNode | null = null;
+    for (const root of roots) {
+      const assignments = findAll(
+        root,
+        (n) => n.type === "assignment" && n.namedChildren[0]?.text === node!.text,
+      );
+      const value = assignments.length === 1 ? assignments[0]!.namedChildren.at(-1) ?? null : null;
+      if (value) {
+        traced = value;
+        break;
+      }
+    }
+    node = traced;
+  }
+  if (!node) return {};
+  const entries = dictEntries(node);
+  if (entries) return { entries };
+  if (node.type === "await" || node.type === "call") return { open: true };
+  return {};
+}
+
+function collectTableGateway(analysis: PythonAnalysis): TableGatewayIndex {
+  const columns = new Map<string, Map<string, TsNode[]>>();
+  const open = new Set<string>();
+  const arrayHelpers = new Set<string>();
+  const aliases = new Map<string, string>();
+  // Local table handles: `table = db["name"]`.
+  for (const file of analysis.files.values()) {
+    for (const assignment of findAll(file.root, (n) => n.type === "assignment")) {
+      const left = assignment.namedChildren[0];
+      const value = assignment.namedChildren.at(-1);
+      if (left?.type !== "identifier" || value?.type !== "subscript") continue;
+      const table = literalString(value.namedChildren[1] ?? null);
+      if (table !== null) aliases.set(left.text, table);
+    }
+  }
+  const addColumn = (table: string, key: string, value: TsNode): void => {
+    let tableColumns = columns.get(table);
+    if (!tableColumns) {
+      tableColumns = new Map<string, TsNode[]>();
+      columns.set(table, tableColumns);
+    }
+    const values = tableColumns.get(key) ?? [];
+    values.push(value);
+    tableColumns.set(key, values);
+  };
+  for (const file of analysis.files.values()) {
+    for (const call of findAll(file.root, (n) => n.type === "call")) {
+      const info = tableCallHead(call.namedChildren[0], aliases);
+      if (!info || !TABLE_WRITE.has(info.method)) continue;
+      const payload = positionalArguments(call)[0];
+      const resolved = resolveWritePayload(payload ?? null);
+      if (resolved.entries) {
+        for (const entry of resolved.entries) addColumn(info.table, entry.key, entry.value);
+      } else if (resolved.open) {
+        // A variable/expression payload (commonly the decoded request body)
+        // can carry arbitrary keys, so the row shape is open.
+        open.add(info.table);
+      }
+    }
+  }
+  // Module helpers that accumulate rows into a list and return it
+  // (`rows = []` ... `rows.append(item)` ... `return rows`) return arrays.
+  for (const fn of analysis.functions) {
+    const body = fn.body;
+    if (!body) continue;
+    const returnsList = findAll(body, (n) => n.type === "return_statement").some((statement) => {
+      const variable = statement.namedChildren[0];
+      if (variable?.type !== "identifier") return false;
+      const initializesList = findAll(
+        body,
+        (n) => n.type === "assignment" && n.namedChildren[0]?.text === variable.text,
+      ).some((assignment) => assignment.namedChildren.at(-1)?.type === "list");
+      const appends = findAll(
+        body,
+        (n) => n.type === "call" && callName(n.namedChildren[0]) === "append",
+      ).length;
+      return initializesList && appends > 0;
+    });
+    if (returnsList) arrayHelpers.add(fn.name);
+  }
+  return { columns, open, arrayHelpers, aliases };
+}
+
+function gatewayRow(table: string, gateway: TableGatewayIndex): JsonSchemaLocal {
+  const tableColumns = gateway.columns.get(table);
+  if (tableColumns && tableColumns.size) {
+    const properties: Record<string, JsonSchemaLocal> = {};
+    for (const [key, valueNodes] of tableColumns) {
+      let schema: JsonSchemaLocal = {};
+      const inferred = valueNodes.map((node) => literalSchema(node)).filter((s) => Object.keys(s).length > 0);
+      // Use a type only when every write to this column proves the same one;
+      // otherwise leave an explicit hole for interactive review.
+      if (inferred.length === valueNodes.length) {
+        const signature = JSON.stringify(inferred[0]);
+        if (inferred.every((s) => JSON.stringify(s) === signature)) schema = inferred[0]!;
+      }
+      properties[key] = schema;
+    }
+    return gateway.open.has(table)
+      ? { type: "object", properties, additionalProperties: {} }
+      : { type: "object", properties };
+  }
+  // A known schema-less table with no write evidence is an open object.
+  return { type: "object", additionalProperties: {} };
+}
+
+/**
+ * Resolves a JSONResponse payload that comes from a schema-less table gateway
+ * or a list-accumulating helper. Returns null for literal payloads so the
+ * caller falls back to literal schema inference.
+ */
+function inferGatewayResponse(
+  expression: TsNode | null,
+  handler: PyFunction | undefined,
+  gateway: TableGatewayIndex,
+): JsonSchemaLocal | null {
+  let node = expression;
+  // Resolve a local identifier assigned once in the handler to its value.
+  if (node?.type === "identifier" && handler?.body) {
+    const assignments = findAll(
+      handler.body,
+      (n) => n.type === "assignment" && n.namedChildren[0]?.text === node!.text,
+    );
+    const value = assignments.length === 1 ? assignments[0]!.namedChildren.at(-1) : undefined;
+    if (value) node = value;
+  }
+  if (!node || node.type !== "call") return null;
+  const head = node.namedChildren[0];
+  const info = tableCallHead(head, gateway.aliases);
+  if (info) {
+    if (TABLE_READ_ONE.has(info.method)) {
+      // find_one returns the row or None (serialized as null), never 404.
+      return { anyOf: [gatewayRow(info.table, gateway), { type: "null" }] };
+    }
+    if (TABLE_READ_MANY.has(info.method)) {
+      return { type: "array", items: gatewayRow(info.table, gateway) };
+    }
+    return null;
+  }
+  const helper = callName(head ?? null);
+  if (helper && gateway.arrayHelpers.has(helper)) {
+    const table = literalString(positionalArguments(node)[0] ?? null);
+    if (table !== null) return { type: "array", items: gatewayRow(table, gateway) };
+    return { type: "array", items: {} };
+  }
+  return null;
 }

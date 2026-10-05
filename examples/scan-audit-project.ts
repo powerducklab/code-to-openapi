@@ -5,5 +5,6 @@ const result = await scanProject({ root: process.argv[2]!, additionalSourceRoots
 const converted = await result.convert();
 writeFileSync(process.argv[3]!, JSON.stringify({
  report: result.report, project: result.project, document: converted.document,
+ gapReviews: (result as { gapReviews?: unknown[] }).gapReviews ?? [],
  valid: converted.documentValid, ok: converted.ok, diagnostics: converted.diagnostics,
 }, null, 2));

@@ -1,0 +1,247 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "starlette-example-crud static-contract baseline",
+    "version": "1.0.0",
+    "x-basis": "Hand-written from the pinned source (gtfisher/starlette-example-crud @ d948b7b) and native HTTP evidence. This is the STATIC capability baseline: it asserts only what a perfect static analyzer can prove without running the project or fabricating types. The app stores rows through the schema-less `dataset` document DB (SQLite); the seven contact column NAMES are provable from the authoritative PUT write dict (`data = dict(id=..., firstName=..., lastName=..., email=..., company=..., phone=..., creationTime=...)`), but their VALUE TYPES are not statically provable because they are read from an unconstrained `await request.json()` body, so each value is an explicit empty schema (an open hole) and the row is an open object (POST inserts the decoded body verbatim, allowing arbitrary extra keys). Concrete value types (id/creationTime integer, the rest string) are verified against native responses in the runtime baseline and completed through the interactive AI review, never invented here. find_one returns the row OR None (HTTP 200 with null), never a 404. get_items accumulates rows into a list. With debug=True the /error RuntimeError bypasses the custom 500 handler and content-negotiates a traceback (text/plain by default, text/html for Accept: text/html)."
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "index template",
+            "content": {
+              "text/html": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/msg": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "literal message and runtime version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "version": { "type": "string" }
+                  },
+                  "required": ["message", "version"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dt": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "literal hello and stringified datetime",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hello": { "type": "string" },
+                    "now": { "type": "string" }
+                  },
+                  "required": ["hello", "now"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "all contact rows (empty list when the table has no rows)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {},
+                      "firstName": {},
+                      "lastName": {},
+                      "email": {},
+                      "company": {},
+                      "phone": {},
+                      "creationTime": {}
+                    },
+                    "additionalProperties": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": {} }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "insert result; creationTime is overwritten server-side with int(time.time())",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": { "type": "string" }
+                  },
+                  "required": ["created"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact/{item_id}": {
+      "get": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "find_one row, or null when no row matches (not a 404)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {},
+                        "firstName": {},
+                        "lastName": {},
+                        "email": {},
+                        "company": {},
+                        "phone": {},
+                        "creationTime": {}
+                      },
+                      "additionalProperties": {}
+                    },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": {},
+                  "lastName": {},
+                  "email": {},
+                  "company": {},
+                  "phone": {},
+                  "creationTime": {}
+                },
+                "required": ["firstName", "lastName", "email", "company", "phone", "creationTime"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "updated find_one row, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {},
+                        "firstName": {},
+                        "lastName": {},
+                        "email": {},
+                        "company": {},
+                        "phone": {},
+                        "creationTime": {}
+                      },
+                      "additionalProperties": {}
+                    },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "remaining contact rows after delete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {},
+                      "firstName": {},
+                      "lastName": {},
+                      "email": {},
+                      "company": {},
+                      "phone": {},
+                      "creationTime": {}
+                    },
+                    "additionalProperties": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/error": {
+      "get": {
+        "responses": {
+          "500": {
+            "description": "debug=True: the raised RuntimeError bypasses the custom 500 handler and content-negotiates a traceback (text/plain by default, text/html for Accept: text/html)",
+            "content": {
+              "text/plain; charset=utf-8": { "schema": { "type": "string" } },
+              "text/html; charset=utf-8": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

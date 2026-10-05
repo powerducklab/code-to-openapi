@@ -83,20 +83,31 @@ function walkUnknown(
         }
       }
     }
-    // anyOf/oneOf describe alternatives: if at least one branch is fully
-    // typed, consumers already have a concrete shape, so a weak sibling
-    // branch (for example the unauthenticated null variant) is not an
-    // unknown gap. allOf still requires every branch to be complete.
+    // anyOf/oneOf describe alternatives: if at least one data-bearing branch
+    // is fully typed, consumers already have a concrete shape, so a weak
+    // sibling (for example the unauthenticated variant) is not an unknown gap.
+    // A pure `null` branch carries no data shape, so it cannot by itself make
+    // a nullable dynamic object count as known; its object sibling is still
+    // examined and stays a gap when its fields are untyped. allOf still
+    // requires every branch to be complete.
     for (const key of ["anyOf", "oneOf"] as const) {
       const branches = value[key];
       if (Array.isArray(branches) && branches.length > 0) {
-        const someTyped = branches.some(
+        const isPureNull = (branch: unknown): boolean => {
+          if (!branch || typeof branch !== "object") return false;
+          const record = branch as Record<string, unknown>;
+          return record.type === "null" &&
+            Object.keys(record).every((k) => ["type", "description", "title"].includes(k));
+        };
+        const dataBranches = branches.filter((branch) => !isPureNull(branch));
+        const candidates = dataBranches.length > 0 ? dataBranches : branches;
+        const someTyped = candidates.some(
           (branch) =>
             branch &&
             typeof branch === "object" &&
             !walkUnknown(branch, components, new Set(seen)),
         );
-        if (!someTyped) for (const item of branches) pending.push(item);
+        if (!someTyped) for (const item of candidates) pending.push(item);
       }
     }
     for (const key of ["allOf", "prefixItems"]) {
@@ -147,21 +158,24 @@ export function applyCompletenessGate(candidate: RouteCandidate, components?: Re
     if (/^(1\d\d|204|205|304)$/.test(r.statusCode)) return true;
     if (!r.content) return true;
     return r.content.every((m) => {
+      // Media type parameters (e.g. "; charset=utf-8") never carry schema
+      // semantics, so compare on the base media type only.
+      const baseMediaType = m.mediaType.split(";")[0]!.trim();
       if (m.schema || m.itemSchema) {
-        if (hasUnknownSchema(m.itemSchema ?? m.schema, components)) gaps.add(m.mediaType === "text/event-stream" ? "sse-events-unknown" : "response-schema-unknown");
+        if (hasUnknownSchema(m.itemSchema ?? m.schema, components)) gaps.add(baseMediaType === "text/event-stream" ? "sse-events-unknown" : "response-schema-unknown");
         return true;
       }
       // SSE event payloads have their own dedicated gap code.
-      if (m.mediaType === "text/event-stream") {
+      if (baseMediaType === "text/event-stream") {
         gaps.add("sse-events-unknown");
         return true;
       }
       // Rendered views (text/html) and other plain-text bodies are fully
       // described by their media type; no JSON schema is applicable.
       if (
-        m.mediaType === "text/html" ||
-        m.mediaType === "text/plain" ||
-        m.mediaType === "text/css"
+        baseMediaType === "text/html" ||
+        baseMediaType === "text/plain" ||
+        baseMediaType === "text/css"
       ) {
         return true;
       }

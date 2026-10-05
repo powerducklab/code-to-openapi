@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-10-05",
+  "batch": 8,
+  "purpose": "Eighth fresh generality batch, extending the field-level gate to frameworks whose response contracts are produced through schema-less data gateways and dynamic exception chains. The first sample is a third-party Starlette CRUD API backed by the schema-less `dataset` document DB (SQLite), chosen to exercise P1#14 (Starlette exception handlers and middleware must be associated per app, exception type and debug setting) together with a data path that a pure structural scanner cannot fully type: rows are written from an unconstrained `await request.json()` body, so column NAMES are statically provable from the authoritative write dict while column VALUE TYPES are not. The batch introduces an explicit two-layer acceptance model. The STATIC baseline asserts only what a perfect non-running analyzer can prove (column names, array vs object vs nullable shapes, open objects from verbatim inserts, required keys from indexed reads); it deliberately leaves unprovable value types as explicit empty schemas and must reach the gate without fabrication. The RUNTIME baseline records the concrete types established by native HTTP evidence and is reached ONLY after the interactive, user-visible AI review (every AI fragment tagged x-ai-inferred) is accepted; it is never counted as deterministic scanner correctness. Unknown value types are surfaced as reviewable gaps instead of being guessed.",
+  "scoring": {
+    "gate": 0.96,
+    "axes": [
+      "routeRecall",
+      "routePrecision",
+      "requestCompleteness",
+      "responseCompleteness",
+      "parameterCompleteness",
+      "constraintAccuracy"
+    ],
+    "unknownCountsAsIncorrect": true,
+    "twoLayerModel": {
+      "static": "Maximum contract provable without running or fabricating. Schema-less row value types are explicit empty schemas (present field, open value), never invented primitives. Gated at 0.96 and scored as deterministic scanner capability.",
+      "runtime": "Concrete types from native HTTP evidence, merged only through an accepted interactive AI gap decision and tagged x-ai-inferred. Gated at 0.96 but reported separately from deterministic correctness.",
+      "rule": "The scan output is never used to derive either baseline. A nullable dynamic object whose object branch has untyped fields stays a reviewable gap: a pure `null` branch carries no data shape and must not silently mark the union known."
+    }
+  },
+  "projects": [
+    {
+      "key": "starlette-crud",
+      "framework": "starlette",
+      "repo": "gtfisher/starlette-example-crud",
+      "commit": "d948b7b",
+      "scanRoot": "",
+      "runtimeEnvironment": {
+        "available": true,
+        "python": "3.13",
+        "dependencies": "starlette 0.27, uvicorn 0.23, dataset 1.6.2, Jinja2, h11",
+        "database": "dataset document DB over SQLite (schema-less tables)",
+        "debugVariants": "Run twice: debug=True on :8000 as shipped and a debug=False copy on :8001 to capture the exception media-type fork."
+      },
+      "baseline": "Single-file app.py. Nine operations: GET / renders the index Jinja template (200 text/html); GET /msg returns the literal {message,version}; GET /dt returns {hello:'world', now:stringified datetime}; GET /api/contact returns all contact rows as a list ([] when empty); POST /api/contact decodes an arbitrary JSON object, overwrites creationTime with int(time.time()), inserts it verbatim and returns {created:'ok'}; GET /api/contact/{item_id} returns find_one(id=item_id) or HTTP 200 null when absent (never 404); PUT /api/contact/{item_id} reads six body keys (firstName,lastName,email,company,phone,creationTime), builds data=dict(id=<path>, ...), calls table.update(data,['id']) and returns find_one or null; DELETE /api/contact/{item_id} deletes and returns the remaining list; GET /error raises RuntimeError. With debug=True the RuntimeError bypasses the custom 500 handler and content-negotiates a traceback (text/plain by default, text/html for Accept: text/html); with debug=False the registered custom handler returns 500 text/html from 500.html. Unknown routes return 404 text/html. The StaticFiles mount at /static is not an operation. A contact row provably carries the seven column names id,firstName,lastName,email,company,phone,creationTime (from the PUT write dict) and is an open object (POST inserts the decoded body); native evidence establishes id and creationTime as integers and the other five as strings. The path parameter item_id has no :int converter and is a string.",
+      "expectedRoutes": 9,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/starlette-crud.static.baseline.json",
+        "contracts": "results/contracts-batch8-starlette-static.json",
+        "assertions": 172,
+        "gate": 0.96,
+        "passGate": true,
+        "reviewGaps": 4
+      },
+      "runtime": {
+        "baseline": "baselines/starlette-crud.runtime.baseline.json",
+        "aiReviewedScan": "results/scan-batch8-starlette-ai-reviewed.json",
+        "contracts": "results/contracts-batch8-starlette-runtime.json",
+        "assertions": 172,
+        "gate": 0.96,
+        "passGate": true,
+        "aiTaggedMediaSchemas": 5
+      }
+    }
+  ]
+}

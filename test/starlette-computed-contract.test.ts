@@ -49,3 +49,54 @@ async def write(request):
  expect(doc.paths['/write'].post.requestBody.content['application/json'].schema.properties?.generated).toBeUndefined();
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+it('infers schema-less table gateway rows, nullable reads and open inserts without fabricating value types',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'starlette-gateway-'));
+ try{
+ await writeFile(join(root,'app.py'),`from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+app = Starlette()
+db = connect('sqlite:///app.db')
+@app.route('/widgets')
+async def list_widgets(request):
+    table = db['widgets']
+    return JSONResponse(table.find())
+@app.route('/widgets', methods=['POST'])
+async def create_widget(request):
+    payload = await request.json()
+    payload['createdAt'] = 1
+    db['widgets'].insert(payload)
+    return JSONResponse({'created': 'ok'})
+@app.route('/widgets/{wid}')
+async def get_widget(request):
+    row = db['widgets'].find_one(id=request.path_params['wid'])
+    return JSONResponse(row)
+@app.route('/widgets/{wid}', methods=['PUT'])
+async def update_widget(request):
+    body = await request.json()
+    data = dict(id=body['id'], name=body['name'], count=body['count'])
+    db['widgets'].update(data, ['id'])
+    return JSONResponse(db['widgets'].find_one(id=body['id']))
+`);
+ const result=await scanProject({root});
+ const doc=(await result.convert()).document as any;
+ const list=doc.paths['/widgets'].get.responses['200'].content['application/json'].schema;
+ expect(list.type).toBe('array');
+ expect(Object.keys(list.items.properties).sort()).toEqual(['count','id','name']);
+ // Column names are provable from the authoritative write dict; value types
+ // are not statically provable from an unconstrained request.json body, so
+ // they must stay open holes rather than fabricated primitives.
+ expect(list.items.properties.id).toEqual({});
+ // Verbatim insert of the decoded body keeps the row open to extra keys.
+ expect(list.items.additionalProperties).toEqual({});
+ const detail=doc.paths['/widgets/{wid}'].get.responses['200'].content['application/json'].schema;
+ expect(detail.anyOf?.[1]).toEqual({type:'null'});
+ expect(Object.keys(detail.anyOf[0].properties).sort()).toEqual(['count','id','name']);
+ const postBody=doc.paths['/widgets'].post.requestBody.content['application/json'].schema;
+ expect(postBody).toEqual({type:'object',additionalProperties:{}});
+ const putBody=doc.paths['/widgets/{wid}'].put.requestBody.content['application/json'].schema;
+ expect(putBody.properties.id).toEqual({});
+ expect(putBody.required.slice().sort()).toEqual(['count','id','name']);
+ expect(putBody.additionalProperties).toBeUndefined();
+ }finally{await rm(root,{recursive:true,force:true});}
+});

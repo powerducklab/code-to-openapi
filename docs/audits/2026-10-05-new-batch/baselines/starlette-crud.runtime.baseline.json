@@ -1,0 +1,216 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "starlette-example-crud runtime contract baseline",
+    "version": "1.0.0",
+    "x-basis": "Hand-written from native HTTP evidence against the running app (gtfisher/starlette-example-crud @ d948b7b, dataset 1.6.2 / SQLite). This is the RUNTIME baseline that the interactive AI review must converge to: the static scan can prove the seven contact column names and the array/nullable/open-object shapes but not the value types (rows come from an unconstrained request.json body into a schema-less table). Live requests establish id and creationTime as integers (dataset autoincrement id; creationTime = int(time.time())) and firstName/lastName/email/company/phone as strings. POST inserts the decoded body verbatim (arbitrary extra keys allowed, so the row stays an open object) and overwrites creationTime. find_one returns the row or null with HTTP 200 (never 404). The row properties are not required because POST accepts an arbitrary body, so a stored row may omit any of them. These types are delivered to the document only after a reviewer accepts the AI proposal; every AI-derived fragment is tagged x-ai-inferred."
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "index template",
+            "content": {
+              "text/html": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/msg": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "literal message and runtime version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "version": { "type": "string" }
+                  },
+                  "required": ["message", "version"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dt": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "literal hello and stringified datetime",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hello": { "type": "string" },
+                    "now": { "type": "string" }
+                  },
+                  "required": ["hello", "now"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "all contact rows (empty list when the table has no rows)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ContactRow" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": {} }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "insert result; creationTime is overwritten server-side with int(time.time())",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": { "type": "string" }
+                  },
+                  "required": ["created"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contact/{item_id}": {
+      "get": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "find_one row, or null when no row matches (not a 404)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    { "$ref": "#/components/schemas/ContactRow" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": { "type": "string" },
+                  "lastName": { "type": "string" },
+                  "email": { "type": "string" },
+                  "company": { "type": "string" },
+                  "phone": { "type": "string" },
+                  "creationTime": { "type": "integer" }
+                },
+                "required": ["firstName", "lastName", "email", "company", "phone", "creationTime"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "updated find_one row, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    { "$ref": "#/components/schemas/ContactRow" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "remaining contact rows after delete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ContactRow" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/error": {
+      "get": {
+        "responses": {
+          "500": {
+            "description": "debug=True: the raised RuntimeError bypasses the custom 500 handler and content-negotiates a traceback (text/plain by default, text/html for Accept: text/html)",
+            "content": {
+              "text/plain; charset=utf-8": { "schema": { "type": "string" } },
+              "text/html; charset=utf-8": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ContactRow": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "firstName": { "type": "string" },
+          "lastName": { "type": "string" },
+          "email": { "type": "string" },
+          "company": { "type": "string" },
+          "phone": { "type": "string" },
+          "creationTime": { "type": "integer" }
+        },
+        "additionalProperties": {}
+      }
+    }
+  }
+}

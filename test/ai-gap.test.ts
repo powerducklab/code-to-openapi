@@ -197,4 +197,61 @@ describe("sanitizeSchema", () => {
     });
     expect(Object.keys(schema?.properties ?? {})).toEqual(["good"]);
   });
+
+  it("preserves nullable unions expressed with anyOf", () => {
+    const schema = sanitizeSchema({
+      anyOf: [
+        {
+          type: "object",
+          properties: { id: { type: "integer" }, name: { type: "string" } },
+          additionalProperties: {},
+        },
+        { type: "null" },
+        "not-a-schema",
+      ],
+    });
+    expect(schema).toEqual({
+      anyOf: [
+        {
+          type: "object",
+          properties: { id: { type: "integer" }, name: { type: "string" } },
+          additionalProperties: {},
+        },
+        { type: "null" },
+      ],
+    });
+  });
+
+  it("keeps objects open through additionalProperties", () => {
+    expect(sanitizeSchema({ type: "object", additionalProperties: true })).toEqual({
+      type: "object",
+      additionalProperties: {},
+    });
+    const typed = sanitizeSchema({
+      type: "object",
+      additionalProperties: { type: "string" },
+    });
+    expect(typed).toEqual({ type: "object", additionalProperties: { type: "string" } });
+  });
+
+  it("drops allOf unless every branch survives", () => {
+    // A dead branch invalidates the intersection; with no other signal the
+    // whole fragment is discarded rather than silently weakened.
+    expect(
+      sanitizeSchema({ allOf: [{ type: "object", properties: { id: { type: "integer" } } }, "junk"] }),
+    ).toBeNull();
+    expect(
+      sanitizeSchema({
+        allOf: [
+          { type: "object", properties: { id: { type: "integer" } } },
+          { type: "object", properties: { name: { type: "string" } } },
+        ],
+      }),
+    ).toEqual({
+      allOf: [
+        { type: "object", properties: { id: { type: "integer" } } },
+        { type: "object", properties: { name: { type: "string" } } },
+      ],
+    });
+  });
 });
