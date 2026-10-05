@@ -17,12 +17,13 @@ bought by fabrication.
 | starlette-crud | starlette | gtfisher/starlette-example-crud | d948b7b | Python 3.13 + dataset 1.6.2 / SQLite | 172 assertions, all axes 1.0 | 172 assertions, all axes 1.0 |
 | mongoose-express | express + mongoose | bezkoder/node-express-mongodb | 30851145 | not bootable on audit host (no mongod/Docker) | 254 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; no AI completion needed) |
 | aspnet-todoapidto | asp.net core mvc controllers (csharp) | dotnet/AspNetCore.Docs (`aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO`) | 3d06f3ee | .NET SDK 10.302 rolling forward to net9.0, EF Core InMemory | 252 assertions, all axes 1.0, 0 review gaps | n/a (static contract matches native HTTP evidence; no AI completion needed) |
+| micronaut-crud | micronaut (java) | nomemory/micronaut-crud-backend | 14921d7 | not bootable on audit host (2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5, only JDK 25 installed, no Gradle) | 174 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; static contract fixed by Micronaut/Jackson/ModelMapper semantics) |
 
 Later samples planned for this batch: a Symfony JSON API (API Platform style,
-not the Twig SSR demo) and Micronaut. Each gets the same closed loop:
-real third-party project at a pinned commit, native runtime where the
-environment allows it, independently hand-written static and runtime baselines,
-generic scanner fixes with regression tests.
+not the Twig SSR demo). Micronaut is now closed statically. Each gets the same
+closed loop: real third-party project at a pinned commit, native runtime where
+the environment allows it, independently hand-written static and runtime
+baselines, generic scanner fixes with regression tests.
 
 ## Two-layer acceptance model
 
@@ -259,7 +260,46 @@ the sample.
     computed properties (e.g. `TemperatureF => 32 + C/0.5556`) are serialized;
     `struct` declarations are modeled as a distinct type kind.
 
-Regression tests: `test/starlette-computed-contract.test.ts` (schema-less
+### Micronaut (P1#1 ORM/computed-serializer projection, declared generic entity, implicit body)
+
+20. **Declared `HttpResponse<T>` entity fallback** (`src/frameworks/micronaut.ts`):
+    when a success (2xx) builder chain ends in `.body(...)` whose argument cannot
+    be typed expression-locally — `ok().body(opt.get())` on an
+    `Optional<T>`, or `ok().body(service.createBook(dto))` — the entity now
+    falls back to the concrete generic argument `T` of the declared
+    `HttpResponse<T>`. A raw/wildcard/`Object` body (`HttpResponse<?>`,
+    `HttpResponse`) yields no schema, so a bodiless `ok()` success stays empty
+    instead of gaining a fabricated object. This recovers the GET-by-id and
+    service-call 200 branches without touching the explicit 404 arms.
+21. **Implicit unannotated POJO body** (`src/frameworks/micronaut.ts`): on a
+    body-bearing route (POST/PUT/PATCH), a single unannotated user-defined
+    class/record parameter is bound as the JSON request body (Micronaut's
+    implicit `@Body`), e.g. `createAuthor(CreateAuthorDTO body)`. Primitives,
+    wrappers, strings, dates, UUIDs, collections, maps and file-upload types are
+    never promoted to a body; an unannotated simple type is left unresolved
+    rather than guessed as a query parameter. An explicit `@Body` still wins.
+22. **Nested DTO getter scoping and ModelMapper projection**
+    (`src/lang/java/index.ts`, `src/frameworks/micronaut.ts`): bean getters are
+    collected from a type body's DIRECT members only, so the getters of a static
+    nested DTO (`AuthorDTO.BookInfo`, `BookDTO.AuthorsInfo`) no longer leak onto
+    the enclosing DTO (previously `title`/`pages` appeared on `AuthorDTO`).
+    Response components are the ModelMapper TARGET DTOs (`map(entity, XxxDTO.class)`
+    maps same-named bean properties recursively); the JPA `Author`/`Book`
+    entities and the eager many-to-many graph are never expanded, and
+    `AuthorsInfo` declaring only `id/firstName/lastName` cuts the relationship
+    cycle on the wire. Response objects carry `x-audit-exact-properties` to
+    hard-fail any entity/relationship field leakage. `Long` maps to
+    `integer/int64`, `int` to `integer/int32`, `Set<T>` to an array. DTOs carry
+    no `javax.validation` annotations, so no request field is required and no
+    validation 400 is emitted; the JSON body itself stays required. Both
+    controllers are `@Secured(IS_ANONYMOUS)`, so no Authorization/401 contract
+    is asserted despite the JWT bearer config.
+
+Regression tests: `test/micronaut-declared-body-implicit.test.ts` (declared
+generic entity fallback through `Optional.get()`/service calls, implicit POJO
+body, simple type never promoted to a body, nested static DTO getter
+non-leakage, bodiless wildcard `HttpResponse<?>` success), plus
+`test/starlette-computed-contract.test.ts` (schema-less
 gateway rows, nullable reads, open inserts, no fabricated value types),
 `sanitizeSchema` cases in `test/ai-gap.test.ts`,
 `test/express-mongoose-projection.test.ts` (ESM + CommonJS models, factory /
@@ -273,7 +313,7 @@ secret non-leakage, value-type request optionality vs wire requiredness,
 template, and recursive csproj target-framework detection). Existing ASP.NET
 tests were tightened to the native behavior: shadowed `NoContent`, value-type
 query binding 400, the built-in (FluentValidation-independent) 400, and empty
-`required` arrays. Full suite: 181 files / 496 tests green.
+`required` arrays. Full suite: 182 files / 497 tests green.
 
 ## Result
 
@@ -323,15 +363,43 @@ query binding 400, the built-in (FluentValidation-independent) 400, and empty
   matches the native behavior, so no runtime/AI layer is needed and none is
   claimed; the native findings are recorded in `projects-batch8.json`.
 
+### Micronaut result (nomemory/micronaut-crud-backend @ 14921d7)
+
+- All 5 operations recalled with zero false routes and **zero review gaps**:
+  `POST /author`, `GET/DELETE /author/{id}`, `POST /book`, `GET /book/{id}`.
+- Static deterministic gate: **174 assertions, 0 mismatch / 0 unknown / 0
+  extra, every axis 1.0** (`results/contracts-batch8-micronaut-static.json`).
+  Success responses resolve to the exact ModelMapper target DTOs
+  (`AuthorDTO{id,firstName,lastName,books:BookInfo[]}` and
+  `BookDTO{id,title,pages,authors:AuthorsInfo[]}` with `BookInfo{id,title,pages}`
+  and `AuthorsInfo{id,firstName,lastName}`); JPA entities and the eager
+  many-to-many graph never leak and the relationship cycle is cut by the nested
+  DTO shape. `POST /author` binds the unannotated `CreateAuthorDTO` implicitly
+  as the body; `POST /book` binds the explicit `@Body CreateBookDTO`; both
+  request DTOs have only optional fields and a required body. Success is 200
+  (not 201); absent entities and the `AuthorNotFoundException` arm are bodiless
+  404; DELETE success is a bodiless 200 on a wildcard `HttpResponse<?>`.
+- This sample is **deterministic-only / static-only**: the contract is fully
+  fixed by Micronaut/Jackson/ModelMapper semantics and needs no AI completion,
+  while the audit host cannot boot the 2020 Gradle 6.x / shadow 6.1.0 /
+  Micronaut plugin 1.0.5 toolchain on the only installed JDK (25) with no
+  Gradle present, so no runtime baseline is fabricated (recorded honestly in
+  `projects-batch8.json`).
+- A generic Java enhancement is recorded but not asserted in this gate:
+  Jackson's default `Include.ALWAYS` makes response keys present in principle,
+  but the scanner does not yet model a Java response-serialization `required`
+  direction (consistent with the Spring gate); response field `required` arrays
+  are therefore left unasserted rather than sample-specific.
+
 ## Remaining for batch 8
 
 - Symfony JSON API (API Platform or equivalent; the symfony/demo project is
   Twig server-rendered and is not a JSON gate sample). The audit host has no
   PHP runtime, so this sample needs a runnable environment or a static-only
   boundary recorded honestly.
-- Micronaut real project (JDK 25 + Gradle/Maven caches available; only logs
-  exist under /tmp so a fresh third-party sample at a pinned commit is
-  required).
+- Generic Java response-serialization `required` direction (Jackson
+  `Include.ALWAYS` wire presence), to be implemented across the Java framework
+  packs rather than for one sample.
 - Fold each into `projects-batch8.json`, `results/scorecard-batch8.json`, and
   this log with both static and runtime gates.
 

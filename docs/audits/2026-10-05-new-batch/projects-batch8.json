@@ -103,6 +103,30 @@
         "passGate": true,
         "reviewGaps": 0
       }
+    },
+    {
+      "key": "micronaut-crud",
+      "framework": "micronaut",
+      "language": "java",
+      "repo": "nomemory/micronaut-crud-backend",
+      "commit": "14921d7bd0475f2c25c57a2b5cc796edbc9ba3e1",
+      "scanRoot": "",
+      "runtimeEnvironment": {
+        "available": false,
+        "reason": "The sample targets Micronaut 2.1.3 with the io.micronaut.application plugin 1.0.5 and shadow 6.1.0 (a Gradle 6.x / Java 11 era toolchain from 2020); the repository ships no usable gradle-wrapper.properties, the audit host has no system Gradle, and the only installed JDK is 25, which that Gradle/Micronaut generation cannot run on. Booting it would require provisioning a legacy JDK 11 and Gradle 6.x and restoring the full 2020 dependency graph, so no runtime baseline is fabricated. The static contract is fully determined by source reading plus Micronaut/Jackson/ModelMapper semantics and reaches the field-level gate with zero review gaps, the same static-only treatment as the Mongoose sample whose native server was unavailable."
+      },
+      "baseline": "Micronaut 2.1.3 (javax.*) CRUD API over H2 in-memory JPA, secured with micronaut-security-jwt but with BOTH controllers annotated @Secured(IS_ANONYMOUS), so no Authorization/401 contract is asserted despite the bearer JWT config. Five operations: POST /author takes a single unannotated CreateAuthorDTO parameter that Micronaut implicitly binds as the JSON body and returns 200 AuthorDTO via HttpResponse.ok().body(dto) (200, not 201); GET /author/{id} with Long path id returns 200 AuthorDTO from Optional.get() or a bodiless 404 (HttpResponse.notFound()); DELETE /author/{id} returns a bodiless 200 HttpResponse.ok() when present or bodiless 404, with declared HttpResponse<?> (wildcard, so no entity is fabricated); POST /book takes @Body CreateBookDTO, returns 200 BookDTO or bodiless 404 when the service throws AuthorNotFoundException for any missing author id; GET /book/{id} returns 200 BookDTO or bodiless 404. Responses are produced through ModelMapper.map(entity, XxxDTO.class), a computed serializer whose wire shape equals the TARGET DTO's declared same-named properties; the JPA entities Author/Book are never expanded and BookDTO.AuthorsInfo declares only id/firstName/lastName (no books), cutting the eager many-to-many graph cycle and preventing entity/relationship leakage (asserted with x-audit-exact-properties). Nested static DTO classes (AuthorDTO.BookInfo, BookDTO.AuthorsInfo) are independent components and their getters must not merge into the enclosing DTO. DTOs have no javax.validation annotations, so no request field is required and no validation 400 exists; the JSON body itself is required. Jackson runs at default inclusion (no @JsonInclude / global serialization-inclusion config); response key presence is ALWAYS in principle, but a Java response-serialization required direction is not yet modeled (consistent with the Spring gate), so response field required arrays are not asserted and are tracked as a generic Java enhancement.",
+      "expectedRoutes": 5,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/micronaut-crud.static.baseline.json",
+        "contracts": "results/contracts-batch8-micronaut-static.json",
+        "scan": "results/scan-batch8-micronaut.json",
+        "assertions": 174,
+        "gate": 0.96,
+        "passGate": true,
+        "reviewGaps": 0
+      }
     }
   ]
 }

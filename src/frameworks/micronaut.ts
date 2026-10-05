@@ -202,6 +202,7 @@ function scanController(
       pathParams,
       rel,
       gaps,
+      verb,
     );
 
     const returnType = declaredReturnType(method);
@@ -279,12 +280,72 @@ function returnsHttpResponse(
   return Boolean(imported && imported.includes("micronaut.http.HttpResponse"));
 }
 
+/** Verbs that carry a (JSON) request body and can bind one POJO implicitly. */
+const BODY_VERBS = new Set(["post", "put", "patch"]);
+
+/**
+ * Simple / JDK types Micronaut binds from query/form/header values even without
+ * an annotation; these must never be promoted to an implicit JSON body.
+ */
+const SIMPLE_BINDING_TYPES = new Set([
+  "String",
+  "CharSequence",
+  "Integer",
+  "Long",
+  "Short",
+  "Byte",
+  "Boolean",
+  "Double",
+  "Float",
+  "Character",
+  "Number",
+  "BigInteger",
+  "BigDecimal",
+  "UUID",
+  "Instant",
+  "LocalDate",
+  "LocalDateTime",
+  "LocalTime",
+  "OffsetDateTime",
+  "ZonedDateTime",
+  "Date",
+  "URI",
+  "URL",
+  "MultipartFile",
+  "StreamingFileUpload",
+  "CompletedFileUpload",
+]);
+
+const COLLECTION_BINDING_TYPES = /^(?:[A-Za-z0-9_$.]*\.)?(?:List|Set|Collection|Iterable|Map|HashMap|TreeMap|ArrayList|LinkedList|HashSet|TreeSet|Optional)(?:<.*>)?$/;
+
+/**
+ * Micronaut binds a single unannotated POJO parameter of a body-bearing route as
+ * the JSON request body (an implicit @Body). Only user-defined class/record
+ * models qualify; primitives, wrappers, collections, maps and uploads stay out.
+ */
+function isImplicitBodyType(typeNode: TsNode, model: JavaModelIndex, rel: string): boolean {
+  if (
+    ["integral_type", "floating_point_type", "boolean_type", "array_type", "generic_type"].includes(
+      typeNode.type,
+    )
+  ) {
+    return false;
+  }
+  const name = typeNameOf(typeNode);
+  if (!name) return false;
+  const simple = name.split(".").pop() ?? name;
+  if (SIMPLE_BINDING_TYPES.has(simple) || COLLECTION_BINDING_TYPES.test(simple)) return false;
+  const def = model.resolveDef(simple, rel, typeNode);
+  return Boolean(def && (def.kind === "class" || def.kind === "record"));
+}
+
 function collectParameters(
   method: TsNode,
   model: JavaModelIndex,
   pathParams: Set<string>,
   rel: string,
   gaps: GapCode[],
+  verb: string,
 ): {
   parameters: RouteParameter[];
   requestBody?: { required: boolean; content: DiscoveredMediaType[]; confidence: Confidence };
@@ -404,6 +465,32 @@ function collectParameters(
         gaps.push("body-schema-unknown");
       }
       continue;
+    }
+
+    // A single unannotated POJO on a body-bearing route is Micronaut's implicit
+    // JSON @Body. Unannotated simple types default to query binding and are left
+    // unresolved rather than being guessed.
+    if (
+      !pathVar &&
+      !queryValue &&
+      !header &&
+      !cookie &&
+      !body &&
+      BODY_VERBS.has(verb) &&
+      !requestBody &&
+      typeNode &&
+      isImplicitBodyType(typeNode, model, rel)
+    ) {
+      const schema = javaTypeToSchema(typeNode, model, 0, undefined, rel);
+      if (schema && Object.keys(schema).length) {
+        requestBody = {
+          required: true,
+          content: [{ mediaType: "application/json", schema }],
+          confidence: "high",
+        };
+      } else {
+        gaps.push("body-schema-unknown");
+      }
     }
   }
 
@@ -546,6 +633,26 @@ function localVarTypes(method: TsNode): Map<string, TsNode> {
   return map;
 }
 
+/**
+ * The concrete entity schema declared by `HttpResponse<T>` / `MutableHttpResponse<T>`.
+ * Returns undefined for a raw/wildcard/Object body so a bodiless or an
+ * untyped response is never given a fabricated schema.
+ */
+function declaredHttpEntity(
+  returnType: TsNode | null,
+  model: JavaModelIndex,
+  rel: string,
+): JsonSchema | undefined {
+  if (!returnType || returnType.type !== "generic_type") return undefined;
+  const typeArguments = findFirst(returnType, (n) => n.type === "type_arguments");
+  const first = typeArguments?.namedChildren[0];
+  if (!first || first.type === "wildcard") return undefined;
+  const name = typeNameOf(first);
+  if (!name || ["Object", "java.lang.Object", "Void", "void"].includes(name)) return undefined;
+  const schema = javaTypeToSchema(first, model, 0, undefined, rel);
+  return schema && isConcreteSchema(schema) ? schema : undefined;
+}
+
 function collectHttpResponses(
   method: TsNode,
   returnType: TsNode | null,
@@ -555,20 +662,26 @@ function collectHttpResponses(
   analysis: JavaAnalysis,
 ): DiscoveredResponse[] {
   // HttpResponse<T>: the generic argument T is the entity type when the handler
-  // does not pin one via .body(). Prefer explicit builder chains; fall back to T.
+  // does not pin one via .body(). Prefer explicit builder chains; fall back to T
+  // when the body expression cannot be typed expression-locally (e.g.
+  // `ok().body(opt.get())` or `ok().body(service.createBook(dto))`).
+  const fallbackEntity = declaredHttpEntity(returnType, model, rel);
   const built = collectBuiltResponses(method, model, rel, analysis);
   if (built.length) {
     const byStatus = new Map<string, DiscoveredResponse>();
     for (const b of built) {
       if (b.status === "default") gaps.push("response-unknown");
+      const bodyless = b.bodyless || b.status.startsWith("204") || b.status.startsWith("304");
+      const entity =
+        b.entity ?? (!bodyless && /^2\d\d$/.test(b.status) ? fallbackEntity : undefined);
       const existing = byStatus.get(b.status);
       const response: DiscoveredResponse = {
         statusCode: b.status,
         description: "",
         confidence: "high",
-        ...(b.entity
-          ? { content: [{ mediaType: "application/json", schema: b.entity }] }
-          : b.bodyless || b.status.startsWith("204") || b.status.startsWith("304")
+        ...(entity
+          ? { content: [{ mediaType: "application/json", schema: entity }] }
+          : bodyless
             ? {}
             : { content: [{ mediaType: "application/json", schema: {} }] }),
       };

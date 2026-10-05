@@ -409,7 +409,10 @@ function decapitalizeBean(name: string): string {
 
 function collectGetterFields(body: TsNode): JavaField[] {
   const fields: JavaField[] = [];
-  for (const method of findAll(body, (n) => n.type === "method_declaration")) {
+  // Direct members only. A recursive walk would pull getters declared on nested
+  // (e.g. static inner) DTO classes into the enclosing type and leak their
+  // properties (such as BookInfo.title onto AuthorDTO).
+  for (const method of childrenOfType(body, "method_declaration")) {
     const mods = method.namedChildren.find((c) => c.type === "modifiers");
     if (mods && mods.children.some(c => c.text === "static")) continue;
     const params = findFirst(method, (n) => n.type === "formal_parameters");
