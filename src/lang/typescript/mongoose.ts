@@ -399,7 +399,7 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
 
   // Resolve an expression that denotes a model, used for namespace object
   // property assignments (`db.user = require("./user.model")(mongoose)`).
-  const exprToModel = (expr: any, ownerRel: string, ownerFile: string): string | undefined => {
+  const exprToModel = (expr: any, ownerRel: string, ownerSource: any): string | undefined => {
     if (!expr) return undefined;
     if (ts.isIdentifier(expr)) return index.varModel.get(`${ownerRel}::${expr.text}`);
     if (isModelCall(expr)) return staticString(analysis, expr.arguments[0]);
@@ -409,15 +409,15 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
         ts.isIdentifier(callee.expression) && callee.expression.text === "require" &&
         ts.isStringLiteralLike(callee.arguments?.[0])) {
       const spec = callee.arguments[0].text;
-      const mod = resolveModuleFile(analysis, spec, ownerFile);
+      const mod = resolveModuleFile(analysis, spec, ownerSource.fileName);
       if (mod) return index.factoryReturn.get(relativeFile(analysis, mod.fileName));
       return undefined;
     }
     // Bound factory invocation: const factory = require("./x.model"); factory(mongoose)
     if (callee && ts.isIdentifier(callee)) {
-      const spec = findRequireSpecifier(ts, ownerFile, callee.text);
+      const spec = findRequireSpecifier(ts, ownerSource, callee.text);
       if (spec) {
-        const mod = resolveModuleFile(analysis, spec, ownerFile);
+        const mod = resolveModuleFile(analysis, spec, ownerSource.fileName);
         if (mod) return index.factoryReturn.get(relativeFile(analysis, mod.fileName));
       }
     }
@@ -464,7 +464,7 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
       ) {
         const objText = n.left.expression.getText(source);
         const prop = n.left.name.text;
-        const model = exprToModel(n.right, rel, source.fileName);
+        const model = exprToModel(n.right, rel, source);
         if (model) index.namespaceProp.set(`${rel}::${objText}::${prop}`, model);
       }
       ts.forEachChild(n, visit);
@@ -1368,6 +1368,188 @@ function deleteResultSchema(): JsonSchema {
   };
 }
 
+function enclosingFunction(ts: any, node: any): any {
+  let p = node;
+  while (
+    p &&
+    !ts.isArrowFunction(p) &&
+    !ts.isFunctionExpression(p) &&
+    !ts.isFunctionDeclaration(p) &&
+    !ts.isSourceFile(p)
+  ) {
+    p = p.parent;
+  }
+  return p;
+}
+
+/** Match `req.body.field` / `req.body?.field` / `req?.body?.field`. */
+function requestBodyField(ts: any, node: any): string | undefined {
+  if (!node || !ts.isPropertyAccessExpression(node)) return undefined;
+  const text = node.getText().replace(/\s/g, "");
+  const match = /^req\??\.body\??\.([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(text);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Collect request body fields whose absence triggers an early exit in the
+ * enclosing handler, e.g. `if (!req.body.title) return res.status(400)...`.
+ * Only guards whose branch returns or throws are accepted, so a mere presence
+ * check cannot over-constrain the contract.
+ */
+function guardedBodyFields(ts: any, scope: any): Set<string> {
+  const fields = new Set<string>();
+  if (!scope) return fields;
+
+  // Collect every request field whose absence the condition tests, including
+  // compound guards such as `!req.body || !req.body.name`.
+  const missingFields = (expr: any): string[] => {
+    const out: string[] = [];
+    const visit = (e: any): void => {
+      if (!e) return;
+      if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.ExclamationToken) {
+        const field = requestBodyField(ts, e.operand);
+        if (field) out.push(field);
+        return;
+      }
+      if (ts.isBinaryExpression(e)) {
+        const op = e.operatorToken?.kind;
+        if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.AmpersandAmpersandToken) {
+          visit(e.left);
+          visit(e.right);
+          return;
+        }
+        const loose = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+        if (loose) {
+          const leftField = requestBodyField(ts, e.left);
+          const field = leftField ?? requestBodyField(ts, e.right);
+          const other = leftField ? e.right : e.left;
+          const nullish =
+            other &&
+            (other.kind === ts.SyntaxKind.NullKeyword ||
+              other.kind === ts.SyntaxKind.UndefinedKeyword ||
+              (ts.isStringLiteral(other) && other.text === ""));
+          if (field && nullish) out.push(field);
+        }
+      }
+    };
+    visit(expr);
+    return out;
+  };
+
+  const branchExits = (stmt: any): boolean => {
+    let exits = false;
+    const walk = (n: any): void => {
+      if (exits) return;
+      if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) {
+        exits = true;
+        return;
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(stmt);
+    return exits;
+  };
+
+  const visit = (n: any): void => {
+    if (ts.isIfStatement(n)) {
+      const exits = branchExits(n.thenStatement) || (n.elseStatement && branchExits(n.elseStatement));
+      if (exits) for (const field of missingFields(n.expression)) fields.add(field);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return fields;
+}
+
+/**
+ * Fields a `new Model({ ... })` document is guaranteed to contain on the
+ * success path: values with a default (`a || false`, `a ?? x`), non-null
+ * literals, or guarded request fields proven present by an early-return check.
+ */
+function guaranteedInstanceFields(ts: any, obj: any, guarded: Set<string>): Set<string> {
+  const fields = new Set<string>();
+  if (!obj || !ts.isObjectLiteralExpression(obj)) return fields;
+  for (const prop of obj.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const key = propertyName(ts, prop);
+    if (key === undefined) continue;
+    const value = prop.initializer;
+    const nonNullLiteral = (v: any): boolean =>
+      !!v &&
+      (ts.isStringLiteralLike(v) ||
+        ts.isNumericLiteral(v) ||
+        v.kind === ts.SyntaxKind.TrueKeyword ||
+        v.kind === ts.SyntaxKind.FalseKeyword ||
+        ts.isObjectLiteralExpression(v) ||
+        ts.isArrayLiteralExpression(v) ||
+        ts.isNewExpression(v));
+    const hasDefault =
+      ts.isBinaryExpression(value) &&
+      (value.operatorToken?.kind === ts.SyntaxKind.BarBarToken ||
+        value.operatorToken?.kind === ts.SyntaxKind.QuestionQuestionToken);
+    // Ternary default: `req.body.published ? req.body.published : false` always
+    // yields a value when the else branch is a non-null literal/default.
+    const hasTernaryDefault =
+      ts.isConditionalExpression(value) && nonNullLiteral(value.whenFalse);
+    const guardedField = requestBodyField(ts, value);
+    if (
+      hasDefault ||
+      hasTernaryDefault ||
+      nonNullLiteral(value) ||
+      (guardedField && guarded.has(guardedField))
+    ) {
+      fields.add(key);
+    }
+  }
+  return fields;
+}
+
+/** Locate `const name = new Model(...)` in the same source file. */
+function findNewInitForIdent(ts: any, ident: any): any | undefined {
+  const name = ident.text;
+  const sourceFile = ident.getSourceFile();
+  let found: any;
+  const walk = (n: any): void => {
+    if (found) return;
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer &&
+      ts.isNewExpression(n.initializer)
+    ) {
+      found = n.initializer;
+      return;
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(sourceFile);
+  return found;
+}
+
+/** Full persisted document for a `new Model(obj)` / instance `.save()` result. */
+function projectInstanceDoc(
+  analysis: TsAnalysis,
+  model: MongooseModel,
+  objLiteral: any,
+  scope: any,
+): JsonSchema {
+  const { ts } = analysis;
+  let doc = applyToJsonTransform(applyProjection(baseDocument(model), undefined), model.transform);
+  if (objLiteral && ts.isObjectLiteralExpression(objLiteral) && doc.type === "object" && doc.properties) {
+    const guarded = guardedBodyFields(ts, scope);
+    const guaranteed = guaranteedInstanceFields(ts, objLiteral, guarded);
+    const props = doc.properties as Record<string, JsonSchema>;
+    const required = new Set<string>(Array.isArray(doc.required) ? (doc.required as string[]) : []);
+    for (const field of guaranteed) {
+      if (props[field] !== undefined) required.add(field);
+    }
+    if (required.size > 0) doc.required = [...required];
+    else delete doc.required;
+  }
+  return doc;
+}
+
 /**
  * Project a Mongoose model call to its serialized response schema. Returns
  * undefined when the receiver is not a registered model or the result cannot
@@ -1385,7 +1567,7 @@ export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema 
     const modelName = resolveModelName(analysis, index, rootIdent);
     const model = modelName ? index.byName.get(modelName) : undefined;
     if (!model) return undefined;
-    return applyToJsonTransform(applyProjection(baseDocument(model), undefined), model.transform);
+    return projectInstanceDoc(analysis, model, node.arguments?.[0], enclosingFunction(ts, node));
   }
 
   if (!ts.isCallExpression(node)) return undefined;
@@ -1453,14 +1635,30 @@ export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema 
     return { anyOf: [buildDoc(), { type: "null" }] };
   }
   // Instance `doc.save()` resolves to the saved document itself (never null).
+  // Recover the original `new Model(obj)` initializer to prove fields the
+  // success path is guaranteed to populate.
   if (method === "save") {
-    return buildDoc();
+    const newInit = findNewInitForIdent(ts, rootIdent);
+    return projectInstanceDoc(
+      analysis,
+      model,
+      newInit?.arguments?.[0],
+      enclosingFunction(ts, rootIdent) ?? rootIdent.getSourceFile(),
+    );
   }
   if (method === "create") {
     const arrayForm =
       origin.args.length > 1 ||
       (origin.args[0] && ts.isArrayLiteralExpression(origin.args[0]));
-    return arrayForm ? { type: "array", items: buildDoc() } : buildDoc();
+    const scope = enclosingFunction(ts, chain.root) ?? rootIdent.getSourceFile();
+    if (arrayForm) {
+      return { type: "array", items: buildDoc() };
+    }
+    const first = origin.args[0];
+    if (first && ts.isObjectLiteralExpression(first)) {
+      return projectInstanceDoc(analysis, model, first, scope);
+    }
+    return buildDoc();
   }
   if (method === "insertMany") {
     return { type: "array", items: buildDoc() };

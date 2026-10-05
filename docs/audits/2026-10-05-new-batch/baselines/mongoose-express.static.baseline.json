@@ -108,6 +108,8 @@
                   },
                   "required": [
                     "id",
+                    "title",
+                    "published",
                     "createdAt",
                     "updatedAt"
                   ]

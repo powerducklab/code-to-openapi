@@ -1,195 +1,195 @@
 {
-  "summary": {
-    "gate": 0.96,
-    "batch": 8,
-    "projects": 4,
-    "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness. The Express+Mongoose sample is deterministic-only: its contract is fully fixed by Mongoose schema/serialization semantics, it reaches the gate with zero review gaps (no AI completion), and the audit host has no MongoDB runtime so no runtime baseline is fabricated. The ASP.NET Core MVC controller sample (Microsoft official TodoApiDTO, fixed commit, natively run on .NET 10 rolling forward to net9) adds 252 assertions covering per-return-branch controller results, DTO projection that hides the entity Secret field, [ApiController] automatic value-type/body 400 validation, .NET 9 RFC 7807 problem bodies for bodiless error results, and value-type request optionality; it reaches the gate with zero review gaps. The Micronaut 2.1.3 sample (nomemory/micronaut-crud-backend, fixed commit) adds 174 deterministic assertions covering HttpResponse<T> generic-entity fallback for method-call bodies (Optional.get(), service calls), the implicit unannotated POJO @Body, bodiless wildcard HttpResponse<?> successes, nested static DTO getter scoping (no inner-class property leakage), and ModelMapper target-DTO responses that never expand the JPA entities or the eager many-to-many graph; it is static-only because the 2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5 toolchain cannot run on the host's only JDK (25) with no Gradle installed, and it reaches the gate with zero review gaps.",
-    "deterministic": {
-      "routeRecall": 1.0,
-      "routePrecision": 1.0,
-      "requestCompleteness": 1.0,
-      "responseCompleteness": 1.0,
-      "parameterCompleteness": 1.0,
-      "constraintAccuracy": 1.0,
-      "unresolvedRatio": 0.0,
-      "overall": 1.0,
-      "totalAssertions": 852,
-      "totalMismatches": 0,
-      "totalUnknown": 0,
-      "totalExtra": 0,
-      "allSamplesPassGate": true,
-      "fieldLevelPass96": true
-    },
-    "aiReviewedRuntime": {
-      "applicableProjects": 1,
-      "note": "Only the Starlette sample has a runtime layer (schema-less dataset needs native evidence). The Express+Mongoose sample needs no AI completion and has no booted runtime on the audit host.",
-      "routeRecall": 1.0,
-      "routePrecision": 1.0,
-      "requestCompleteness": 1.0,
-      "responseCompleteness": 1.0,
-      "parameterCompleteness": 1.0,
-      "constraintAccuracy": 1.0,
-      "unresolvedRatio": 0.0,
-      "overall": 1.0,
-      "totalAssertions": 172,
-      "totalMismatches": 0,
-      "totalUnknown": 0,
-      "totalExtra": 0,
-      "reviewGapsPresented": 4,
-      "reviewGapsAccepted": 4,
-      "aiTaggedMediaSchemas": 5,
-      "allSamplesPassGate": true
-    }
+ "summary": {
+  "gate": 0.96,
+  "batch": 8,
+  "projects": 4,
+  "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness. The Express+Mongoose sample is deterministic-only: its contract is fully fixed by Mongoose schema/serialization semantics, it reaches the gate with zero review gaps (no AI completion), and the audit host has no MongoDB runtime so no runtime baseline is fabricated. Success-path required fields on `new Model(...)`/`.save()`/`Model.create` documents are proven statically from early-return request guards (including compound `!req.body || !req.body.field` checks) and defaulting expressions (`field || default`, `field ?? default`, and `cond ? field : literal`), so guarded fields (e.g. title) and default-backed fields (e.g. published via a ternary `: false`) are marked required while unguarded, non-defaulted fields (e.g. description) stay optional; the full database entity is never expanded beyond the serialized document. The ASP.NET Core MVC controller sample (Microsoft official TodoApiDTO, fixed commit, natively run on .NET 10 rolling forward to net9) adds 252 assertions covering per-return-branch controller results, DTO projection that hides the entity Secret field, [ApiController] automatic value-type/body 400 validation, .NET 9 RFC 7807 problem bodies for bodiless error results, and value-type request optionality; it reaches the gate with zero review gaps. The Micronaut 2.1.3 sample (nomemory/micronaut-crud-backend, fixed commit) adds 174 deterministic assertions covering HttpResponse<T> generic-entity fallback for method-call bodies (Optional.get(), service calls), the implicit unannotated POJO @Body, bodiless wildcard HttpResponse<?> successes, nested static DTO getter scoping (no inner-class property leakage), and ModelMapper target-DTO responses that never expand the JPA entities or the eager many-to-many graph; it is static-only because the 2020 Gradle 6.x / shadow 6.1.0 / Micronaut plugin 1.0.5 toolchain cannot run on the host's only JDK (25) with no Gradle installed, and it reaches the gate with zero review gaps.",
+  "deterministic": {
+   "routeRecall": 1.0,
+   "routePrecision": 1.0,
+   "requestCompleteness": 1.0,
+   "responseCompleteness": 1.0,
+   "parameterCompleteness": 1.0,
+   "constraintAccuracy": 1.0,
+   "unresolvedRatio": 0.0,
+   "overall": 1.0,
+   "totalAssertions": 852,
+   "totalMismatches": 0,
+   "totalUnknown": 0,
+   "totalExtra": 0,
+   "allSamplesPassGate": true,
+   "fieldLevelPass96": true
   },
-  "projects": [
-    {
-      "key": "starlette-crud",
-      "framework": "starlette",
-      "repo": "gtfisher/starlette-example-crud",
-      "commit": "d948b7b",
-      "scanRoot": "",
-      "routesDetected": 9,
-      "routesExpected": 9,
-      "falseRoutes": 0,
-      "static": {
-        "baseline": "baselines/starlette-crud.static.baseline.json",
-        "contracts": "results/contracts-batch8-starlette-static.json",
-        "assertions": 172,
-        "mismatches": 0,
-        "unknown": 0,
-        "extra": 0,
-        "reviewGaps": 4,
-        "axes": {
-          "routeRecall": 1,
-          "routePrecision": 1,
-          "requestCompleteness": 1,
-          "responseCompleteness": 1,
-          "parameterCompleteness": 1,
-          "constraintAccuracy": 1,
-          "unresolvedRatio": 0,
-          "overall": 1
-        },
-        "passGate": true
-      },
-      "aiReviewedRuntime": {
-        "baseline": "baselines/starlette-crud.runtime.baseline.json",
-        "aiReviewedScan": "results/scan-batch8-starlette-ai-reviewed.json",
-        "contracts": "results/contracts-batch8-starlette-runtime.json",
-        "assertions": 172,
-        "mismatches": 0,
-        "unknown": 0,
-        "extra": 0,
-        "reviewGapsPresented": 4,
-        "reviewGapsAccepted": 4,
-        "aiTaggedMediaSchemas": 5,
-        "axes": {
-          "routeRecall": 1,
-          "routePrecision": 1,
-          "requestCompleteness": 1,
-          "responseCompleteness": 1,
-          "parameterCompleteness": 1,
-          "constraintAccuracy": 1,
-          "unresolvedRatio": 0,
-          "overall": 1
-        },
-        "passGate": true
-      }
+  "aiReviewedRuntime": {
+   "applicableProjects": 1,
+   "note": "Only the Starlette sample has a runtime layer (schema-less dataset needs native evidence). The Express+Mongoose sample needs no AI completion and has no booted runtime on the audit host.",
+   "routeRecall": 1.0,
+   "routePrecision": 1.0,
+   "requestCompleteness": 1.0,
+   "responseCompleteness": 1.0,
+   "parameterCompleteness": 1.0,
+   "constraintAccuracy": 1.0,
+   "unresolvedRatio": 0.0,
+   "overall": 1.0,
+   "totalAssertions": 172,
+   "totalMismatches": 0,
+   "totalUnknown": 0,
+   "totalExtra": 0,
+   "reviewGapsPresented": 4,
+   "reviewGapsAccepted": 4,
+   "aiTaggedMediaSchemas": 5,
+   "allSamplesPassGate": true
+  }
+ },
+ "projects": [
+  {
+   "key": "starlette-crud",
+   "framework": "starlette",
+   "repo": "gtfisher/starlette-example-crud",
+   "commit": "d948b7b",
+   "scanRoot": "",
+   "routesDetected": 9,
+   "routesExpected": 9,
+   "falseRoutes": 0,
+   "static": {
+    "baseline": "baselines/starlette-crud.static.baseline.json",
+    "contracts": "results/contracts-batch8-starlette-static.json",
+    "assertions": 172,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGaps": 4,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
     },
-    {
-      "key": "mongoose-express",
-      "framework": "express",
-      "orm": "mongoose",
-      "repo": "bezkoder/node-express-mongodb",
-      "commit": "30851145f343ca374dd1bd69998e63c740fea428",
-      "scanRoot": "",
-      "routesDetected": 8,
-      "routesExpected": 8,
-      "falseRoutes": 0,
-      "static": {
-        "baseline": "baselines/mongoose-express.static.baseline.json",
-        "contracts": "results/contracts-batch8-mongoose-static.json",
-        "scan": "results/scan-batch8-mongoose.json",
-        "assertions": 254,
-        "mismatches": 0,
-        "unknown": 0,
-        "extra": 0,
-        "reviewGaps": 0,
-        "axes": {
-          "routeRecall": 1,
-          "routePrecision": 1,
-          "requestCompleteness": 1,
-          "responseCompleteness": 1,
-          "parameterCompleteness": 1,
-          "constraintAccuracy": 1,
-          "unresolvedRatio": 0,
-          "overall": 1
-        },
-        "passGate": true
-      }
+    "passGate": true
+   },
+   "aiReviewedRuntime": {
+    "baseline": "baselines/starlette-crud.runtime.baseline.json",
+    "aiReviewedScan": "results/scan-batch8-starlette-ai-reviewed.json",
+    "contracts": "results/contracts-batch8-starlette-runtime.json",
+    "assertions": 172,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGapsPresented": 4,
+    "reviewGapsAccepted": 4,
+    "aiTaggedMediaSchemas": 5,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
     },
-    {
-      "key": "aspnet-todoapidto",
-      "framework": "asp.net-core-mvc-controllers",
-      "language": "csharp",
-      "repo": "dotnet/AspNetCore.Docs",
-      "commit": "3d06f3ee297f0514cfade27232c1a266362f4f97",
-      "scanRoot": "aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO",
-      "routesDetected": 6,
-      "routesExpected": 6,
-      "falseRoutes": 0,
-      "static": {
-        "baseline": "baselines/aspnet-todoapidto.static.baseline.json",
-        "contracts": "results/contracts-batch8-aspnet-static.json",
-        "scan": "results/scan-batch8-aspnet.json",
-        "assertions": 252,
-        "mismatches": 0,
-        "unknown": 0,
-        "extra": 0,
-        "reviewGaps": 0,
-        "axes": {
-          "routeRecall": 1,
-          "routePrecision": 1,
-          "requestCompleteness": 1,
-          "responseCompleteness": 1,
-          "parameterCompleteness": 1,
-          "constraintAccuracy": 1,
-          "unresolvedRatio": 0,
-          "overall": 1
-        },
-        "passGate": true
-      }
+    "passGate": true
+   }
+  },
+  {
+   "key": "mongoose-express",
+   "framework": "express",
+   "orm": "mongoose",
+   "repo": "bezkoder/node-express-mongodb",
+   "commit": "30851145f343ca374dd1bd69998e63c740fea428",
+   "scanRoot": "",
+   "routesDetected": 8,
+   "routesExpected": 8,
+   "falseRoutes": 0,
+   "static": {
+    "baseline": "baselines/mongoose-express.static.baseline.json",
+    "contracts": "results/contracts-batch8-mongoose-static.json",
+    "scan": "results/scan-batch8-mongoose.json",
+    "assertions": 254,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGaps": 0,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
     },
-    {
-      "key": "micronaut-crud",
-      "framework": "micronaut",
-      "language": "java",
-      "repo": "nomemory/micronaut-crud-backend",
-      "commit": "14921d7bd0475f2c25c57a2b5cc796edbc9ba3e1",
-      "scanRoot": "",
-      "routesDetected": 5,
-      "routesExpected": 5,
-      "falseRoutes": 0,
-      "static": {
-        "baseline": "baselines/micronaut-crud.static.baseline.json",
-        "contracts": "results/contracts-batch8-micronaut-static.json",
-        "scan": "results/scan-batch8-micronaut.json",
-        "assertions": 174,
-        "mismatches": 0,
-        "unknown": 0,
-        "extra": 0,
-        "reviewGaps": 0,
-        "axes": {
-          "routeRecall": 1,
-          "routePrecision": 1,
-          "requestCompleteness": 1,
-          "responseCompleteness": 1,
-          "parameterCompleteness": 1,
-          "constraintAccuracy": 1,
-          "unresolvedRatio": 0,
-          "overall": 1
-        },
-        "passGate": true
-      }
-    }
-  ]
+    "passGate": true
+   }
+  },
+  {
+   "key": "aspnet-todoapidto",
+   "framework": "asp.net-core-mvc-controllers",
+   "language": "csharp",
+   "repo": "dotnet/AspNetCore.Docs",
+   "commit": "3d06f3ee297f0514cfade27232c1a266362f4f97",
+   "scanRoot": "aspnetcore/tutorials/first-web-api/samples/9.0/TodoApiDTO",
+   "routesDetected": 6,
+   "routesExpected": 6,
+   "falseRoutes": 0,
+   "static": {
+    "baseline": "baselines/aspnet-todoapidto.static.baseline.json",
+    "contracts": "results/contracts-batch8-aspnet-static.json",
+    "scan": "results/scan-batch8-aspnet.json",
+    "assertions": 252,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGaps": 0,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
+    },
+    "passGate": true
+   }
+  },
+  {
+   "key": "micronaut-crud",
+   "framework": "micronaut",
+   "language": "java",
+   "repo": "nomemory/micronaut-crud-backend",
+   "commit": "14921d7bd0475f2c25c57a2b5cc796edbc9ba3e1",
+   "scanRoot": "",
+   "routesDetected": 5,
+   "routesExpected": 5,
+   "falseRoutes": 0,
+   "static": {
+    "baseline": "baselines/micronaut-crud.static.baseline.json",
+    "contracts": "results/contracts-batch8-micronaut-static.json",
+    "scan": "results/scan-batch8-micronaut.json",
+    "assertions": 174,
+    "mismatches": 0,
+    "unknown": 0,
+    "extra": 0,
+    "reviewGaps": 0,
+    "axes": {
+     "routeRecall": 1,
+     "routePrecision": 1,
+     "requestCompleteness": 1,
+     "responseCompleteness": 1,
+     "parameterCompleteness": 1,
+     "constraintAccuracy": 1,
+     "unresolvedRatio": 0,
+     "overall": 1
+    },
+    "passGate": true
+   }
+  }
+ ]
 }

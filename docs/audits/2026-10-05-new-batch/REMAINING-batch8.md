@@ -176,6 +176,16 @@ the sample.
     exactly `{id,title,description,published,createdAt,updatedAt}` and never
     leaks `_id`/`__v`. Timestamps add `createdAt`/`updatedAt` as date-time.
     Dynamic transform behavior that cannot be proven stays unknown.
+    The **response** `required` set of a `new Model(obj)` / instance `.save()` /
+    single `Model.create` document is proven on the success path: an early-return
+    request guard (`if (!req.body.field) return 4xx`, including compound
+    `!req.body || !req.body.field` checks whose branch returns/throws) proves the
+    field populated, and a defaulting constructor value (`field || default`,
+    `field ?? default`, or `cond ? field : literal` with a non-null else) proves
+    it too; unguarded, non-defaulted paths stay optional. In the bezkoder sample
+    this makes `title` (guarded) and `published` (ternary `: false`) required on
+    the 200 document while `description` stays optional, without expanding the
+    full database entity.
 12. **Request body backfill and branch-sensitive null narrowing**
     (`src/frameworks/express-handler.ts`, `src/lang/typescript/mongoose.ts`):
     write calls (`new Model(payload)`, `Model.create`, `findByIdAndUpdate` /

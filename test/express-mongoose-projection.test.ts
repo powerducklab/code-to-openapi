@@ -293,6 +293,12 @@ app.listen(8080);
     const created = doc.paths["/api/items"].post.responses["200"].content["application/json"].schema;
     expect(created.properties.id).toBeDefined();
     expect(created.properties._id).toBeUndefined();
+    // Success-path presence: name is proven by the 400 guard and active by its
+    // `|| false` default; sku has neither guard nor default and stays optional.
+    expect(created.required).toContain("name");
+    expect(created.required).toContain("active");
+    expect(created.required).toContain("id");
+    expect(created.required).not.toContain("sku");
 
     // Update forwards the whole body: every path accepted, all optional.
     const updateBody = doc.paths["/api/items/{id}"].put.requestBody.content["application/json"].schema;
@@ -300,6 +306,47 @@ app.listen(8080);
     expect(updateBody.required).toBeUndefined();
     const updated = doc.paths["/api/items/{id}"].put.responses["200"].content["application/json"].schema;
     expect(updated.properties.message.type).toBe("string");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("proves ternary-default instance fields on save while leaving unguarded fields optional", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mongoose-ternary-"));
+  try {
+    const model = `
+import mongoose from 'mongoose';
+const flagSchema = new mongoose.Schema({
+  flag: Boolean,
+  note: String,
+});
+export default mongoose.model('Flag', flagSchema);
+`;
+    const app = `
+import express from 'express';
+import Flag from './models/flag.model';
+const app = express();
+app.use(express.json());
+app.post('/flags', (req, res) => {
+  const flag = new Flag({
+    flag: req.body.flag ? req.body.flag : false,
+    note: req.body.note,
+  });
+  flag.save().then((data) => res.send(data)).catch((err) => res.status(500).send({ message: err.message }));
+});
+app.listen(3000);
+`;
+    const { doc } = await scan(root, {
+      "app.ts": app,
+      "models/flag.model.ts": model,
+    });
+    const created = doc.paths["/flags"].post.responses["200"].content["application/json"].schema;
+    // `req.body.flag ? req.body.flag : false` always yields a value; note has no
+    // guard and no default, so it is optional on the persisted document.
+    expect(created.required).toContain("flag");
+    expect(created.required).not.toContain("note");
+    expect(created.properties.flag.type).toBe("boolean");
+    expect(created.properties.note.type).toBe("string");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

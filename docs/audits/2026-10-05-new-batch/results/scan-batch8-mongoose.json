@@ -109,7 +109,9 @@
                   "required": [
                     "createdAt",
                     "updatedAt",
-                    "id"
+                    "id",
+                    "title",
+                    "published"
                   ]
                 }
               }
@@ -819,7 +821,9 @@
                     "required": [
                       "createdAt",
                       "updatedAt",
-                      "id"
+                      "id",
+                      "title",
+                      "published"
                     ]
                   }
                 }
