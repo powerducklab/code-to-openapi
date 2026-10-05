@@ -163,3 +163,144 @@ app.listen(3000);
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("resolves CommonJS model factories, namespace exports, toJSON, body backfill and null guards", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mongoose-cjs-factory-"));
+  try {
+    const model = `
+module.exports = (mongoose) => {
+  const schema = mongoose.Schema(
+    { name: String, sku: String, active: Boolean },
+    { timestamps: true }
+  );
+  schema.method("toJSON", function () {
+    const { __v, _id, ...object } = this.toObject();
+    object.id = _id;
+    return object;
+  });
+  return mongoose.model("item", schema);
+};
+`;
+    const namespace = `
+const mongoose = require("mongoose");
+const db = {};
+db.items = require("./item.model.js")(mongoose);
+module.exports = db;
+`;
+    const controller = `
+const db = require("../models");
+const Item = db.items;
+exports.create = (req, res) => {
+  if (!req.body || !req.body.name) {
+    return res.status(400).send({ message: "name is required" });
+  }
+  const item = new Item({ name: req.body.name, sku: req.body.sku, active: req.body.active || false });
+  item
+    .save()
+    .then((data) => res.send(data))
+    .catch((err) => res.status(500).send({ message: err.message }));
+};
+exports.findAll = (req, res) => {
+  const name = req.query.name;
+  const condition = name ? { name: { $regex: new RegExp(name), $options: "i" } } : {};
+  Item.find(condition)
+    .then((data) => res.send(data))
+    .catch((err) => res.status(500).send({ message: err.message }));
+};
+exports.findOne = (req, res) => {
+  Item.findById(req.params.id)
+    .then((data) => {
+      if (!data) res.status(404).send({ message: "not found" });
+      else res.send(data);
+    })
+    .catch((err) => res.status(500).send({ message: err.message }));
+};
+exports.update = (req, res) => {
+  if (!req.body) return res.status(400).send({ message: "body required" });
+  Item.findByIdAndUpdate(req.params.id, req.body)
+    .then((data) => {
+      if (!data) res.status(404).send({ message: "not found" });
+      else res.send({ message: "Item updated." });
+    })
+    .catch((err) => res.status(500).send({ message: err.message }));
+};
+`;
+    const routes = `
+module.exports = (app) => {
+  const items = require("../controllers/item.controller.js");
+  const router = require("express").Router();
+  router.post("/", items.create);
+  router.get("/", items.findAll);
+  router.get("/:id", items.findOne);
+  router.put("/:id", items.update);
+  app.use("/api/items", router);
+};
+`;
+    const server = `
+const express = require("express");
+const app = express();
+app.use(express.json());
+require("./app/routes/item.routes.js")(app);
+app.listen(8080);
+`;
+    const { doc, result } = await scan(root, {
+      "server.js": server,
+      "app/models/item.model.js": model,
+      "app/models/index.js": namespace,
+      "app/controllers/item.controller.js": controller,
+      "app/routes/item.routes.js": routes,
+    });
+
+    // All routes recalled with no unresolved gaps.
+    const paths = Object.keys(doc.paths).sort();
+    expect(paths).toEqual(
+      ["/api/items", "/api/items/{id}"].sort(),
+    );
+    for (const op of result.project.operations) {
+      expect(op.gaps ?? []).toEqual([]);
+    }
+
+    // Detail 200 is a single document (null only belongs to the 404 arm); the
+    // custom toJSON removes _id/__v and exposes id instead.
+    const detail = json200(doc, "/api/items/{id}", "get");
+    expect(detail.anyOf).toBeUndefined();
+    expect(detail.type).toBe("object");
+    expect(detail.properties.id.type).toBe("string");
+    expect(detail.properties._id).toBeUndefined();
+    expect(detail.properties.__v).toBeUndefined();
+    expect(detail.properties.name.type).toBe("string");
+    expect(detail.properties.active.type).toBe("boolean");
+    expect(detail.properties.createdAt.format).toBe("date-time");
+
+    // List returns an array of the same transformed document.
+    const list = json200(doc, "/api/items", "get");
+    expect(list.type).toBe("array");
+    expect(list.items.properties.id).toBeDefined();
+    expect(list.items.properties._id).toBeUndefined();
+    expect(list.items.properties.__v).toBeUndefined();
+
+    // Untyped regex query param defaults to string.
+    const listOp = doc.paths["/api/items"].get;
+    const nameQuery = listOp.parameters.find((p: any) => p.name === "name" && p.in === "query");
+    expect(nameQuery.schema.type).toBe("string");
+
+    // Create body: typed from the model, name proven required by the 400 guard.
+    const createBody = doc.paths["/api/items"].post.requestBody.content["application/json"].schema;
+    expect(createBody.properties.name.type).toBe("string");
+    expect(createBody.properties.sku.type).toBe("string");
+    expect(createBody.properties.active.type).toBe("boolean");
+    expect(createBody.required).toEqual(["name"]);
+    const created = doc.paths["/api/items"].post.responses["200"].content["application/json"].schema;
+    expect(created.properties.id).toBeDefined();
+    expect(created.properties._id).toBeUndefined();
+
+    // Update forwards the whole body: every path accepted, all optional.
+    const updateBody = doc.paths["/api/items/{id}"].put.requestBody.content["application/json"].schema;
+    expect(Object.keys(updateBody.properties).sort()).toEqual(["active", "name", "sku"]);
+    expect(updateBody.required).toBeUndefined();
+    const updated = doc.paths["/api/items/{id}"].put.responses["200"].content["application/json"].schema;
+    expect(updated.properties.message.type).toBe("string");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

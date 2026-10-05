@@ -91,6 +91,13 @@ interface FileModel {
   routes: RouteCall[];
   unresolved: DiscoveredUnresolved[];
   listenPorts: number[];
+  /**
+   * A default-exported router factory `module.exports = (app) => {...}` whose
+   * injected parameter is modelled as a synthetic router, so routes/mounts
+   * declared on the parameter are collected and later grafted onto the real
+   * app/router passed by the caller (`require(factory)(app)`).
+   */
+  factoryApp?: { paramName: string; id: string };
 }
 
 function normalizeExpressPath(
@@ -237,6 +244,10 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
         });
       }
     }
+
+    // Graft default-exported router factories (module.exports = app => ...) onto
+    // the concrete router passed at `require(factory)(app)` call sites.
+    linkFactoryApps(analysis, models, edges);
 
     // DFS from app roots, carrying mount prefixes and middleware.
     const roots = [...allRouters.values()].filter((r) => r.kind === "app");
@@ -501,6 +512,18 @@ function modelFile(
   });
 
   const visit = (node: any) => {
+    // Default-exported router factory: `module.exports = (app) => {...}` or
+    // `export default function (app) {...}`. The injected parameter is an
+    // externally supplied app/router; model it as a synthetic router so the
+    // .use()/.get() calls inside the body are collected and can later be
+    // grafted onto the concrete argument at the call site.
+    const factoryParam = injectedAppParam(ts, node, source);
+    if (factoryParam && !model.routers.has(factoryParam)) {
+      const id = relId(rel, "__factoryApp__");
+      model.routers.set(factoryParam, { id, file: rel, name: factoryParam, kind: "router" });
+      model.factoryApp = { paramName: factoryParam, id };
+    }
+
     // const express = require('express') (CommonJS): bind the local name to the
     // express default export so `express()` below registers the app.
     if (
@@ -736,6 +759,61 @@ function expandDataDrivenMounts(ts: any, model: FileModel): void {
     ts.forEachChild(node, visit);
   };
   visit(source);
+}
+
+/**
+ * Returns the first parameter name when `node` is a default-exported router
+ * factory (`module.exports = (app) => {...}`, `module.exports = function (app)
+ * {...}`, or `export default (app) => {...}`), otherwise null.
+ */
+const ROUTER_FACTORY_METHODS = new Set([
+  "use", "get", "post", "put", "patch", "delete", "all", "head", "options",
+]);
+
+function injectedAppParam(ts: any, node: any, source: any): string | null {
+  let fn: any = null;
+  if (
+    ts.isExpressionStatement(node) &&
+    ts.isBinaryExpression(node.expression) &&
+    node.expression.operatorToken?.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    const left = node.expression.left;
+    // Only the default CommonJS export `module.exports = fn`; a named
+    // `exports.x = (req, res) => ...` is a handler, not a router factory.
+    if (
+      ts.isPropertyAccessExpression(left) &&
+      left.expression.getText(source) === "module" &&
+      left.name.text === "exports"
+    ) {
+      fn = node.expression.right;
+    }
+  }
+  if (ts.isExportAssignment(node) && !node.isExportEquals) {
+    fn = node.expression;
+  }
+  if (!(fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)))) return null;
+  const param = fn.parameters?.[0]?.name;
+  if (!param || !ts.isIdentifier(param)) return null;
+  // Distinguish a router/app factory from an unrelated factory such as
+  // `module.exports = mongoose => mongoose.model(...)`: the injected parameter
+  // must actually receive Express router method calls in the body.
+  const paramName = param.text;
+  let usedAsRouter = false;
+  const inspect = (child: any): void => {
+    if (usedAsRouter) return;
+    if (
+      ts.isPropertyAccessExpression(child) &&
+      ts.isIdentifier(child.expression) &&
+      child.expression.text === paramName &&
+      ROUTER_FACTORY_METHODS.has(child.name.text)
+    ) {
+      usedAsRouter = true;
+      return;
+    }
+    ts.forEachChild(child, inspect);
+  };
+  inspect(fn.body ?? fn);
+  return usedAsRouter ? paramName : null;
 }
 
 function isRouterFactory(ts: any, callee: any, model: FileModel): boolean {
@@ -1098,6 +1176,77 @@ function resolveMountTarget(
   // router node by reusing the parent with the prefix (routes declared on the
   // inline router are rare and surface as unresolved).
   return null;
+}
+
+/**
+ * Grafts default-exported router factories onto the concrete app/router passed
+ * at their call site. Handles both the immediate CommonJS form
+ * `require("./routes")(app)` and the bound form `const routes = require("./routes");
+ * routes(app)` (or the ESM default-import equivalent). The factory's injected
+ * parameter was modelled as a synthetic router; this adds a prefix-less edge
+ * from the caller's real router to it, so its inner mounts become reachable.
+ */
+function linkFactoryApps(
+  analysis: TsAnalysis,
+  models: Map<string, FileModel>,
+  edges: MountEdge[],
+): void {
+  const { ts, program } = analysis;
+  const modelBySource = new Map<any, FileModel>(
+    [...models.values()].map((m) => [m.source, m]),
+  );
+
+  for (const model of models.values()) {
+    const sourceFile = model.source;
+
+    const link = (specifier: string, argNode: any): void => {
+      if (!argNode || !ts.isIdentifier(argNode)) return;
+      const parent = model.routers.get(argNode.text);
+      if (!parent) return;
+      const resolvedFileName = ts.resolveModuleName
+        ? ts.resolveModuleName(
+            specifier,
+            sourceFile.fileName,
+            program.getCompilerOptions(),
+            ts.sys,
+          )?.resolvedModule?.resolvedFileName
+        : undefined;
+      if (!resolvedFileName) return;
+      const targetSource = program.getSourceFile(resolvedFileName);
+      if (!targetSource || !analysis.isProjectFile(resolvedFileName)) return;
+      const targetModel = modelBySource.get(targetSource);
+      if (!targetModel?.factoryApp) return;
+      const exists = edges.some(
+        (edge) => edge.parent === parent.id && edge.child === targetModel.factoryApp!.id,
+      );
+      if (!exists) {
+        edges.push({ parent: parent.id, child: targetModel.factoryApp.id, prefix: "", middleware: [] });
+      }
+    };
+
+    const visit = (node: any): void => {
+      // Immediate form: require("./routes")(app)
+      if (
+        ts.isCallExpression(node) &&
+        ts.isCallExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === "require" &&
+        ts.isStringLiteral(node.expression.arguments?.[0])
+      ) {
+        link(node.expression.arguments[0].text, node.arguments?.[0]);
+      }
+      // Bound form: routes(app) where routes was required/imported locally.
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        model.moduleBindings.has(node.expression.text)
+      ) {
+        link(model.moduleBindings.get(node.expression.text)!.specifier, node.arguments?.[0]);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
 }
 
 function findAnonymousExportedRouter(analysis: TsAnalysis, model: FileModel): string | null {

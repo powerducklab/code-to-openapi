@@ -53,6 +53,30 @@
         "passGate": true,
         "aiTaggedMediaSchemas": 5
       }
+    },
+    {
+      "key": "mongoose-express",
+      "framework": "express",
+      "orm": "mongoose",
+      "repo": "bezkoder/node-express-mongodb",
+      "commit": "30851145f343ca374dd1bd69998e63c740fea428",
+      "scanRoot": "",
+      "runtimeEnvironment": {
+        "available": false,
+        "reason": "The audit host has no mongod/mongosh and no Docker, so the app cannot be natively booted. No runtime baseline is fabricated. The static contract is nevertheless fully determined by Mongoose 6 schema/serialization semantics (schema paths, timestamps and the explicit custom toJSON), which are library behavior rather than runtime data; it is proven by source reading plus the field-level gate and needs no AI gap completion (reviewGaps is zero)."
+      },
+      "baseline": "Express 4 + Mongoose 6 CommonJS app exercising P1#1 (ORM models, computed serializers and response field completeness without leaking unreturned fields) and P1#2 (query parameter typing). The model is declared through a default-exported factory `module.exports = mongoose => { const schema = mongoose.Schema({title:String,description:String,published:Boolean},{timestamps:true}); schema.method('toJSON', function(){ const {__v,_id,...object}=this.toObject(); object.id=_id; return object; }); const Tutorial=mongoose.model('tutorial',schema); return Tutorial; }`, invoked through a namespace module (`db.tutorials=require('./tutorial.model.js')(mongoose); module.exports=db`) and consumed as `const Tutorial=db.tutorials`. Eight routes: GET / returns {message}; under /api/tutorials: POST / (400 {message} when !req.body.title, else `new Tutorial({title,description,published:published||false}).save()` -> 200 serialized document, catch 500 {message}), GET / (optional `title` query used as a case-insensitive regex, atomic query-string type string; find() -> 200 array, [] when empty, 500), GET /published (find({published:true}) -> 200 array, 500), GET /:id (path id string with no cast validation; findById resolves !data to 404 {message}, else 200 serialized document (never null), invalid id -> catch 500), PUT /:id (400 when !req.body; findByIdAndUpdate(id,req.body) forwards the whole body under Mongoose strict/PATCH semantics so all schema paths are optional; !data 404; success returns the fixed {message:'Tutorial was updated successfully.'}, NOT the document; 500), DELETE /:id (findByIdAndRemove: 404 when absent, else 200 {message}, 500), DELETE / (deleteMany -> 200 {message} with deletedCount interpolated into the string, 500). The wire document is {id:string,title:string,description?:string,published:boolean,createdAt:date-time,updatedAt:date-time}: the custom toJSON strips _id/__v and adds id; static required is limited to id/createdAt/updatedAt because the Mongoose schema itself marks no path required (title is enforced only by the create handler, so it is required on the request body but not asserted as statically required on every persisted document).",
+      "expectedRoutes": 8,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/mongoose-express.static.baseline.json",
+        "contracts": "results/contracts-batch8-mongoose-static.json",
+        "scan": "results/scan-batch8-mongoose.json",
+        "assertions": 254,
+        "gate": 0.96,
+        "passGate": true,
+        "reviewGaps": 0
+      }
     }
   ]
 }

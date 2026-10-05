@@ -15,12 +15,13 @@ bought by fabrication.
 | key | framework | repo | commit | runtime | static gate | runtime (AI-reviewed) gate |
 | --- | --- | --- | --- | --- | --- | --- |
 | starlette-crud | starlette | gtfisher/starlette-example-crud | d948b7b | Python 3.13 + dataset 1.6.2 / SQLite | 172 assertions, all axes 1.0 | 172 assertions, all axes 1.0 |
+| mongoose-express | express + mongoose | bezkoder/node-express-mongodb | 30851145 | not bootable on audit host (no mongod/Docker) | 254 assertions, all axes 1.0, 0 review gaps | n/a (deterministic-only; no AI completion needed) |
 
-Later samples planned for this batch: Express + Mongoose, a Symfony JSON API
-(API Platform style, not the Twig SSR demo), ASP.NET, and Micronaut. Each gets
-the same closed loop: real third-party project at a pinned commit, native
-runtime where the environment allows it, independently hand-written static and
-runtime baselines, generic scanner fixes with regression tests.
+Later samples planned for this batch: a Symfony JSON API (API Platform style,
+not the Twig SSR demo), ASP.NET, and Micronaut. Each gets the same closed loop:
+real third-party project at a pinned commit, native runtime where the
+environment allows it, independently hand-written static and runtime baselines,
+generic scanner fixes with regression tests.
 
 ## Two-layer acceptance model
 
@@ -140,10 +141,65 @@ the sample.
    responses and open rows while still rejecting dangling references and
    fabricated structure.
 
+### Express + Mongoose (P1#1 ORM projection / computed serializer, P1#2 query typing)
+
+8. **CommonJS router factories** (`src/frameworks/express.ts`): a default
+   `module.exports = app => { ... app.use(prefix, router) }` route factory is
+   recognized and linked when it is invoked immediately
+   (`require("./routes/x.routes")(app)`) or bound and called, including routes
+   and controllers `require`d from inside the factory body. Model factories
+   (`module.exports = mongoose => mongoose.model(...)`) are not mistaken for
+   routers: the parameter is treated as a synthetic app only when the body
+   actually calls `use/get/post/...` on it.
+9. **Recursive CommonJS import resolution**
+   (`src/frameworks/express-handler.ts`): `const x = require(...)` declarations
+   are found at any nesting depth (previously only top-level variable
+   statements), so handlers required inside a factory resolve.
+10. **Mongoose model resolution** (`src/lang/typescript/mongoose.ts`): the
+    index is built in ordered passes and cached before construction so
+    resolution works while the index is still being built; paths are
+    normalized across the macOS `/private/tmp` vs `/tmp` realpath split. It
+    resolves `mongoose.Schema(...)` called without `new`, models returned from
+    a default factory (`return Model` **and** `return mongoose.model(...)`),
+    namespace modules (`db.tutorials = require("./model")(mongoose)`,
+    consumed as `db.tutorials`), `require(spec)(...)` immediate and bound
+    factory calls, and `new Model()` / `Model.create` / `save` /
+    `find*AndUpdate` inside handlers.
+11. **Computed serializer projection** (`src/lang/typescript/mongoose.ts`):
+    `new Model(doc).save()` projects the full persisted document; the custom
+    `schema.method("toJSON", ...)` / `schema.set("toJSON",{transform})` is
+    parsed structurally — rest-destructuring omissions (`const {__v,_id,
+    ...object}=this.toObject()`) remove fields and same-document key copies
+    (`object.id=_id`) add the string `id`, so the wire document exposes
+    exactly `{id,title,description,published,createdAt,updatedAt}` and never
+    leaks `_id`/`__v`. Timestamps add `createdAt`/`updatedAt` as date-time.
+    Dynamic transform behavior that cannot be proven stays unknown.
+12. **Request body backfill and branch-sensitive null narrowing**
+    (`src/frameworks/express-handler.ts`, `src/lang/typescript/mongoose.ts`):
+    write calls (`new Model(payload)`, `Model.create`, `findByIdAndUpdate` /
+    `findOneAndUpdate` / `updateOne` / ...) backfill request-body field types
+    from the writable Mongoose paths; a whole-body forward
+    (`findByIdAndUpdate(id, req.body)`) yields every path optional (PATCH /
+    strict-mode semantics), while an explicit `if (!req.body.field) return
+    4xx` guard proves the field required. A 2xx response whose root is proven
+    non-null inside the `else` of an `if (!data) 404` guard has the pure-null
+    branch stripped, so the 200 is the document and null lives only on the
+    404 arm; unrelated paths are never merged.
+13. **Query parameters default to the atomic query-string type**
+    (`src/frameworks/express-handler.ts`): an untyped, unconverted
+    `req.query.x` is `string` (a proven transport fact), not an unknown gap;
+    a `Number()` / `parseInt()` conversion that reaches the response still
+    narrows to `number`. `parseInt` alone is never assumed to reject
+    non-integers (P1#2) — only the proven conversion result is typed.
+
 Regression tests: `test/starlette-computed-contract.test.ts` (schema-less
-gateway rows, nullable reads, open inserts, no fabricated value types) and
-new `sanitizeSchema` cases in `test/ai-gap.test.ts` (nullable unions, open
-objects, allOf survival). Full suite: 180 files / 492 tests green.
+gateway rows, nullable reads, open inserts, no fabricated value types),
+`sanitizeSchema` cases in `test/ai-gap.test.ts`, and
+`test/express-mongoose-projection.test.ts` (ESM + CommonJS models, factory /
+namespace resolution, toJSON `id`/`_id`/`__v` projection, timestamps, request
+body backfill with required guards, whole-body PATCH optionality, and null
+narrowing); `test/express-scan.test.ts` now asserts the untyped query default.
+Full suite: 180 files / 493 tests green.
 
 ## Result
 
@@ -156,10 +212,24 @@ objects, allOf survival). Full suite: 180 files / 492 tests green.
   assertions, every axis 1.0**, with five merged media schemas tagged
   `x-ai-inferred` and the row kept open.
 
+### Express + Mongoose result (bezkoder/node-express-mongodb @ 30851145)
+
+- All 8 routes recalled with zero false routes and **zero review gaps**.
+- Static deterministic gate: **254 assertions, 0 mismatch / 0 unknown / 0
+  extra, every axis 1.0** (`results/contracts-batch8-mongoose-static.json`).
+  Request bodies are typed from the writable schema paths (`title` required by
+  the create guard; update body fully optional); responses carry the exact
+  toJSON wire document (`id`, timestamps, no `_id`/`__v`), list endpoints are
+  arrays, `findById` 200 is the non-null document with null on the 404 arm, and
+  update/delete return the fixed `{message}` rather than the entity. The
+  optional `title` query is typed `string`.
+- This sample is **deterministic-only**: the contract is fully fixed by
+  Mongoose 6 schema/serialization library semantics and needs no AI completion,
+  and the audit host has no `mongod`/Docker, so no runtime baseline is
+  fabricated (recorded honestly in `projects-batch8.json`).
+
 ## Remaining for batch 8
 
-- Express + Mongoose real project (evaluate mongodb-memory-server behind the
-  proxy for native evidence; static-only fixtures do not count as gate samples).
 - Symfony JSON API (API Platform or equivalent; the symfony/demo project is
   Twig server-rendered and is not a JSON gate sample).
 - ASP.NET real project at a pinned commit (.NET 10 SDK is available; confirm

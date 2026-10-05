@@ -145,10 +145,14 @@ describe("plain JavaScript project (weak typing)", () => {
     );
     expect(bodyProps).toEqual(["name", "price"]);
 
-    // Untyped query is a gap, surfaced in the report rather than fabricated.
+    // An untyped query param without a conversion defaults to the query-string
+    // atomic type (string); it is a proven contract, not an unknown gap.
+    const qParam = get.parameters.find((p: any) => p.name === "q");
+    expect(qParam?.in).toBe("query");
+    expect(qParam?.schema?.type).toBe("string");
     const routeReport = result.report.gaps.find((g) =>
       g.route.endsWith("/v1/items/{itemId}"),
     );
-    expect(routeReport?.gaps).toContain("query-unknown");
+    expect(routeReport?.gaps ?? []).not.toContain("query-unknown");
   });
 });

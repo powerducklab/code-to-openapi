@@ -1,0 +1,1364 @@
+{
+  "report": {
+    "languages": [
+      "typescript"
+    ],
+    "frameworks": [
+      "express"
+    ],
+    "filesScanned": 6,
+    "routesConfirmed": 8,
+    "routesPartial": 0,
+    "unresolved": 0,
+    "gaps": [],
+    "aiAttempted": 0,
+    "aiResolved": 0,
+    "aiResolvedRoutes": [],
+    "diagnostics": []
+  },
+  "project": {
+    "title": "node-express-mongodb",
+    "version": "1.0.0",
+    "operations": [
+      {
+        "method": "post",
+        "path": "/api/tutorials",
+        "tags": [
+          "api"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "published": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          ],
+          "confidence": "medium"
+        },
+        "responses": [
+          {
+            "statusCode": "400",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "published": {
+                      "type": "boolean"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "createdAt",
+                    "updatedAt",
+                    "id"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 7
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/api/tutorials",
+        "tags": [
+          "api"
+        ],
+        "parameters": [
+          {
+            "name": "title",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "published": {
+                        "type": "boolean"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "updatedAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "createdAt",
+                      "updatedAt",
+                      "id"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 10
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/api/tutorials/published",
+        "tags": [
+          "api"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "published": {
+                        "type": "boolean"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "updatedAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "createdAt",
+                      "updatedAt",
+                      "id"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 13
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/api/tutorials/{id}",
+        "tags": [
+          "api"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "published": {
+                      "type": "boolean"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "createdAt",
+                    "updatedAt",
+                    "id"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 16
+        },
+        "gaps": []
+      },
+      {
+        "method": "put",
+        "path": "/api/tutorials/{id}",
+        "tags": [
+          "api"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": [
+            {
+              "mediaType": "application/json",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "published": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          ],
+          "confidence": "medium"
+        },
+        "responses": [
+          {
+            "statusCode": "400",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 19
+        },
+        "gaps": []
+      },
+      {
+        "method": "delete",
+        "path": "/api/tutorials/{id}",
+        "tags": [
+          "api"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "confidence": "low"
+          }
+        ],
+        "responses": [
+          {
+            "statusCode": "404",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 22
+        },
+        "gaps": []
+      },
+      {
+        "method": "delete",
+        "path": "/api/tutorials",
+        "tags": [
+          "api"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "statusCode": "500",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "app/routes/turorial.routes.js",
+          "line": 25
+        },
+        "gaps": []
+      },
+      {
+        "method": "get",
+        "path": "/",
+        "tags": [
+          "server"
+        ],
+        "parameters": [],
+        "responses": [
+          {
+            "statusCode": "200",
+            "description": "",
+            "confidence": "high",
+            "content": [
+              {
+                "mediaType": "application/json",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "confidence": "high",
+        "origin": {
+          "file": "server.js",
+          "line": 33
+        },
+        "gaps": []
+      }
+    ],
+    "components": [],
+    "securitySchemes": [],
+    "servers": [],
+    "unresolved": []
+  },
+  "document": {
+    "openapi": "3.2.0",
+    "info": {
+      "title": "node-express-mongodb",
+      "version": "1.0.0"
+    },
+    "servers": [
+      {
+        "url": "/"
+      }
+    ],
+    "paths": {
+      "/api/tutorials": {
+        "post": {
+          "operationId": "postApiTutorials",
+          "tags": [
+            "api"
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "published": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "title"
+                  ]
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "published": {
+                        "type": "boolean"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "updatedAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "createdAt",
+                      "updatedAt",
+                      "id"
+                    ]
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "get": {
+          "operationId": "getApiTutorials",
+          "tags": [
+            "api"
+          ],
+          "parameters": [
+            {
+              "name": "title",
+              "in": "query",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "published": {
+                          "type": "boolean"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "createdAt",
+                        "updatedAt",
+                        "id"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "delete": {
+          "operationId": "deleteApiTutorials",
+          "tags": [
+            "api"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/tutorials/published": {
+        "get": {
+          "operationId": "getApiTutorialsPublished",
+          "tags": [
+            "api"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "title": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "published": {
+                          "type": "boolean"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "createdAt",
+                        "updatedAt",
+                        "id"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/tutorials/{id}": {
+        "get": {
+          "operationId": "getApiTutorialsById",
+          "tags": [
+            "api"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "published": {
+                        "type": "boolean"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "updatedAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "createdAt",
+                      "updatedAt",
+                      "id"
+                    ]
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "put": {
+          "operationId": "putApiTutorialsById",
+          "tags": [
+            "api"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "published": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "delete": {
+          "operationId": "deleteApiTutorialsById",
+          "tags": [
+            "api"
+          ],
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/": {
+        "get": {
+          "operationId": "getRoot",
+          "tags": [
+            "server"
+          ],
+          "responses": {
+            "200": {
+              "description": "",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "gapReviews": [],
+  "valid": true,
+  "ok": true,
+  "diagnostics": []
+}

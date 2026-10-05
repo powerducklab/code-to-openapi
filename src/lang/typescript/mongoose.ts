@@ -34,6 +34,18 @@ interface MongooseField {
   hiddenByDefault?: boolean;
 }
 
+/**
+ * Result of a custom `toJSON` transform: a rest-destructuring that removes
+ * listed keys (`const { __v, _id, ...object } = ...`) plus assignments that
+ * add derived keys (`object.id = _id`).
+ */
+interface ToJsonTransform {
+  /** Keys removed by the rest destructuring. */
+  omit: Set<string>;
+  /** Added key -> source key whose schema/value it copies (e.g. id <- _id). */
+  copyFrom: Map<string, string>;
+}
+
 interface MongooseModel {
   name: string;
   fields: Map<string, MongooseField>;
@@ -41,12 +53,16 @@ interface MongooseModel {
   idField: boolean;
   versionKey: string | false;
   timestamps: { createdAt: string | false; updatedAt: string | false };
+  /** Custom schema `toJSON` transform applied when documents are serialized. */
+  transform?: ToJsonTransform;
 }
 
 interface SchemaExpr {
   definition: any;
   options: any;
   file: string;
+  /** Local variable name of the schema (`const <varName> = mongoose.Schema(...)`). */
+  varName?: string;
 }
 
 interface MongooseIndex {
@@ -59,6 +75,12 @@ interface MongooseIndex {
   namedExport: Map<string, string>;
   /** `${file}::${schemaVarName}` -> parsed schema expression. */
   schemaVars: Map<string, SchemaExpr>;
+  /** file -> model name returned by a default-exported model factory function. */
+  factoryReturn: Map<string, string>;
+  /** file -> local object name exported via `module.exports = db`. */
+  defaultNamespace: Map<string, string>;
+  /** `${file}::${objectText}::${prop}` -> model name assigned to a namespace object. */
+  namespaceProp: Map<string, string>;
   /** Absolute source file name -> project-relative path. */
   fileToRel: Map<string, string>;
 }
@@ -121,7 +143,11 @@ function textOf(node: any): string {
 }
 
 function isNewSchema(ts: any, node: any): boolean {
-  if (!node || !ts.isNewExpression(node) || !node.expression) return false;
+  // Mongoose accepts both `new Schema(def, opts)` and the callable form
+  // `mongoose.Schema(def, opts)` (without `new`).
+  if (!node || !(ts.isNewExpression(node) || ts.isCallExpression(node)) || !node.expression) {
+    return false;
+  }
   const callee = textOf(node.expression);
   return (
     callee === "Schema" ||
@@ -134,18 +160,74 @@ function isNewSchema(ts: any, node: any): boolean {
 
 /** Resolve a `require('x')` / `import 'x'` specifier to a project SourceFile. */
 function resolveModuleFile(analysis: TsAnalysis, specifier: string, containingFile: string): any | undefined {
-  const { ts, program } = analysis;
+  const { ts, program, sourceByPath } = analysis;
+  const byResolvedName = (fileName: string): any | undefined =>
+    program.getSourceFile(fileName) ??
+    [...sourceByPath.values()].find((s) => s.fileName === fileName);
   const resolved = ts.resolveModuleName
     ? ts.resolveModuleName(specifier, containingFile, program.getCompilerOptions?.() ?? {}, ts.sys).resolvedModule
     : undefined;
-  const fileName = resolved?.resolvedFileName;
-  if (fileName) return program.getSourceFile(fileName);
+  if (resolved?.resolvedFileName) {
+    const hit = byResolvedName(resolved.resolvedFileName);
+    if (hit) return hit;
+  }
+  // Fallback for CommonJS require() graphs the TS program never loaded: match
+  // the specifier against scanned project files by relative path suffix.
+  if (specifier.startsWith(".") || specifier.startsWith("/")) {
+    const baseDir = containingFile.slice(0, containingFile.lastIndexOf("/"));
+    const target = normalizeRelative(`${baseDir}/${specifier}`);
+    for (const source of sourceByPath.values()) {
+      const rel = normalizeRelative(source.fileName);
+      if (rel === target || rel === `${target}.ts` || rel === `${target}.tsx` ||
+          rel === `${target}.js` || rel === `${target}.jsx` ||
+          rel.endsWith(`/${target}`) || rel.endsWith(`/${target}.js`)) {
+        return source;
+      }
+    }
+  }
   return undefined;
+}
+
+function normalizeRelative(p: string): string {
+  const parts: string[] = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
 }
 
 function staticString(analysis: TsAnalysis, node: any): string | undefined {
   const { ts } = analysis;
   return ts.isStringLiteralLike(node) ? node.text : undefined;
+}
+
+/**
+ * Returns the specifier of `const name = require("<specifier>")` declared
+ * anywhere in a file (including inside function bodies), or undefined.
+ */
+function findRequireSpecifier(ts: any, sourceFile: any, name: string): string | undefined {
+  let spec: string | undefined;
+  const walk = (node: any): void => {
+    if (spec) return;
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      node.initializer &&
+      ts.isCallExpression(node.initializer) &&
+      ts.isIdentifier(node.initializer.expression) &&
+      node.initializer.expression.text === "require" &&
+      ts.isStringLiteralLike(node.initializer.arguments?.[0])
+    ) {
+      spec = node.initializer.arguments[0].text;
+      return;
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(sourceFile);
+  return spec;
 }
 
 function literalValue(analysis: TsAnalysis, node: any): unknown {
@@ -179,8 +261,14 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
     defaultExport: new Map(),
     namedExport: new Map(),
     schemaVars: new Map(),
+    factoryReturn: new Map(),
+    defaultNamespace: new Map(),
+    namespaceProp: new Map(),
     fileToRel: new Map(),
   };
+  // Publish early so helpers that rely on `relativeFile` (via the cache) can
+  // resolve project-relative paths while the index is still being built.
+  cache.set(analysis, index);
 
   const isModelCall = (node: any): boolean =>
     ts.isCallExpression(node) &&
@@ -205,6 +293,7 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
           definition: init.arguments[0],
           options: init.arguments[1],
           file: rel,
+          varName: n.name.text,
         });
       }
       ts.forEachChild(n, visit);
@@ -248,7 +337,37 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
     }
   };
 
-  // Pass B: collect model registrations and re-exports.
+  // Returns the single model name a model factory function returns, or
+  // undefined when the returns are missing, disagree, or do not denote a model.
+  // Only return statements that belong directly to the factory body count;
+  // nested callbacks are ignored.
+  const collectFactoryReturnModel = (fileRel: string, fn: any): string | undefined => {
+    const candidates = new Set<string>();
+    const walk = (node: any, inFactory: boolean): void => {
+      if (ts.isReturnStatement(node) && inFactory && node.expression) {
+        const returned = node.expression;
+        if (ts.isIdentifier(returned)) {
+          const model = index.varModel.get(`${fileRel}::${returned.text}`);
+          if (model) candidates.add(model);
+        } else if (isModelCall(returned)) {
+          // `return mongoose.model("item", schema)` without an intermediate const.
+          const model = staticString(analysis, returned.arguments[0]);
+          if (model) candidates.add(model);
+        }
+        return;
+      }
+      const nested =
+        node !== fn &&
+        (ts.isArrowFunction(node) || ts.isFunctionExpression(node) || ts.isFunctionDeclaration(node));
+      ts.forEachChild(node, (child: any) => walk(child, inFactory && !nested));
+    };
+    walk(fn, true);
+    return candidates.size === 1 ? [...candidates][0] : undefined;
+  };
+
+  // Pass B (round 1): collect model registrations, re-exports, and the model
+  // returned by a default-exported model factory (`module.exports = mongoose =>
+  // { const T = mongoose.model(name, schema); return T; }`).
   for (const [rel, source] of sourceByPath) {
     const visit = (n: any) => {
       if (isModelCall(n)) registerModel(rel, n);
@@ -260,8 +379,7 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
         ts.isBinaryExpression(n) &&
         n.operatorToken?.kind === ts.SyntaxKind.EqualsToken &&
         isModuleExports(ts, n.left) &&
-        n.right &&
-        ts.isIdentifier(n.right)
+        n.right && ts.isIdentifier(n.right)
       ) {
         const target = index.varModel.get(`${rel}::${n.right.text}`);
         if (target) index.defaultExport.set(rel, target);
@@ -273,6 +391,81 @@ function buildIndex(analysis: TsAnalysis): MongooseIndex {
           const target = index.varModel.get(`${rel}::${local}`);
           if (target) index.namedExport.set(`${rel}::${el.name.text}`, target);
         }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(source);
+  }
+
+  // Resolve an expression that denotes a model, used for namespace object
+  // property assignments (`db.user = require("./user.model")(mongoose)`).
+  const exprToModel = (expr: any, ownerRel: string, ownerFile: string): string | undefined => {
+    if (!expr) return undefined;
+    if (ts.isIdentifier(expr)) return index.varModel.get(`${ownerRel}::${expr.text}`);
+    if (isModelCall(expr)) return staticString(analysis, expr.arguments[0]);
+    const callee = ts.isCallExpression(expr) ? expr.expression : undefined;
+    // Immediate factory invocation: require("./x.model")(mongoose)
+    if (callee && ts.isCallExpression(callee) &&
+        ts.isIdentifier(callee.expression) && callee.expression.text === "require" &&
+        ts.isStringLiteralLike(callee.arguments?.[0])) {
+      const spec = callee.arguments[0].text;
+      const mod = resolveModuleFile(analysis, spec, ownerFile);
+      if (mod) return index.factoryReturn.get(relativeFile(analysis, mod.fileName));
+      return undefined;
+    }
+    // Bound factory invocation: const factory = require("./x.model"); factory(mongoose)
+    if (callee && ts.isIdentifier(callee)) {
+      const spec = findRequireSpecifier(ts, ownerFile, callee.text);
+      if (spec) {
+        const mod = resolveModuleFile(analysis, spec, ownerFile);
+        if (mod) return index.factoryReturn.get(relativeFile(analysis, mod.fileName));
+      }
+    }
+    return undefined;
+  };
+
+  // Pass B (round 2a): factory returns (`module.exports = mongoose => { ...;
+  // return Model; }`) and namespace object exports (`module.exports = db`) now
+  // that every model variable is registered in round 1.
+  for (const [rel, source] of sourceByPath) {
+    const visit = (n: any) => {
+      const isDefaultAssign =
+        ts.isBinaryExpression(n) &&
+        n.operatorToken?.kind === ts.SyntaxKind.EqualsToken &&
+        isModuleExports(ts, n.left);
+      if (isDefaultAssign && n.right && ts.isIdentifier(n.right) && !index.defaultExport.has(rel)) {
+        index.defaultNamespace.set(rel, n.right.text);
+      }
+      const factoryFn =
+        isDefaultAssign && n.right && (ts.isArrowFunction(n.right) || ts.isFunctionExpression(n.right))
+          ? n.right
+          : ts.isExportAssignment(n) && !n.isExportEquals && n.expression &&
+              (ts.isArrowFunction(n.expression) || ts.isFunctionExpression(n.expression))
+            ? n.expression
+            : undefined;
+      if (factoryFn && !index.factoryReturn.has(rel)) {
+        const returned = collectFactoryReturnModel(rel, factoryFn);
+        if (returned) index.factoryReturn.set(rel, returned);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(source);
+  }
+
+  // Pass B (round 2b): resolve namespace property assignments (`db.user =
+  // require("./user.model")(mongoose)`) after factory returns are known.
+  for (const [rel, source] of sourceByPath) {
+    const visit = (n: any) => {
+      if (
+        ts.isBinaryExpression(n) &&
+        n.operatorToken?.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(n.left) &&
+        !isModuleExports(ts, n.left)
+      ) {
+        const objText = n.left.expression.getText(source);
+        const prop = n.left.name.text;
+        const model = exprToModel(n.right, rel, source.fileName);
+        if (model) index.namespaceProp.set(`${rel}::${objText}::${prop}`, model);
       }
       ts.forEachChild(n, visit);
     };
@@ -331,7 +524,124 @@ function buildModel(analysis: TsAnalysis, index: MongooseIndex, name: string, sc
       if (field) fields.set(key, field);
     }
   }
+
+  if (schemaExpr.varName) {
+    const source = analysis.sourceByPath.get(schemaExpr.file);
+    if (source) model.transform = parseToJsonTransform(analysis, source, schemaExpr.varName);
+  }
   return model;
+}
+
+/**
+ * Statically recover a custom schema `toJSON` transform. Handles the common
+ * rest-destructuring form:
+ *   schema.method("toJSON", function () {
+ *     const { __v, _id, ...object } = this.toObject();
+ *     object.id = _id;
+ *     return object;
+ *   });
+ * as well as `schema.set("toJSON", { transform })`. Only structural removals
+ * and same-document key copies are recovered; anything more dynamic is left
+ * unknown rather than guessed.
+ */
+function parseToJsonTransform(analysis: TsAnalysis, source: any, varName: string): ToJsonTransform | undefined {
+  const { ts } = analysis;
+  let fn: any;
+  const findFn = (n: any): void => {
+    if (fn) return;
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const pa = n.expression;
+      const onSchema = ts.isIdentifier(pa.expression) && pa.expression.text === varName;
+      const isFn = (x: any): boolean => ts.isFunctionExpression(x) || ts.isArrowFunction(x);
+      if (
+        onSchema &&
+        pa.name.text === "method" &&
+        ts.isStringLiteralLike(n.arguments?.[0]) &&
+        n.arguments[0].text === "toJSON" &&
+        isFn(n.arguments?.[1])
+      ) {
+        fn = n.arguments[1];
+      }
+      if (
+        onSchema &&
+        pa.name.text === "set" &&
+        ts.isStringLiteralLike(n.arguments?.[0]) &&
+        n.arguments[0].text === "toJSON" &&
+        n.arguments?.[1] &&
+        ts.isObjectLiteralExpression(n.arguments[1])
+      ) {
+        const trProp = n.arguments[1].properties.find(
+          (p: any) =>
+            ts.isPropertyAssignment(p) &&
+            ts.isIdentifier(p.name) &&
+            p.name.text === "transform" &&
+            isFn(p.initializer),
+        );
+        if (trProp) fn = trProp.initializer;
+      }
+    }
+    ts.forEachChild(n, findFn);
+  };
+  findFn(source);
+  if (!fn || !fn.body) return undefined;
+
+  const omit = new Set<string>();
+  let restName: string | undefined;
+  const findDestructure = (n: any): void => {
+    if (ts.isVariableDeclaration(n) && n.name && ts.isObjectBindingPattern(n.name)) {
+      for (const el of n.name.elements) {
+        if (!ts.isBindingElement(el) || !ts.isIdentifier(el.name)) continue;
+        if (el.dotDotDotToken) restName = el.name.text;
+        else omit.add(el.name.text);
+      }
+    }
+    ts.forEachChild(n, findDestructure);
+  };
+  findDestructure(fn.body);
+  if (!restName) return undefined;
+
+  const copyFrom = new Map<string, string>();
+  const findAssign = (n: any): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(n.left) &&
+      ts.isIdentifier(n.left.expression) &&
+      n.left.expression.text === restName &&
+      ts.isIdentifier(n.left.name) &&
+      ts.isIdentifier(n.right)
+    ) {
+      copyFrom.set(n.left.name.text, n.right.text);
+    }
+    ts.forEachChild(n, findAssign);
+  };
+  findAssign(fn.body);
+
+  if (omit.size === 0 && copyFrom.size === 0) return undefined;
+  return { omit, copyFrom };
+}
+
+/** Apply a recovered `toJSON` transform to a serialized document schema. */
+function applyToJsonTransform(doc: JsonSchema, transform?: ToJsonTransform): JsonSchema {
+  if (!transform || doc.type !== "object" || !doc.properties) return doc;
+  const out: JsonSchema = JSON.parse(JSON.stringify(doc));
+  const props = out.properties as Record<string, JsonSchema>;
+  const required = new Set<string>(Array.isArray(out.required) ? (out.required as string[]) : []);
+  // Copy before omitting: a copied key may source from a key that is removed
+  // afterwards (e.g. `id` copies from `_id`, then `_id` is stripped).
+  for (const [added, src] of transform.copyFrom) {
+    if (props[src] !== undefined) {
+      props[added] = JSON.parse(JSON.stringify(props[src]));
+      if (required.has(src)) required.add(added);
+    }
+  }
+  for (const key of transform.omit) {
+    delete props[key];
+    required.delete(key);
+  }
+  if (required.size > 0) out.required = [...required];
+  else delete out.required;
+  return out;
 }
 
 function objectRecord(analysis: TsAnalysis, obj: any): Record<string, any> {
@@ -611,10 +921,20 @@ function modelFromModule(
   if (seen.has(guard)) return undefined;
   seen.add(guard);
   if (kind === "default") return index.defaultExport.get(modRel);
-  return (
-    index.namedExport.get(`${modRel}::${importedName}`) ??
-    index.varModel.get(`${modRel}::${importedName}`)
-  );
+  const prop = importedName as string;
+  const direct =
+    index.namedExport.get(`${modRel}::${prop}`) ??
+    index.varModel.get(`${modRel}::${prop}`);
+  if (direct) return direct;
+  // Namespace object export (`module.exports = db; db.user = ...`).
+  const nsObj = index.defaultNamespace.get(modRel);
+  const candidates = [nsObj, "exports", "module.exports"];
+  for (const obj of candidates) {
+    if (!obj) continue;
+    const viaProp = index.namespaceProp.get(`${modRel}::${obj}::${prop}`);
+    if (viaProp) return viaProp;
+  }
+  return undefined;
 }
 
 /** Type-independent resolution of an imported/required/aliased model binding. */
@@ -626,6 +946,49 @@ function resolveBindingSyntactically(
   seen: Set<string>,
 ): string | undefined {
   const { ts } = analysis;
+  const modelFromInit = (init: any): string | undefined => {
+    if (
+      ts.isCallExpression(init) &&
+      textOf(init.expression) === "require" &&
+      ts.isStringLiteralLike(init.arguments[0])
+    ) {
+      return modelFromModule(analysis, index, init.arguments[0].text, source.fileName, "default", undefined, seen);
+    }
+    if (ts.isIdentifier(init)) {
+      const rel = relativeFile(analysis, source.fileName);
+      return (
+        index.varModel.get(`${rel}::${init.text}`) ??
+        resolveBindingSyntactically(analysis, index, source, init.text, seen)
+      );
+    }
+    // const Tutorial = db.tutorials  (db is a required module namespace)
+    if (ts.isPropertyAccessExpression(init) && ts.isIdentifier(init.name)) {
+      const prop = init.name.text;
+      let specifier: string | undefined;
+      if (ts.isIdentifier(init.expression)) {
+        specifier = findRequireSpecifier(ts, source, init.expression.text);
+      } else if (
+        ts.isCallExpression(init.expression) &&
+        textOf(init.expression.expression) === "require" &&
+        ts.isStringLiteralLike(init.expression.arguments?.[0])
+      ) {
+        specifier = init.expression.arguments[0].text;
+      }
+      if (specifier) {
+        return modelFromModule(analysis, index, specifier, source.fileName, "named", prop, seen);
+      }
+    }
+    // const doc = new Tutorial(...): the instance belongs to the Tutorial model.
+    if (ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
+      const rel = relativeFile(analysis, source.fileName);
+      return (
+        index.varModel.get(`${rel}::${init.expression.text}`) ??
+        resolveBindingSyntactically(analysis, index, source, init.expression.text, seen)
+      );
+    }
+    return undefined;
+  };
+
   for (const st of source.statements) {
     if (
       ts.isImportDeclaration(st) &&
@@ -651,24 +1014,33 @@ function resolveBindingSyntactically(
     if (ts.isVariableStatement(st)) {
       for (const decl of st.declarationList.declarations) {
         if (!ts.isIdentifier(decl.name) || decl.name.text !== localName || !decl.initializer) continue;
-        const init = decl.initializer;
-        if (
-          ts.isCallExpression(init) &&
-          textOf(init.expression) === "require" &&
-          ts.isStringLiteralLike(init.arguments[0])
-        ) {
-          const m = modelFromModule(analysis, index, init.arguments[0].text, source.fileName, "default", undefined, seen);
-          if (m) return m;
-        }
-        if (ts.isIdentifier(init)) {
-          const rel = relativeFile(analysis, source.fileName);
-          const direct = index.varModel.get(`${rel}::${init.text}`);
-          if (direct) return direct;
-          const rec = resolveBindingSyntactically(analysis, index, source, init.text, seen);
-          if (rec) return rec;
-        }
+        const m = modelFromInit(decl.initializer);
+        if (m) return m;
       }
     }
+  }
+
+  // Fallback: the binding may be declared inside a function body, for example
+  // `const doc = new Model()` inside an exported handler. Resolve the nearest
+  // nested declaration with the same name.
+  let nested: any;
+  const findNested = (n: any): void => {
+    if (nested) return;
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === localName &&
+      n.initializer
+    ) {
+      nested = n;
+      return;
+    }
+    ts.forEachChild(n, findNested);
+  };
+  findNested(source);
+  if (nested) {
+    const m = modelFromInit(nested.initializer);
+    if (m) return m;
   }
   return undefined;
 }
@@ -737,8 +1109,22 @@ function resolveModelName(analysis: TsAnalysis, index: MongooseIndex, ident: any
   return undefined;
 }
 
+function normalizeRealPath(p: string): string {
+  // macOS resolves /tmp through /private/tmp; canonicalize that symlink prefix
+  // so program-supplied and scanner-supplied file names compare equal.
+  return p.replace(/^\/private(?=\/(?:tmp|var|Users)\/)/, "");
+}
+
 function relativeFile(analysis: TsAnalysis, fileName: string): string {
-  return cache.get(analysis)?.fileToRel.get(fileName) ?? fileName;
+  const index = cache.get(analysis);
+  if (!index) return fileName;
+  const direct = index.fileToRel.get(fileName);
+  if (direct) return direct;
+  const target = normalizeRealPath(fileName);
+  for (const [absolute, rel] of index.fileToRel) {
+    if (normalizeRealPath(absolute) === target) return rel;
+  }
+  return fileName;
 }
 
 function findAncestor(node: any, pred: (n: any) => boolean): any | undefined {
@@ -989,10 +1375,22 @@ function deleteResultSchema(): JsonSchema {
  */
 export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema | undefined {
   const { ts } = analysis;
+  const index = buildIndex(analysis);
+
+  // `new Model(doc)` builds a full persisted document (schema paths plus _id,
+  // defaults and timestamps once saved); no query projection applies.
+  if (ts.isNewExpression(node)) {
+    const rootIdent = unwrapRoot(ts, node.expression);
+    if (!rootIdent) return undefined;
+    const modelName = resolveModelName(analysis, index, rootIdent);
+    const model = modelName ? index.byName.get(modelName) : undefined;
+    if (!model) return undefined;
+    return applyToJsonTransform(applyProjection(baseDocument(model), undefined), model.transform);
+  }
+
   if (!ts.isCallExpression(node)) return undefined;
   const chain = collectChain(ts, node);
   if (!chain) return undefined;
-  const index = buildIndex(analysis);
   const rootIdent = unwrapRoot(ts, chain.root);
   if (!rootIdent) return undefined;
   const modelName = resolveModelName(analysis, index, rootIdent);
@@ -1044,6 +1442,7 @@ export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema 
     }
     let doc = applyProjection(baseDocument(model), docProj);
     doc = applyPopulates(analysis, index, model, doc, populates, 0);
+    doc = applyToJsonTransform(doc, model.transform);
     return doc;
   };
 
@@ -1052,6 +1451,10 @@ export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema 
   }
   if (SINGLE_DOC_OR_NULL_METHODS.has(method)) {
     return { anyOf: [buildDoc(), { type: "null" }] };
+  }
+  // Instance `doc.save()` resolves to the saved document itself (never null).
+  if (method === "save") {
+    return buildDoc();
   }
   if (method === "create") {
     const arrayForm =
@@ -1096,4 +1499,153 @@ function unwrapRoot(ts: any, node: any): any {
   // `await mongoose.connection.model(...)` style direct use is handled by the
   // model-call variable form; bare connection roots are not supported.
   return undefined;
+}
+
+export interface MongooseRequestBodyInference {
+  /** Writable schema path name -> JSON schema (model paths, excluding _id/version/timestamps). */
+  fieldTypes: Map<string, JsonSchema>;
+  /** Model paths declared `required: true`, relevant for create payloads. */
+  modelRequired: Set<string>;
+  /**
+   * True when a handler forwards the whole `req.body` to an update call
+   * (e.g. `findByIdAndUpdate(id, req.body)`): every model path is accepted and
+   * all are optional (PATCH semantics).
+   */
+  wholeBodyUpdate: boolean;
+}
+
+const UPDATE_PAYLOAD_METHODS = new Set([
+  "findByIdAndUpdate",
+  "findOneAndUpdate",
+  "updateOne",
+  "updateMany",
+  "replaceOne",
+]);
+
+/** True when an expression reads the request body (`req.body` or a value derived from it). */
+function referencesRequestBody(ts: any, node: any): boolean {
+  if (!node) return false;
+  let hit = false;
+  const walk = (n: any): void => {
+    if (hit) return;
+    if (
+      ts.isPropertyAccessExpression(n) &&
+      n.name.text === "body" &&
+      ts.isIdentifier(n.expression) &&
+      n.expression.text === "req"
+    ) {
+      hit = true;
+      return;
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(node);
+  return hit;
+}
+
+/**
+ * Recover the writable request-body shape a handler feeds to Mongoose write
+ * calls (`new Model({ ...req.body })`, `Model.create(...)`,
+ * `findByIdAndUpdate(id, req.body)`). Types come from the model schema so the
+ * contract does not depend on untyped JS `req.body` access. Only proven model
+ * paths are returned; dynamic/unknown keys stay unreported.
+ */
+export function inferMongooseRequestBody(
+  analysis: TsAnalysis,
+  handlerNode: any,
+): MongooseRequestBodyInference | undefined {
+  const { ts } = analysis;
+  if (!handlerNode) return undefined;
+  const index = buildIndex(analysis);
+  const fieldTypes = new Map<string, JsonSchema>();
+  const modelRequired = new Set<string>();
+  let wholeBodyUpdate = false;
+  let sawWrite = false;
+
+  const addModelPaths = (model: MongooseModel | undefined, only?: Set<string>): void => {
+    if (!model) return;
+    for (const [name, field] of model.fields) {
+      if (only && !only.has(name)) continue;
+      if (!fieldTypes.has(name)) fieldTypes.set(name, field.schema);
+      if (field.required) modelRequired.add(name);
+    }
+  };
+
+  const modelOfReceiver = (receiver: any): MongooseModel | undefined => {
+    const rootIdent = unwrapRoot(ts, receiver);
+    if (!rootIdent) return undefined;
+    const name = resolveModelName(analysis, index, rootIdent);
+    return name ? index.byName.get(name) : undefined;
+  };
+
+  const collectObjectLiteral = (model: MongooseModel | undefined, obj: any): void => {
+    if (!model || !ts.isObjectLiteralExpression(obj)) return;
+    const named = new Set<string>();
+    let spreadWhole = false;
+    for (const prop of obj.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        if (referencesRequestBody(ts, prop.expression)) spreadWhole = true;
+        continue;
+      }
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const key = propertyName(ts, prop);
+      if (key === undefined) continue;
+      if (referencesRequestBody(ts, prop.initializer)) named.add(key);
+    }
+    if (spreadWhole) addModelPaths(model);
+    else if (named.size) addModelPaths(model, named);
+  };
+
+  const visit = (n: any): void => {
+    // `new Model(payload)`
+    if (ts.isNewExpression(n)) {
+      const rootIdent = unwrapRoot(ts, n.expression);
+      const modelName = rootIdent ? resolveModelName(analysis, index, rootIdent) : undefined;
+      const model = modelName ? index.byName.get(modelName) : undefined;
+      if (model) {
+        sawWrite = true;
+        const payload = n.arguments?.[0];
+        if (payload) {
+          if (ts.isObjectLiteralExpression(payload)) collectObjectLiteral(model, payload);
+          else if (referencesRequestBody(ts, payload)) addModelPaths(model);
+        }
+      }
+    }
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const method = n.expression.name.text;
+      const model = modelOfReceiver(n.expression.expression);
+      if (model) {
+        if (method === "create") {
+          sawWrite = true;
+          for (const arg of n.arguments) {
+            if (ts.isObjectLiteralExpression(arg)) collectObjectLiteral(model, arg);
+            else if (referencesRequestBody(ts, arg)) addModelPaths(model);
+            else if (ts.isArrayLiteralExpression(arg)) {
+              for (const el of arg.elements) {
+                if (ts.isObjectLiteralExpression(el)) collectObjectLiteral(model, el);
+              }
+            }
+          }
+        } else if (UPDATE_PAYLOAD_METHODS.has(method)) {
+          sawWrite = true;
+          // All supported updaters take the update document as the second
+          // argument (the first is the id or filter).
+          const payload = n.arguments[1];
+          if (payload) {
+            if (ts.isObjectLiteralExpression(payload)) collectObjectLiteral(model, payload);
+            else if (referencesRequestBody(ts, payload)) {
+              // Whole-body forwarding (typically an update/PATCH path).
+              wholeBodyUpdate = true;
+              addModelPaths(model);
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(handlerNode);
+
+  if (!sawWrite || fieldTypes.size === 0) return undefined;
+  return { fieldTypes, modelRequired, wholeBodyUpdate };
 }

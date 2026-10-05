@@ -219,6 +219,12 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
   if(ts.isIdentifier(node)){
    const symbol=ts.isShorthandPropertyAssignment(node.parent)?checker.getShorthandAssignmentValueSymbol(node.parent):checker.getSymbolAtLocation(node);
    const decl=symbol?.valueDeclaration;
+   // Callback parameter: resolve the value a host `.then`/`.map`/`.catch`
+   // supplies to it, e.g. `Model.findById(id).then(data => res.send(data))`.
+   if(decl&&ts.isParameter(decl)){
+    const fromCallback=resolveCallbackParameter(decl,depth);
+    if(fromCallback){onEvidence?.();return fromCallback;}
+   }
    if(decl&&ts.isVariableDeclaration(decl)&&decl.initializer){
     if(isMutable(decl)){onEvidence?.();return {description:'Mutable or escaping value requires serialization review'};}
     if(decl.parent.flags&ts.NodeFlags.Const)return infer(decl.initializer,next,depth+1)??fallback(node);
@@ -294,6 +300,38 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
    return {type:'object',properties,...(required.length?{required:[...new Set(required)]}:{}),...(unknownSpread?{additionalProperties:{}}:{})};
   }
   return fallback(node);
+ };
+ // Resolve the value a host call (`.then`/`.map`/`.catch`/...) supplies to the
+ // given callback parameter by inferring the host's receiver. Walks outward
+ // through nested callbacks (e.g. a `.map` inside a `.then`).
+ const resolveCallbackParameter=(param:any,depth:number):JsonSchema|undefined=>{
+  let host:any=param.parent;
+  for(let guard=0;guard<6&&host;guard++){
+   const call=host.parent;
+   if(call&&ts.isCallExpression(call)&&call.arguments.includes(host)&&
+      ts.isPropertyAccessExpression(call.expression)){
+    const mname=call.expression.name.text;
+    const idx=host.parameters?host.parameters.indexOf(param):-1;
+    const receiver=call.expression.expression;
+    if(mname==='then'&&idx===0){
+     const s=infer(receiver,new Set(),depth+1);
+     return s?resolve(s):undefined;
+    }
+    if(mname==='catch'&&idx===0){
+     return {type:'object',properties:{message:{type:'string'},name:{type:'string'}},required:['message']};
+    }
+    if(['map','forEach','filter','some','every','find','findIndex','reduce'].includes(mname)&&idx===0){
+     const s=infer(receiver,new Set(),depth+1);
+     const sh=s?resolve(s):undefined;
+     if(sh?.type==='array')return sh.items as JsonSchema;
+    }
+   }
+   // Climb to an enclosing callback function.
+   const outer=host.parent&&host.parent.parent;
+   if(outer&&(ts.isArrowFunction(outer)||ts.isFunctionExpression(outer))){host=outer;continue;}
+   break;
+  }
+  return undefined;
  };
  const returns=(fn:any,seen:Set<any>,depth:number):JsonSchema|undefined=>{
   if(!fn.body||depth>16||seen.has(fn))return undefined;

@@ -2,8 +2,8 @@
   "summary": {
     "gate": 0.96,
     "batch": 8,
-    "projects": 1,
-    "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness.",
+    "projects": 2,
+    "note": "Two-layer field-level acceptance. The deterministic static layer scores the maximum contract provable without running or fabricating types; schema-less row value types are explicit empty schemas. The runtime layer is reached only through an accepted interactive AI review (x-ai-inferred) using native HTTP evidence and is reported separately, never as deterministic correctness. The Express+Mongoose sample is deterministic-only: its contract is fully fixed by Mongoose schema/serialization semantics, it reaches the gate with zero review gaps (no AI completion), and the audit host has no MongoDB runtime so no runtime baseline is fabricated.",
     "deterministic": {
       "routeRecall": 1.0,
       "routePrecision": 1.0,
@@ -13,7 +13,7 @@
       "constraintAccuracy": 1.0,
       "unresolvedRatio": 0.0,
       "overall": 1.0,
-      "totalAssertions": 172,
+      "totalAssertions": 426,
       "totalMismatches": 0,
       "totalUnknown": 0,
       "totalExtra": 0,
@@ -21,6 +21,8 @@
       "fieldLevelPass96": true
     },
     "aiReviewedRuntime": {
+      "applicableProjects": 1,
+      "note": "Only the Starlette sample has a runtime layer (schema-less dataset needs native evidence). The Express+Mongoose sample needs no AI completion and has no booted runtime on the audit host.",
       "routeRecall": 1.0,
       "routePrecision": 1.0,
       "requestCompleteness": 1.0,
@@ -80,6 +82,38 @@
         "reviewGapsPresented": 4,
         "reviewGapsAccepted": 4,
         "aiTaggedMediaSchemas": 5,
+        "axes": {
+          "routeRecall": 1,
+          "routePrecision": 1,
+          "requestCompleteness": 1,
+          "responseCompleteness": 1,
+          "parameterCompleteness": 1,
+          "constraintAccuracy": 1,
+          "unresolvedRatio": 0,
+          "overall": 1
+        },
+        "passGate": true
+      }
+    },
+    {
+      "key": "mongoose-express",
+      "framework": "express",
+      "orm": "mongoose",
+      "repo": "bezkoder/node-express-mongodb",
+      "commit": "30851145f343ca374dd1bd69998e63c740fea428",
+      "scanRoot": "",
+      "routesDetected": 8,
+      "routesExpected": 8,
+      "falseRoutes": 0,
+      "static": {
+        "baseline": "baselines/mongoose-express.static.baseline.json",
+        "contracts": "results/contracts-batch8-mongoose-static.json",
+        "scan": "results/scan-batch8-mongoose.json",
+        "assertions": 254,
+        "mismatches": 0,
+        "unknown": 0,
+        "extra": 0,
+        "reviewGaps": 0,
         "axes": {
           "routeRecall": 1,
           "routePrecision": 1,

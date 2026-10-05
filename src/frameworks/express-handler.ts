@@ -12,6 +12,7 @@ import type {
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { localReturnSchema, localObjectFields, localImplementation } from "../lang/typescript/localFlow.js";
+import { inferMongooseRequestBody } from "../lang/typescript/mongoose.js";
 import { resolveStaticValue } from "../lang/typescript/staticValue.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { convertZodNode } from "../lang/typescript/zod.js";
@@ -377,6 +378,78 @@ function rootIdentifier(ts: any, node: any): string | undefined {
     }
   }
   return ts.isIdentifier(cur) ? cur.text : undefined;
+}
+
+/**
+ * If an `if` condition proves the tested value is null/undefined/falsy in the
+ * THEN branch (`!x`, `x == null`, `x === undefined`), return the root name.
+ * The ELSE branch then proves the value is present.
+ */
+function nullGuardName(ts: any, cond: any): string | undefined {
+  if (
+    ts.isPrefixUnaryExpression(cond) &&
+    cond.operator === ts.SyntaxKind.ExclamationToken &&
+    !ts.isPrefixUnaryExpression(cond.operand) // `!x`, not `!!x`
+  ) {
+    return rootIdentifier(ts, cond.operand);
+  }
+  if (ts.isBinaryExpression(cond)) {
+    const op = cond.operatorToken.kind;
+    if (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsEqualsToken) {
+      const nullish = (n: any): boolean =>
+        n.kind === ts.SyntaxKind.NullKeyword ||
+        n.kind === ts.SyntaxKind.UndefinedKeyword ||
+        (ts.isIdentifier(n) && n.text === "undefined");
+      if (nullish(cond.right)) return rootIdentifier(ts, cond.left);
+      if (nullish(cond.left)) return rootIdentifier(ts, cond.right);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * If an `if` condition proves the tested value is present in the THEN branch
+ * (`x`, `x != null`, `x !== undefined`), return the root name.
+ */
+function nonNullGuardName(ts: any, cond: any): string | undefined {
+  if (ts.isIdentifier(cond) || ts.isPropertyAccessExpression(cond)) {
+    return rootIdentifier(ts, cond);
+  }
+  if (ts.isBinaryExpression(cond)) {
+    const op = cond.operatorToken.kind;
+    if (
+      op === ts.SyntaxKind.ExclamationEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsEqualsToken
+    ) {
+      const nullish = (n: any): boolean =>
+        n.kind === ts.SyntaxKind.NullKeyword ||
+        n.kind === ts.SyntaxKind.UndefinedKeyword ||
+        (ts.isIdentifier(n) && n.text === "undefined");
+      if (nullish(cond.right)) return rootIdentifier(ts, cond.left);
+      if (nullish(cond.left)) return rootIdentifier(ts, cond.right);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Remove a pure `null`/`undefined` union branch from a schema proven non-null
+ * on the current response path. Non-null data branches are preserved exactly.
+ */
+function stripNullishBranch(schema: JsonSchema | undefined): JsonSchema | undefined {
+  if (!schema) return schema;
+  const branches = (schema.anyOf ?? schema.oneOf) as JsonSchema[] | undefined;
+  if (!Array.isArray(branches)) return schema;
+  const kept = branches.filter((b) => {
+    const isNullish =
+      b.type === "null" ||
+      b.type === "undefined" ||
+      (Object.keys(b).length === 1 && (b.type === "null" || b.type === "undefined"));
+    return !isNullish;
+  });
+  if (kept.length === branches.length) return schema;
+  if (kept.length === 1) return kept[0];
+  return schema.anyOf ? { anyOf: kept } : { oneOf: kept };
 }
 
 /** A response site whose observed schema carries no usable shape. */
@@ -840,13 +913,17 @@ export function resolveImportedFile(
   if (!specifier) {
     // const x = require('./m') — only accept the require that initializes a
     // variable whose name matches localName (not the first require in file).
-    sourceFile.forEachChild((child: any) => {
+    // Recurse because the require binding may live inside a function body,
+    // e.g. a default-exported router factory `module.exports = app => { const
+    // controllers = require("./controllers"); ... }`.
+    const walk = (node: any): void => {
       if (specifier) return;
-      if (!ts.isVariableStatement(child)) return;
-      for (const decl of child.declarationList.declarations) {
-        if (specifier) return;
-        if (!ts.isIdentifier(decl.name) || decl.name.text !== localName) continue;
-        const init = decl.initializer;
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === localName
+      ) {
+        const init = node.initializer;
         if (
           init &&
           ts.isCallExpression(init) &&
@@ -856,9 +933,12 @@ export function resolveImportedFile(
         ) {
           specifier = init.arguments[0].text;
           exportName = "module";
+          return;
         }
       }
-    });
+      ts.forEachChild(node, walk);
+    };
+    walk(sourceFile);
   }
 
   if (!specifier) return null;
@@ -897,10 +977,16 @@ export function resolveImportedFile(
 function mergeFields(fields: CollectedField[]): JsonSchema | undefined {
   if (!fields.length) return undefined;
   const properties: Record<string, JsonSchema> = {};
+  const required: string[] = [];
   for (const field of fields) {
     properties[field.name] = field.schema ?? {};
+    if (field.required) required.push(field.name);
   }
-  return { type: "object", properties };
+  return {
+    type: "object",
+    properties,
+    ...(required.length ? { required: [...new Set(required)] } : {}),
+  };
 }
 
 /**
@@ -1376,8 +1462,46 @@ export function analyzeHandler(
     return value.split(";")[0]!.trim();
   };
 
+  // Root names proven non-null on the currently visited response path by an
+  // enclosing `if (!x) ... else ...` / `if (x) ...` guard. Restored on exit so
+  // the narrowing only applies inside the proving branch subtree.
+  const nonNullNames = new Set<string>();
+  const scopedNonNull = (names: string[], fn: () => void): void => {
+    if (names.length === 0) {
+      fn();
+      return;
+    }
+    const snapshot = new Set(nonNullNames);
+    names.forEach((n) => nonNullNames.add(n));
+    try {
+      fn();
+    } finally {
+      nonNullNames.clear();
+      snapshot.forEach((n) => nonNullNames.add(n));
+    }
+  };
+
   const visit = (node: any) => {
     if (context.reachableNodes && !context.reachableNodes.has(node)) return;
+    // Branch-sensitive null narrowing: visit each arm of an `if` with the
+    // appropriate non-null set so a success response in the proving arm drops
+    // the `null` union branch that only belongs to the error/404 arm.
+    if (ts.isIfStatement(node)) {
+      visit(node.expression);
+      const negated = nullGuardName(ts, node.expression);
+      const positive = negated ? undefined : nonNullGuardName(ts, node.expression);
+      if (negated) {
+        scopedNonNull([], () => visit(node.thenStatement));
+        if (node.elseStatement) scopedNonNull([negated], () => visit(node.elseStatement));
+      } else if (positive) {
+        scopedNonNull([positive], () => visit(node.thenStatement));
+        if (node.elseStatement) scopedNonNull([], () => visit(node.elseStatement));
+      } else {
+        visit(node.thenStatement);
+        if (node.elseStatement) visit(node.elseStatement);
+      }
+      return;
+    }
     // Property access on req / res.
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const root = rootIdentifier(ts, node);
@@ -1779,7 +1903,16 @@ export function analyzeHandler(
             : step.name === "send" && isString
               ? "text/html"
               : "application/json";
-          recordResponse(status, mediaType, schema, typed ? "high" : "medium");
+          // A success (2xx) response for a value proven present by an enclosing
+          // `if (!x) 404 else res.send(x)` guard cannot carry the null branch.
+          let effectiveSchema = schema;
+          if (/^2/.test(status) && effectiveSchema) {
+            const rootName = rootIdentifier(ts, arg);
+            if (rootName && nonNullNames.has(rootName)) {
+              effectiveSchema = stripNullishBranch(effectiveSchema);
+            }
+          }
+          recordResponse(status, mediaType, effectiveSchema, typed ? "high" : "medium");
         } else {
           recordResponse(status, explicitType ?? "application/json", undefined, "medium");
         }
@@ -1844,9 +1977,78 @@ export function analyzeHandler(
 
   if (handler.body) visit(handler.body);
 
+  // ---- backfill request body from Mongoose write calls + required guards ----
+  if (handler.body) {
+    // A guard `if (!req.body.title) { ...; return; }` proves `title` is
+    // required on the paths that follow, independent of the ORM schema.
+    const requiredBodyGuards = new Set<string>();
+    const branchTerminates = (root: any): boolean => {
+      let terminates = false;
+      const w = (n: any): void => {
+        if (terminates) return;
+        if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) terminates = true;
+        if (n !== root && (ts.isFunctionLike(n) || ts.isArrowFunction?.(n))) return;
+        ts.forEachChild(n, w);
+      };
+      w(root);
+      return terminates;
+    };
+    const collectGuards = (n: any): void => {
+      if (ts.isIfStatement(n) && branchTerminates(n.thenStatement)) {
+        const cw = (c: any): void => {
+          if (
+            ts.isPrefixUnaryExpression(c) &&
+            c.operator === ts.SyntaxKind.ExclamationToken &&
+            !ts.isPrefixUnaryExpression(c.operand) &&
+            ts.isPropertyAccessExpression(c.operand) &&
+            ts.isPropertyAccessExpression(c.operand.expression) &&
+            c.operand.expression.name?.text === "body" &&
+            rootIdentifier(ts, c.operand.expression.expression) === reqName
+          ) {
+            requiredBodyGuards.add(c.operand.name.text);
+          }
+          ts.forEachChild(c, cw);
+        };
+        cw(n.expression);
+      }
+      ts.forEachChild(n, collectGuards);
+    };
+    collectGuards(handler.body);
+
+    const mongooseBody = inferMongooseRequestBody(analysis, handler.body);
+    if (mongooseBody) {
+      const known = new Set(bodyFields.map((f) => f.name));
+      // Whole-body update forwarding accepts every model path, all optional.
+      if (mongooseBody.wholeBodyUpdate) {
+        for (const name of mongooseBody.fieldTypes.keys()) {
+          if (!known.has(name)) {
+            bodyFields.push({ name, schema: mongooseBody.fieldTypes.get(name) });
+            known.add(name);
+          }
+        }
+      }
+      for (const field of bodyFields) {
+        const proven = mongooseBody.fieldTypes.get(field.name);
+        if (proven && (!field.schema || isEmptyishSchema(field.schema))) {
+          field.schema = proven;
+        }
+        if (mongooseBody.modelRequired.has(field.name)) field.required = true;
+        if (requiredBodyGuards.has(field.name)) field.required = true;
+      }
+    } else {
+      for (const field of bodyFields) {
+        if (requiredBodyGuards.has(field.name)) field.required = true;
+      }
+    }
+  }
+
   // ---- assemble parameters ----
   for (const field of queryFields) {
-    addParam("query", field.name, field.schema, field.schema ? "high" : "low", field.required ?? false);
+    // A query string's atomic value is text unless a conversion (Number/
+    // parseInt) or a validated schema already proved another type. Array/object
+    // query values require explicit evidence and are not assumed.
+    const schema = field.schema ?? { type: "string" };
+    addParam("query", field.name, schema, field.schema ? "high" : "low", field.required ?? false);
   }
   for (const field of headerFields) {
     addParam("header", field.name, field.schema, field.schema ? "high" : "low", false);
@@ -1898,13 +2100,10 @@ export function analyzeHandler(
     }
   }
 
-  if (
-    queryFields.some((f) => !f.schema) &&
-    !genericQuery &&
-    !validatedQuery
-  ) {
-    gaps.add("query-unknown");
-  }
+  // Unproven query fields fall back to the query-string atomic type `string`
+  // during parameter assembly, so plain text query params are a proven
+  // contract and need no unknown gap. Array/object query values still surface
+  // elsewhere when they cannot be typed.
 
   // ---- SSE response ----
   if (sseSignaled) {
