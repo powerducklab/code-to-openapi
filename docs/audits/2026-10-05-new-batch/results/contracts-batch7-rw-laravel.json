@@ -1,0 +1,49 @@
+{
+  "assertions": 941,
+  "mismatches": 0,
+  "unknown": 0,
+  "unknownFields": [],
+  "dynamicUnresolved": [],
+  "dynamicUnresolvedCount": 0,
+  "extra": 0,
+  "extraFields": [],
+  "errors": [],
+  "baselineErrors": [],
+  "baselineIssues": [],
+  "scorecard": {
+    "gate": 0.96,
+    "routeRecall": 1,
+    "routePrecision": 1,
+    "requestCompleteness": 1,
+    "responseCompleteness": 1,
+    "parameterCompleteness": 1,
+    "constraintAccuracy": 1,
+    "unresolvedRatio": 0,
+    "overall": 1,
+    "counts": {
+      "routeTotal": 22,
+      "routeMatched": 22,
+      "scannedRouteTotal": 22,
+      "documentedMissingRoutes": 0,
+      "request": {
+        "correct": 151,
+        "wrong": 0,
+        "unknown": 0
+      },
+      "response": {
+        "correct": 646,
+        "wrong": 0,
+        "unknown": 0
+      },
+      "parameter": {
+        "correct": 20,
+        "wrong": 0,
+        "unknown": 0
+      }
+    },
+    "dynamicUnresolvedCount": 0,
+    "pass95": true,
+    "passGate": true
+  },
+  "limitation": "Checks documented properties/constraints. `unknown` fields are present but statically unresolved types; `dynamicUnresolved` are honest gaps where a runtime-generated constraint (e.g. dynamic choices) cannot be statically enumerated and is flagged rather than fabricated; `extra` fields are observed fields absent from a partial baseline and are not hard mismatches unless the baseline is exact. `baselineErrors` are proven defects in the upstream baseline (source-evidenced), excluded from the scanner score."
+}

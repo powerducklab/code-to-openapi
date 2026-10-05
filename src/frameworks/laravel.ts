@@ -774,6 +774,13 @@ function collectParameters(
       continue;
     }
 
+    // Reflection-driven query filter (e.g. ArticleFilter extends Filter): the
+    // filter class's own single-argument methods are the accepted query keys.
+    if (cls && isQueryFilterClass(cls, analysis)) {
+      collectQueryFilterKeys(cls, addParam);
+      continue;
+    }
+
     // Route model binding: a typed parameter is bound to a route segment only
     // when its variable name corresponds to a declared path parameter. Any
     // other typed parameter (repository / service / contract injected by the
@@ -794,6 +801,10 @@ function collectParameters(
       addParam("path", name, { type: "string" }, "high", true);
     }
   }
+
+  // Paging/query keys read by a helper constructed in the handler (e.g. the
+  // project's Paginator reading request()->get('limit'|'offset')).
+  collectConstructedRequestParams(handler, analysis, addParam);
 
   return { parameters, ...(requestBody ? { requestBody } : {}), gaps };
 }
@@ -881,6 +892,97 @@ function collectRequestCalls(
     }
   }
   return { bodyKeys, seesAll, inlineRules };
+}
+
+const QUERY_FILTER_RESERVED = new Set([
+  "apply",
+  "getfilters",
+  "getfiltermethods",
+  "__construct",
+]);
+
+/**
+ * Detect the reflection-driven QueryFilter pattern: a filter base class exposes
+ * the leaf class method names through ReflectionClass and feeds them to
+ * `$request->only(...)`. Each single-argument filter method then corresponds to
+ * a query string parameter.
+ */
+function isQueryFilterClass(cls: PhpClass, analysis: PhpAnalysis): boolean {
+  let current: PhpClass | undefined = cls;
+  const visited = new Set<string>();
+  while (current && !visited.has(current.fqcn) && visited.size < 16) {
+    visited.add(current.fqcn);
+    if (current.methods.has("getFilterMethods")) return true;
+    for (const methodNode of current.methods.values()) {
+      if (findAll(methodNode, (n) => n.type === "name" && n.text === "ReflectionClass").length) {
+        return true;
+      }
+    }
+    const context: TsNode | undefined = current.node ?? current.methods.values().next().value;
+    current = current.extends ? resolvePhpClass(current.extends, analysis, context) : undefined;
+  }
+  return false;
+}
+
+/** Leaf filter class's own single-argument methods become query parameters. */
+function collectQueryFilterKeys(
+  cls: PhpClass,
+  addParam: (location: "query" | "header" | "path" | "cookie", name: string, schema: JsonSchema | undefined, confidence: Confidence, required: boolean) => void,
+): void {
+  for (const [methodName, methodNode] of cls.methods) {
+    if (methodName.startsWith("__") || QUERY_FILTER_RESERVED.has(methodName.toLowerCase())) continue;
+    if (formalParameters(methodNode).length !== 1) continue;
+    addParam("query", methodName, { type: "string" }, "medium", false);
+  }
+}
+
+/**
+ * Read query keys accessed inside a constructed helper's constructor, e.g.
+ * `new Paginator($builder)` whose constructor calls `request()->get('limit')`.
+ * Only the global request() helper and an explicit $request variable are
+ * treated as request sources so unrelated `->get()` calls are ignored.
+ */
+function collectConstructedRequestParams(
+  handler: TsNode,
+  analysis: PhpAnalysis,
+  addParam: (location: "query" | "header" | "path" | "cookie", name: string, schema: JsonSchema | undefined, confidence: Confidence, required: boolean) => void,
+): void {
+  const seen = new Set<string>();
+  const add = (key: string, schema: JsonSchema) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    addParam("query", key, schema, "medium", false);
+  };
+  for (const created of findAll(handler, (n) => n.type === "object_creation_expression")) {
+    const typeNode =
+      created.namedChildren.find((c) => c.type === "named_type") ??
+      created.namedChildren.find((c) => c.type === "name");
+    const typeName =
+      typeNode?.type === "named_type"
+        ? (typeNode.namedChildren.find((c) => c.type === "name")?.text ?? typeNode.text)
+        : typeNode?.text;
+    if (!typeName) continue;
+    const cls = resolvePhpClass(typeName, analysis, created);
+    if (!cls) continue;
+    const ctor = findPhpMethod(cls, "__construct", analysis);
+    if (!ctor) continue;
+    for (const call of findAll(ctor, (n) => n.type === "member_call_expression")) {
+      const method = call.namedChildren.find((c) => c.type === "name")?.text?.toLowerCase();
+      if (!method || !["get", "input", "query", "post"].includes(method)) continue;
+      const receiver = call.namedChildren[0];
+      const receiverText = receiver?.text ?? "";
+      const isGlobalRequest =
+        receiver?.type === "function_call_expression" && /(^|[^a-zA-Z_])request\s*\(/.test(receiverText);
+      const isRequestVar = receiver?.type === "variable_name" && receiverText === "$request";
+      if (!isGlobalRequest && !isRequestVar) continue;
+      const args = call.namedChildren.find((c) => c.type === "arguments");
+      const firstArg = args ? childrenOfType(args, "argument")[0] : undefined;
+      const key = firstArg ? phpStringText(firstArg.namedChildren.find((c) => c.type === "string")) : null;
+      if (!key) continue;
+      const isPaging = /^(limit|offset|page|per_page|perpage)$/i.test(key);
+      add(key, isPaging ? { type: "integer" } : { type: "string" });
+    }
+  }
 }
 
 function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]): DiscoveredResponse[] {

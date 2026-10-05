@@ -3,7 +3,9 @@
 import {readFileSync,writeFileSync} from 'node:fs';
 const load=(file:string)=>JSON.parse(readFileSync(file,'utf8'));
 const strict=process.argv.includes('--strict');
-const args=process.argv.slice(2).filter(arg=>arg!=='--strict');
+const gateArg=process.argv.find(arg=>arg.startsWith('--gate='));
+const GATE=gateArg?Number(gateArg.slice('--gate='.length)):0.95;
+const args=process.argv.slice(2).filter(arg=>arg!=='--strict'&&!arg.startsWith('--gate='));
 const baseline=load(args[0]!);
 const scanned=load(args[1]!);
 const actual=scanned.document??scanned;
@@ -261,12 +263,14 @@ const axes=[routeRecall,routePrecision,requestCompleteness,responseCompleteness,
 const overall=axes.length?Math.min(...axes):0;
 // An axis with zero baseline assertions (e.g. a sample that documents no request
 // body) is not applicable and must not block the gate.
-const atLeast=(value:number,total:number)=>total===0||value>=0.95;
-const pass95=routeRecall>=0.95&&routePrecision>=0.95
+const atLeast=(value:number,total:number)=>total===0||value>=GATE;
+const passGate=routeRecall>=GATE&&routePrecision>=GATE
  &&atLeast(requestCompleteness,reqTotal)&&atLeast(responseCompleteness,resTotal)
  &&atLeast(parameterCompleteness,paramTotal)&&atLeast(constraintAccuracy,constraintTotal)
- &&unresolvedRatio<=0.05;
+ &&unresolvedRatio<=(1-GATE);
+const pass95=passGate;
 const scorecard={
+ gate:GATE,
  routeRecall,routePrecision,
  requestCompleteness,responseCompleteness,parameterCompleteness,constraintAccuracy,
  unresolvedRatio,overall,
@@ -276,8 +280,9 @@ const scorecard={
   parameter:{correct:paramCorrect,wrong:paramWrong,unknown:paramUnknown}},
  dynamicUnresolvedCount:dynamicUnresolved.length,
  pass95,
+ passGate,
 };
 const result={assertions,mismatches:errors.length,unknown:unknownFields.length,unknownFields,dynamicUnresolved,dynamicUnresolvedCount:dynamicUnresolved.length,extra:extraFields.length,extraFields,errors,baselineErrors,baselineIssues,scorecard,limitation:'Checks documented properties/constraints. `unknown` fields are present but statically unresolved types; `dynamicUnresolved` are honest gaps where a runtime-generated constraint (e.g. dynamic choices) cannot be statically enumerated and is flagged rather than fabricated; `extra` fields are observed fields absent from a partial baseline and are not hard mismatches unless the baseline is exact. `baselineErrors` are proven defects in the upstream baseline (source-evidenced), excluded from the scanner score.'};
-writeFileSync(args[2]!,JSON.stringify(result,null,2));console.log(JSON.stringify({assertions,mismatches:errors.length,unknown:unknownFields.length,extra:extraFields.length,baselineErrors:baselineErrors.length,overall,pass95,routeRecall,routePrecision,requestCompleteness,responseCompleteness,constraintAccuracy,unresolvedRatio}));
+writeFileSync(args[2]!,JSON.stringify(result,null,2));console.log(JSON.stringify({gate:GATE,assertions,mismatches:errors.length,unknown:unknownFields.length,extra:extraFields.length,baselineErrors:baselineErrors.length,overall,passGate,routeRecall,routePrecision,requestCompleteness,responseCompleteness,parameterCompleteness,constraintAccuracy,unresolvedRatio}));
 
 if(strict && (errors.length || baselineIssues.length || !assertions)) process.exitCode=1;

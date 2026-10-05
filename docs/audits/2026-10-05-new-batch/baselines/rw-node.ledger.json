@@ -1,0 +1,12 @@
+{
+  "*": {
+    "missingRoutes": [
+      {
+        "method": "get",
+        "path": "/",
+        "evidence": "app.get('/') returns {status:'API is running on /api'} and is mounted on the root Express app before the '/api' router, so it is outside the /api Conduit contract covered by this baseline.",
+        "resolution": "Verified in src/main.ts; documented as an out-of-scope health route, not a scanner false positive."
+      }
+    ]
+  }
+}

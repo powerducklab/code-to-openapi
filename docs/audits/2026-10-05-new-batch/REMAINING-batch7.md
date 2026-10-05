@@ -149,6 +149,125 @@ runtime-verified. The Express/Prisma sample is TypeScript and was scanned
 statically without installing or executing the audited application (the audit
 harness scans source only by design).
 
+## Field-level two-way validation (post-0.11.0)
+
+Route-level 0-gap is necessary but not sufficient, so both samples now carry
+**independent field-level OpenAPI baselines** that are hand-written from
+source reading and are never derived from scanner output. They are compared by
+the two-way comparator `examples/audit-contracts.ts` (parameterized
+`--gate=`, default 0.96), which resolves `$ref`, nullable unions, multi-branch
+unions (any-branch), opaque `any`, dynamic enums, and — via
+`x-audit-exact-properties: true` — hard-fails any **extra** response property,
+proving the scanner neither misses fields nor leaks unreturned entity columns.
+
+Result at gate 0.96 (1760 assertions total, merged into
+`results/scorecard-batch7.json` → `summary.fieldLevel`):
+
+| Sample | Prefix | Assertions | Mismatch | Unknown | Extra | All six axes |
+| --- | --- | --- | --- | --- | --- | --- |
+| rw-laravel | `''` | 941 | 0 | 0 | 0 | **1.0000** |
+| rw-node | `/api` | 819 | 0 | 0 | 0 | **1.0000** |
+
+Axes: route recall/precision, request completeness, response completeness,
+parameter completeness, constraint accuracy, unresolved ratio (overall =
+worst axis). Baselines live in `baselines/`; comparator output in
+`results/contracts-batch7-*.json`.
+
+### Generic scanner fixes driven by the field baselines
+
+1. **Concatenated Laravel rule values** (`src/lang/php/index.ts`,
+   `parseRulesMethod`). A rule value that is a string concatenation
+   (`'sometimes|…|unique:users,email,' . $this->user()->id`) previously
+   resolved an empty text node and dropped the whole field (PUT/PATCH `/user`
+   lost `username`/`email`). All string fragments inside the binary expression
+   are now collected and joined; the static rule prefix is kept and the dynamic
+   operand discarded. Regression: `test/laravel-rules-concat.test.ts`.
+2. **Type-before-constraint rules** (`src/lang/php/schema.ts`,
+   `ruleStringToSchema`). Fields without an explicit `string` rule
+   (`password` => `required|min:6`) previously got an empty type and lost
+   `minLength`. The scalar type is now decided first (default scalar `string`;
+   `array/integer/number/boolean/date/uuid/email` map as expected, `url` →
+   `format: uri`), then `min/max/size` apply; `size` maps to an exact length
+   and `nullable` is preserved. Regression: same test.
+3. **Reflection-driven QueryFilter parameters** (`src/frameworks/laravel.ts`,
+   `isQueryFilterClass` / `collectQueryFilterKeys`). A leaf filter class whose
+   parent exposes `getFilterMethods`/`ReflectionClass` contributes its own
+   single-argument `protected` method names as query parameters
+   (`ArticleFilter` → `author`, `favorited`, `tag`). Extends-chain resolution
+   passes the call-site node as context so short-name same-namespace parents
+   resolve. Regression: `test/laravel-query-filter.test.ts`.
+4. **Cross-class pagination parameters** (`collectConstructedRequestParams`).
+   A handler that does `new Helper(…)` whose constructor reads
+   `request()->get('limit'/'offset')` now contributes those query keys
+   (integer only for `limit/offset/page/per_page`, otherwise string). GET
+   `/articles` gains `author/favorited/tag` (string) + `limit/offset`
+   (integer); `/articles/feed` gains `limit/offset`.
+
+### Field facts the baselines pin (language-specific, not normalized away)
+
+- **rw-node (TS):** `id`/`favoritesCount`/comment `id` are `number` (TS does
+  not distinguish integer); `createdAt`/`updatedAt` are `string` with
+  `format: date-time`; author/profile `bio`/`image` are `["string","null"]`;
+  deterministic mapper/object-literal responses **do** list `required`.
+  `POST /users` and `POST /articles` return **201**; `DELETE /articles/{slug}`
+  returns **204** with no body; `DELETE …/comments/{id}` returns **200** with
+  an empty object; `login` returns no `id` while register/current/update do
+  (Prisma `select {id,…}` + `{...user, token}`). Query `limit/offset` are kept
+  as `number` (source uses `Number()`) rather than guessed as integer, per
+  P1#2 — no narrowing from a converter name alone.
+- **rw-laravel (PHP):** response resources/envelopes do **not** list
+  `required` (field presence is enforced by `x-audit-exact-properties`;
+  listing it produced ~190 false mismatches against the scanner's correctly
+  conservative response objects), while request schemas keep their real
+  `required`; all-`sometimes` update requests have `requestBody.required=false`;
+  a Laravel `array` rule with no element type yields `items: {}` rather than a
+  guessed `string[]`; `DELETE article/comment` is 200 with a nullable empty
+  object (source `respondSuccess()`), not 204; `GET /` is 200 `text/html`.
+
+### Upstream security defect recorded, not "fixed" by the scanner
+
+On rw-node the favorite endpoints (`POST`/`DELETE /articles/{slug}/favorite`)
+inline `{...article, author: profileMapper, tagList, favorited,
+favoritesCount}` while the Prisma query uses `include: { favoritedBy: true }`.
+At runtime that path genuinely returns the scalar `id`/`authorId` and the full
+`favoritedBy` User array (including `password`) — a real information-disclosure
+bug in the sample. The scanner reports exactly what the source returns and
+correctly does **not** expand relations that were not included (the clean
+mapper paths expose no such keys). The favorite baseline deliberately uses a
+non-exact `ArticleShape` so these source-real extra keys are documented rather
+than forcing the scanner to delete fields to "pass". Standard mapper paths use
+exact envelopes and prove zero leakage.
+
+### Native runtime status (honest, attempted and blocked)
+
+The field baselines are independent source-read contracts verified by a
+two-way comparator, **not** executed HTTP evidence. Every reasonable path to a
+native runtime on this machine (Apple silicon, macOS 26.5.1) was tried:
+
+1. The Homebrew at `/usr/local` initially refused to run on macOS 26
+   (`MacOSVersionError`, retired `master` branch). Homebrew itself and
+   homebrew-core were migrated to `main`, restoring a working
+   `brew 3.1.12` / homebrew-core 2026-10-05.
+2. The `shivammathur/php` tap was added. It ships `php@7.4` (7.4.33), but the
+   formula was **disabled upstream on 2023-11-28**, has no bottle for
+   arm64/macOS 26, and would build 23 dependencies from source; PHP 7.4 does
+   not build against the current `icu4c`/`openssl@3` stack without the
+   maintainer's legacy patches, so this is not a reliable toolchain here.
+3. The setup-php prebuilt macOS binaries (`shivammathur/php-builder` releases)
+   have no published 7.4.33 Darwin asset (the tag returns 404), and there is no
+   arm64 PHP 7.4 build.
+
+Therefore rw-laravel (Laravel 5.5, `php >= 7.0`, `tymon/jwt-auth
+1.0.0-rc.4.1`, plus an old MySQL/SQLite and `composer install` of pinned 2017
+dependencies) cannot be brought up natively in this environment. rw-node needs
+PostgreSQL + Prisma 4 serving a seeded Conduit database and likewise has no
+native run here. This is recorded as an **attempted-and-blocked** native
+oracle, not a claimed one; the field baselines must not be misrepresented as
+executed HTTP tests. A future native run needs an x86_64 Linux container with
+PHP 7.4 + MySQL 5.7 and a Node 16 + PostgreSQL container respectively. The
+static field evidence here is nevertheless independent of scanner output
+(hand-written from source) and bidirectional, including a hard no-leak check.
+
 ## Still open (not closed by this batch)
 
 - **Laravel (P1#17 remainder):** cross-file custom exception rendering in
@@ -178,20 +297,29 @@ harness scans source only by design).
   for validators/binders/serializers/middleware/conditional responses remain
   tracked per the 22-item list in
   `../2026-10-04-response-contracts/REMAINING.md`.
-- **P1#20 comparator:** bidirectional false-positive/false-negative comparison
-  across routes, parameters, response fields, media types, and status codes
-  (union/`$ref`/constraint aware), with undecidable items reported separately.
+- **P1#20 comparator (largely implemented, needs breadth):**
+  `examples/audit-contracts.ts` now performs bidirectional false-positive /
+  false-negative comparison across routes, parameters, request/response
+  fields, media types, and status codes, is union/`$ref`/nullable/constraint
+  aware, hard-fails extra response properties via
+  `x-audit-exact-properties`, reports unknown/opaque fields and undecidable
+  items separately, and archives upstream defects via a ledger. Remaining:
+  apply it across the full framework matrix rather than the two batch-7
+  samples.
 - **P1#21 incremental scan E2E:** the four-repository incremental/persist
   pipeline (shared-DTO edit, route deletion, validator/config edit, file move,
   cancel, stale late result, save failure, restart recovery) still needs a
   unified end-to-end acceptance run; incremental results must match full-scan
   semantics and preserve manual edits.
-- **P1#22 release definition:** the fixed-version, scan-independent sample set
-  and per-axis thresholds (route recall/precision, request/response field
-  completeness, constraint accuracy, unresolved ratio) are partially
-  implemented by `examples/audit-new-batch-scorecard.py`; response-field-level
-  precision (extra/missing properties) and constraint accuracy are not yet
-  scored automatically and unknown fields continue to count as incorrect.
+- **P1#22 release definition (implemented for batch 7, needs matrix rollout):**
+  the fixed-version, scan-independent sample set and per-axis thresholds
+  (route recall/precision, request/response/parameter completeness, constraint
+  accuracy, unresolved ratio) are scored at field level by
+  `examples/audit-contracts.ts --gate=0.96` and merged into
+  `results/scorecard-batch7.json` → `summary.fieldLevel` (worst-case axes
+  across samples; unknown fields count as incorrect and extra response fields
+  hard-fail). Remaining: generalize the independent field baselines to every
+  framework in the matrix and make the 0.96 field gate a release blocker.
 
 ## Upstream contradictions carried forward (not scanner bugs)
 

@@ -245,7 +245,21 @@ export function parseRulesMethod(method: TsNode): PhpRule[] {
         .filter(Boolean)
         .join("|");
     } else {
-      value = phpStringText(strings[1]);
+      const keyNode = strings[0];
+      const valueExpr = element.namedChildren.find((c) => c !== keyNode);
+      if (valueExpr?.type === "string") {
+        value = phpStringText(valueExpr);
+      } else if (valueExpr) {
+        // A concatenated rule value such as
+        // `'sometimes|unique:users,email,' . $this->user()->id` keeps its
+        // static prefix; collect every literal fragment so the resolvable
+        // rules survive while the runtime operand is dropped instead of
+        // discarding the whole field.
+        const parts = findAll(valueExpr, (n) => n.type === "string")
+          .map((s) => phpStringText(s))
+          .filter(Boolean);
+        value = parts.length ? parts.join("") : null;
+      }
     }
     if (value) rules.push({ name: key, rules: value });
   }

@@ -8,7 +8,25 @@
     "responseCompletenessDeterministic": 1.0,
     "aiReviewRoutesTotal": 0,
     "note": "responseCompletenessDeterministic excludes contracts proven only via the interactive AI review.",
-    "deterministicPass96": true
+    "deterministicPass96": true,
+    "fieldLevel": {
+      "method": "Independent hand-written OpenAPI field baselines (source-read, never derived from scanner output) compared by the two-way examples/audit-contracts.ts comparator at gate 0.96. x-audit-exact-properties enforces no extra/leaked response fields.",
+      "totalAssertions": 1760,
+      "totalMismatches": 0,
+      "totalUnknown": 0,
+      "worstCaseAxesAcrossSamples": {
+        "routeRecall": 1,
+        "routePrecision": 1,
+        "requestCompleteness": 1,
+        "responseCompleteness": 1,
+        "parameterCompleteness": 1,
+        "constraintAccuracy": 1,
+        "unresolvedRatio": 0,
+        "overall": 1
+      },
+      "allSamplesPassGate": true,
+      "fieldLevelPass96": true
+    }
   },
   "projects": [
     {
@@ -26,7 +44,26 @@
       "responseCompletenessDeterministic": 1.0,
       "aiReviewRoutes": 0,
       "unresolvedRatio": 0.0,
-      "gapCounts": {}
+      "gapCounts": {},
+      "fieldLevel": {
+        "gate": 0.96,
+        "passGate": true,
+        "assertions": 819,
+        "mismatches": 0,
+        "unknown": 0,
+        "extra": 0,
+        "baselineErrors": 1,
+        "axes": {
+          "routeRecall": 1,
+          "routePrecision": 1,
+          "requestCompleteness": 1,
+          "responseCompleteness": 1,
+          "parameterCompleteness": 1,
+          "constraintAccuracy": 1,
+          "unresolvedRatio": 0,
+          "overall": 1
+        }
+      }
     },
     {
       "key": "rw-laravel",
@@ -43,7 +80,26 @@
       "responseCompletenessDeterministic": 1.0,
       "aiReviewRoutes": 0,
       "unresolvedRatio": 0.0,
-      "gapCounts": {}
+      "gapCounts": {},
+      "fieldLevel": {
+        "gate": 0.96,
+        "passGate": true,
+        "assertions": 941,
+        "mismatches": 0,
+        "unknown": 0,
+        "extra": 0,
+        "baselineErrors": 0,
+        "axes": {
+          "routeRecall": 1,
+          "routePrecision": 1,
+          "requestCompleteness": 1,
+          "responseCompleteness": 1,
+          "parameterCompleteness": 1,
+          "constraintAccuracy": 1,
+          "unresolvedRatio": 0,
+          "overall": 1
+        }
+      }
     }
   ]
 }

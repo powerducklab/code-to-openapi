@@ -654,36 +654,74 @@ function ruleStringToSchema(rules: string, _index: PhpModelIndex): JsonSchema {
   ) {
     return { type: "string", format: "binary" };
   }
-  let schema: JsonSchema = {};
-  if (tokens.includes("array")) schema = { type: "array", items: {} };
-  else if (tokens.includes("string") || tokens.some(t => t === "email" || t.startsWith("email:"))) schema = { type: "string" };
-  else if (tokens.includes("integer") || tokens.includes("int")) schema = { type: "integer" };
-  else if (tokens.includes("numeric") || tokens.includes("number")) schema = { type: "number" };
-  else if (tokens.includes("boolean") || tokens.includes("bool")) schema = { type: "boolean" };
-  else if (tokens.some(t => t.startsWith("in:"))) schema = {type: "string"};
-  if (tokens.some(t => t === "date" || t.startsWith("date_format:"))) {
-    schema = { type: "string", format: "date" };
+
+  // Resolve the value type first so length/range constraints below can map to
+  // the right OAS keyword. A field without an explicit type rule validates a
+  // scalar string on the wire (numeric/array fields declare numeric/array).
+  let type: string;
+  let format: string | undefined;
+  if (tokens.includes("array")) {
+    type = "array";
+  } else if (tokens.includes("integer") || tokens.includes("int")) {
+    type = "integer";
+  } else if (tokens.includes("numeric") || tokens.includes("number")) {
+    type = "number";
+  } else if (tokens.includes("boolean") || tokens.includes("bool")) {
+    type = "boolean";
+  } else if (tokens.some((t) => t === "date" || t.startsWith("date_format:"))) {
+    type = "string";
+    format = "date";
+  } else if (tokens.includes("uuid")) {
+    type = "string";
+    format = "uuid";
+  } else if (tokens.some((t) => t === "email" || t.startsWith("email:"))) {
+    type = "string";
+    format = "email";
+  } else if (tokens.includes("url") || tokens.includes("active_url")) {
+    type = "string";
+    format = "uri";
+  } else {
+    type = "string";
   }
-  if (tokens.some(t => t === "email" || t.startsWith("email:"))) schema.format = "email";
-  if (tokens.includes("uuid")) { schema.type = "string"; schema.format = "uuid"; }
+
+  let schema: JsonSchema = type === "array" ? { type, items: {} } : { type };
+  if (format) schema.format = format;
+
+  // nullable accepts null, but required wins and rejects it.
+  if (tokens.includes("nullable") && !tokens.includes("required") && typeof schema.type === "string") {
+    schema.type = [schema.type, "null"];
+  }
+
   for (const token of tokens) {
-    const match = /^(min|max|size):(-?\d+(?:\.\d+)?)$/.exec(token);
-    if (!match) continue;
-    const value = Number(match[2]);
-    if (!Number.isFinite(value)) continue;
-    const kind = schema.type;
-    const minimum = kind === "string" ? "minLength" : kind === "array" ? "minItems" : kind === "integer" || kind === "number" ? "minimum" : null;
-    const maximum = kind === "string" ? "maxLength" : kind === "array" ? "maxItems" : kind === "integer" || kind === "number" ? "maximum" : null;
-    if ((kind === "string" || kind === "array") && (!Number.isInteger(value) || value < 0)) continue;
-    if (minimum && match[1] !== "max") schema[minimum] = value;
-    if (maximum && match[1] !== "min") schema[maximum] = value;
+    const range = /^(min|max):(-?\d+(?:\.\d+)?)$/.exec(token);
+    const size = /^size:(-?\d+(?:\.\d+)?)$/.exec(token);
+    const kind = schema.type === "array" ? "array" : Array.isArray(schema.type) ? schema.type[0] : schema.type;
+    const lengthKey = kind === "array" ? "Items" : kind === "string" ? "Length" : null;
+    const boundKey = kind === "integer" || kind === "number" ? "" : null;
+    const apply = (kind2: string, op: "min" | "max" | "size", raw: string) => {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) return;
+      if (lengthKey) {
+        if ((kind2 === "string" || kind2 === "array") && (!Number.isInteger(value) || value < 0)) return;
+        if (op !== "max") (schema as Record<string, unknown>)[`min${lengthKey}`] = value;
+        if (op !== "min") (schema as Record<string, unknown>)[`max${lengthKey}`] = value;
+      } else if (boundKey === "" && (kind === "integer" || kind === "number")) {
+        if (op !== "max") schema.minimum = value;
+        if (op !== "min") schema.maximum = value;
+      }
+    };
+    if (range) apply(kind as string, range[1] as "min" | "max", range[2]);
+    if (size) {
+      // size:n fixes an exact length (string/array) or exact value (number).
+      apply(kind as string, "min", size[1]);
+      apply(kind as string, "max", size[1]);
+    }
   }
+
   if (tokens.includes("required")) {
     if (schema.type === "string") schema.minLength = Math.max(1, Number(schema.minLength ?? 0));
     if (schema.type === "array") schema.minItems = Math.max(1, Number(schema.minItems ?? 0));
   }
-  // Required rejects null even when nullable is also specified.
-  if (tokens.includes("nullable") && !tokens.includes("required") && typeof schema.type === "string") schema.type = [schema.type, "null"];
   return schema;
 }
 
