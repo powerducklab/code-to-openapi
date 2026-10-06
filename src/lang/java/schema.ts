@@ -98,7 +98,11 @@ const COLLECTION_TYPES = new Set([
 ]);
 
 /** Scalar stream types (no element argument). */
-const SCALAR_STREAM_TYPES = new Set(["LongStream", "IntStream", "DoubleStream"]);
+const SCALAR_STREAM_TYPES = new Set([
+  "LongStream",
+  "IntStream",
+  "DoubleStream",
+]);
 
 /** Anything that serializes as a JSON object keyed by its second type argument. */
 const MAP_TYPES = new Set([
@@ -132,7 +136,12 @@ const WRAPPER_TYPES = new Set([
 ]);
 
 /** Free-form JSON objects (no statically known properties). */
-const JSON_OBJECT_TYPES = new Set(["JSONObject", "ObjectNode", "JsonObject", "Object"]);
+const JSON_OBJECT_TYPES = new Set([
+  "JSONObject",
+  "ObjectNode",
+  "JsonObject",
+  "Object",
+]);
 
 /** Free-form JSON arrays; elements are unconstrained JSON values. */
 const JSON_ARRAY_TYPES = new Set(["JSONArray", "ArrayNode", "JsonArray"]);
@@ -149,7 +158,11 @@ type Subst = Map<string, TsNode>;
 export interface JavaModelIndex {
   readonly byName: Map<string, JavaTypeDef>;
   readonly components: Map<string, JsonSchema>;
-  resolveDef(name: string, fileRel?: string, at?: TsNode): JavaTypeDef | undefined;
+  resolveDef(
+    name: string,
+    fileRel?: string,
+    at?: TsNode,
+  ): JavaTypeDef | undefined;
   resolveFqn(fqn: string): JavaTypeDef | undefined;
 }
 
@@ -184,7 +197,11 @@ export function buildJavaModelIndex(analysis: JavaAnalysis): JavaModelIndex {
     scopedNames.set(key, [...(scopedNames.get(key) ?? []), def]);
     simpleNames.set(def.name, [...(simpleNames.get(def.name) ?? []), def]);
   }
-  const resolveDef = (name: string, fileRel?: string, at?: TsNode): JavaTypeDef | undefined => {
+  const resolveDef = (
+    name: string,
+    fileRel?: string,
+    at?: TsNode,
+  ): JavaTypeDef | undefined => {
     let scope = at;
     while (scope) {
       const owner = byNode.get(scope.id);
@@ -205,18 +222,25 @@ export function buildJavaModelIndex(analysis: JavaAnalysis): JavaModelIndex {
       if (!table) return undefined;
       const [head, ...tail] = name.split(".");
       const imported = table.explicit.get(head!);
-      if (imported) return analysis.typesByFqn.get([imported, ...tail].join("."));
-      return analysis.typesByFqn.get([table.packageName, name].filter(Boolean).join("."));
+      if (imported)
+        return analysis.typesByFqn.get([imported, ...tail].join("."));
+      return analysis.typesByFqn.get(
+        [table.packageName, name].filter(Boolean).join("."),
+      );
     }
     if (table) {
       const explicit = table.explicit.get(name);
       // An unresolved import must not bind to an unrelated project's class.
       if (explicit) return analysis.typesByFqn.get(explicit);
-      const samePackage = analysis.typesByFqn.get([table.packageName, name].filter(Boolean).join("."));
+      const samePackage = analysis.typesByFqn.get(
+        [table.packageName, name].filter(Boolean).join("."),
+      );
       if (samePackage) return samePackage;
       const local = scopedNames.get(`${fileRel}\0${name}`) ?? [];
       if (local.length) return local.length === 1 ? local[0] : undefined;
-      const imported = table.wildcards.map(pkg => analysis.typesByFqn.get(`${pkg}.${name}`)).filter((def): def is JavaTypeDef => !!def);
+      const imported = table.wildcards
+        .map((pkg) => analysis.typesByFqn.get(`${pkg}.${name}`))
+        .filter((def): def is JavaTypeDef => !!def);
       return imported.length === 1 ? imported[0] : undefined;
     }
     const candidates = simpleNames.get(name) ?? [];
@@ -246,10 +270,13 @@ function internal(index: JavaModelIndex): InternalIndex {
 function simpleTypeName(node: TsNode): string | null {
   if (node.type === "type_identifier") return node.text;
   if (node.type === "generic_type") {
-    const base = node.namedChildren.find(c => c.type !== "type_arguments");
+    const base = node.namedChildren.find((c) => c.type !== "type_arguments");
     return base ? simpleTypeName(base) : null;
   }
-  if (node.type === "scoped_identifier" || node.type === "scoped_type_identifier") {
+  if (
+    node.type === "scoped_identifier" ||
+    node.type === "scoped_type_identifier"
+  ) {
     const tail = node.namedChildren[node.namedChildren.length - 1];
     return tail && tail.type === "type_identifier" ? tail.text : null;
   }
@@ -308,17 +335,33 @@ export function applyValidation<T extends JsonSchema>(
   validation: JavaFieldValidation | undefined,
 ): T {
   if (validation?.readOnly) (schema as Record<string, unknown>).readOnly = true;
-  if (validation?.writeOnly) (schema as Record<string, unknown>).writeOnly = true;
-  if (!validation || !SCALAR_SCHEMA_TYPES.has((schema as { type?: string }).type ?? "")) {
+  if (validation?.writeOnly)
+    (schema as Record<string, unknown>).writeOnly = true;
+  if (
+    !validation ||
+    !SCALAR_SCHEMA_TYPES.has((schema as { type?: string }).type ?? "")
+  ) {
     return schema;
   }
   const s = schema as Record<string, unknown>;
-  if (validation.format && s.type === "string" && !s.format) s.format = validation.format;
-  if (validation.minLength !== undefined && s.type === "string") s.minLength = validation.minLength;
-  if (validation.maxLength !== undefined && s.type === "string") s.maxLength = validation.maxLength;
-  if (validation.minimum !== undefined && (s.type === "integer" || s.type === "number")) s.minimum = validation.minimum;
-  if (validation.maximum !== undefined && (s.type === "integer" || s.type === "number")) s.maximum = validation.maximum;
-  if (validation.pattern !== undefined && s.type === "string") s.pattern = validation.pattern;
+  if (validation.format && s.type === "string" && !s.format)
+    s.format = validation.format;
+  if (validation.minLength !== undefined && s.type === "string")
+    s.minLength = validation.minLength;
+  if (validation.maxLength !== undefined && s.type === "string")
+    s.maxLength = validation.maxLength;
+  if (
+    validation.minimum !== undefined &&
+    (s.type === "integer" || s.type === "number")
+  )
+    s.minimum = validation.minimum;
+  if (
+    validation.maximum !== undefined &&
+    (s.type === "integer" || s.type === "number")
+  )
+    s.maximum = validation.maximum;
+  if (validation.pattern !== undefined && s.type === "string")
+    s.pattern = validation.pattern;
   return schema;
 }
 
@@ -339,7 +382,12 @@ function isStandardScalar(name: string): boolean {
  * names (e.g. CommonResult_Foo). Project types resolve to their component
  * alias so same-simple-name classes never collide.
  */
-function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: string): string {
+function typeKey(
+  node: TsNode,
+  index: JavaModelIndex,
+  subst?: Subst,
+  fileRel?: string,
+): string {
   const resolved = resolveSubst(node, subst);
   if (resolved.type === "wildcard") {
     const bound = wildcardBound(resolved);
@@ -349,16 +397,23 @@ function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: s
     const def = index.resolveDef(resolved.text, fileRel, resolved);
     return def ? internal(index).aliasForDef(def) : resolved.text;
   }
-  if (resolved.type === "scoped_identifier" || resolved.type === "scoped_type_identifier") {
+  if (
+    resolved.type === "scoped_identifier" ||
+    resolved.type === "scoped_type_identifier"
+  ) {
     const name = simpleTypeName(resolved) ?? "Object";
     if (resolved.type === "scoped_type_identifier") {
-      const def = index.resolveFqn(resolved.text) ?? index.resolveDef(resolved.text, fileRel, resolved);
+      const def =
+        index.resolveFqn(resolved.text) ??
+        index.resolveDef(resolved.text, fileRel, resolved);
       if (def) return internal(index).aliasForDef(def);
     }
     return name;
   }
   if (resolved.type === "integral_type") {
-    return resolved.text === "long" ? "Long" : resolved.text.charAt(0).toUpperCase() + resolved.text.slice(1);
+    return resolved.text === "long"
+      ? "Long"
+      : resolved.text.charAt(0).toUpperCase() + resolved.text.slice(1);
   }
   if (resolved.type === "floating_point_type") {
     return resolved.text === "double" ? "Double" : "Float";
@@ -366,7 +421,15 @@ function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: s
   if (resolved.type === "boolean_type") return "Boolean";
   if (resolved.type === "array_type") {
     const inner = resolved.namedChildren.find((c) =>
-      ["type_identifier", "generic_type", "scoped_identifier", "scoped_type_identifier", "integral_type", "floating_point_type", "boolean_type"].includes(c.type),
+      [
+        "type_identifier",
+        "generic_type",
+        "scoped_identifier",
+        "scoped_type_identifier",
+        "integral_type",
+        "floating_point_type",
+        "boolean_type",
+      ].includes(c.type),
     );
     return `${typeKey(inner ?? resolved, index, subst, fileRel)}Array`;
   }
@@ -374,17 +437,20 @@ function typeKey(node: TsNode, index: JavaModelIndex, subst?: Subst, fileRel?: s
     const name = simpleTypeName(resolved) ?? "Object";
     const args = genericArguments(resolved);
     if (SCALAR_STREAM_TYPES.has(name)) {
-      return name === "IntStream" || name === "LongStream" ? "LongList" : "DoubleList";
+      return name === "IntStream" || name === "LongStream"
+        ? "LongList"
+        : "DoubleList";
     }
     if (COLLECTION_TYPES.has(name)) {
-      return `${typeKey(args[0] ?? { text: "Object", type: "type_identifier" } as TsNode, index, subst, fileRel)}List`;
+      return `${typeKey(args[0] ?? ({ text: "Object", type: "type_identifier" } as TsNode), index, subst, fileRel)}List`;
     }
     if (MAP_TYPES.has(name)) {
-      return `Map_${typeKey(args[1] ?? { text: "Object", type: "type_identifier" } as TsNode, index, subst, fileRel)}`;
+      return `Map_${typeKey(args[1] ?? ({ text: "Object", type: "type_identifier" } as TsNode), index, subst, fileRel)}`;
     }
     if (PAGE_TYPES.has(name)) {
-      const pageBase = name === "Slice" || name === "SliceImpl" ? "Slice" : "Page";
-      return `${pageBase}_${typeKey(args[0] ?? { text: "Object", type: "type_identifier" } as TsNode, index, subst, fileRel)}`;
+      const pageBase =
+        name === "Slice" || name === "SliceImpl" ? "Slice" : "Page";
+      return `${pageBase}_${typeKey(args[0] ?? ({ text: "Object", type: "type_identifier" } as TsNode), index, subst, fileRel)}`;
     }
     if (WRAPPER_TYPES.has(name) && args[0]) {
       return typeKey(args[0], index, subst, fileRel);
@@ -449,7 +515,10 @@ function ensureComponentForDef(
  * Jackson naming strategies are inherited: @JsonNaming on a superclass also
  * renames the properties it contributes to a subtype.
  */
-function effectiveNaming(def: JavaTypeDef, index: JavaModelIndex): "snake_case" | "default" {
+function effectiveNaming(
+  def: JavaTypeDef,
+  index: JavaModelIndex,
+): "snake_case" | "default" {
   const guard = new Set<string>();
   let current: JavaTypeDef | undefined = def;
   for (let depth = 0; depth < 8 && current; depth++) {
@@ -493,7 +562,8 @@ function collectChainFields(
     const superSimple = simpleTypeName(superNode);
     const superDef = superSimple
       ? index.resolveDef(
-          superNode.type === "scoped_type_identifier" || superNode.type === "scoped_identifier"
+          superNode.type === "scoped_type_identifier" ||
+            superNode.type === "scoped_identifier"
             ? superNode.text
             : superSimple,
           def.file,
@@ -507,7 +577,9 @@ function collectChainFields(
           if (args[i]) superSubst.set(parameter, resolveSubst(args[i]!, subst));
         });
       }
-      out.push(...collectChainFields(superDef, index, superSubst, depth + 1, guard));
+      out.push(
+        ...collectChainFields(superDef, index, superSubst, depth + 1, guard),
+      );
     }
   }
   for (const field of def.fields) {
@@ -552,7 +624,9 @@ function buildTypeSchema(
   stack: Set<string>,
 ): JsonSchema {
   if (def.kind === "enum") {
-    return def.enumValues.length ? { type: "string", enum: [...def.enumValues] } : { type: "string" };
+    return def.enumValues.length
+      ? { type: "string", enum: [...def.enumValues] }
+      : { type: "string" };
   }
 
   // Jackson @JsonTypeInfo(NAME) + @JsonSubTypes: emit a discriminated oneOf.
@@ -562,7 +636,14 @@ function buildTypeSchema(
     for (const subtype of def.discriminator.subtypes) {
       const subDef = index.resolveDef(subtype.type, def.file);
       if (!subDef) continue;
-      const refName = ensureComponentForDef(subDef, index, undefined, [], depth, stack);
+      const refName = ensureComponentForDef(
+        subDef,
+        index,
+        undefined,
+        [],
+        depth,
+        stack,
+      );
       const ref = `#/components/schemas/${refName}`;
       oneOf.push({ $ref: ref });
       mapping[subtype.name] = ref;
@@ -602,7 +683,9 @@ function ensurePageComponent(
   subst: Subst | undefined,
   fileRel?: string,
 ): string {
-  const itemKey = itemNode ? typeKey(itemNode, index, subst, fileRel) : "Object";
+  const itemKey = itemNode
+    ? typeKey(itemNode, index, subst, fileRel)
+    : "Object";
   const isSlice = pageName === "Slice" || pageName === "SliceImpl";
   const base = `${isSlice ? "Slice" : "Page"}_${itemKey}`;
   if (index.components.has(base)) return base;
@@ -664,7 +747,9 @@ export function javaTypeToSchema(
   if (depth > 6 || !node) return {};
   node = resolveSubst(node, subst);
   if (node.type === "annotated_type") {
-    const type = node.namedChildren.find(c => c.type !== "annotation" && c.type !== "marker_annotation");
+    const type = node.namedChildren.find(
+      (c) => c.type !== "annotation" && c.type !== "marker_annotation",
+    );
     return type ? javaTypeToSchema(type, index, depth, subst, fileRel) : {};
   }
 
@@ -677,11 +762,22 @@ export function javaTypeToSchema(
 
   if (node.type === "array_type") {
     const inner = node.namedChildren.find((c) =>
-      ["type_identifier", "generic_type", "integral_type", "floating_point_type", "boolean_type", "scoped_identifier", "scoped_type_identifier", "wildcard"].includes(c.type),
+      [
+        "type_identifier",
+        "generic_type",
+        "integral_type",
+        "floating_point_type",
+        "boolean_type",
+        "scoped_identifier",
+        "scoped_type_identifier",
+        "wildcard",
+      ].includes(c.type),
     );
     return {
       type: "array",
-      items: inner ? javaTypeToSchema(inner, index, depth + 1, subst, fileRel) : { type: "object" },
+      items: inner
+        ? javaTypeToSchema(inner, index, depth + 1, subst, fileRel)
+        : { type: "object" },
     };
   }
 
@@ -701,7 +797,10 @@ export function javaTypeToSchema(
     if (name && SCALAR_STREAM_TYPES.has(name)) {
       return {
         type: "array",
-        items: { type: "integer", ...(name === "DoubleStream" ? {} : { format: "int64" }) },
+        items: {
+          type: "integer",
+          ...(name === "DoubleStream" ? {} : { format: "int64" }),
+        },
       };
     }
     if (name && COLLECTION_TYPES.has(name)) {
@@ -714,11 +813,27 @@ export function javaTypeToSchema(
     }
     if (name && MAP_TYPES.has(name)) {
       return args[1]
-        ? { type: "object", additionalProperties: javaTypeToSchema(args[1], index, depth + 1, subst, fileRel) }
+        ? {
+            type: "object",
+            additionalProperties: javaTypeToSchema(
+              args[1],
+              index,
+              depth + 1,
+              subst,
+              fileRel,
+            ),
+          }
         : { type: "object" };
     }
     if (name && PAGE_TYPES.has(name)) {
-      const component = ensurePageComponent(name, args[0], index, depth, subst, fileRel);
+      const component = ensurePageComponent(
+        name,
+        args[0],
+        index,
+        depth,
+        subst,
+        fileRel,
+      );
       return { $ref: `#/components/schemas/${component}` };
     }
     if (name && JSON_OBJECT_TYPES.has(name)) return { type: "object" };
@@ -727,12 +842,21 @@ export function javaTypeToSchema(
     }
     if (name && JSON_VALUE_TYPES.has(name)) return { type: "object" };
     if (name && WRAPPER_TYPES.has(name)) {
-      return args[0] ? javaTypeToSchema(args[0], index, depth, subst, fileRel) : {};
+      return args[0]
+        ? javaTypeToSchema(args[0], index, depth, subst, fileRel)
+        : {};
     }
     if (name) {
       const def = index.resolveDef(name, fileRel, node);
       if (def) {
-        const component = ensureComponentForDef(def, index, subst ?? new Map(), args, depth, new Set());
+        const component = ensureComponentForDef(
+          def,
+          index,
+          subst ?? new Map(),
+          args,
+          depth,
+          new Set(),
+        );
         return { $ref: `#/components/schemas/${component}` };
       }
     }
@@ -740,41 +864,69 @@ export function javaTypeToSchema(
   }
 
   const handleSimple = (name: string): JsonSchema => {
-    if (name === "URI" || name === "URL") return { type: "string", format: "uri" };
+    if (name === "URI" || name === "URL")
+      return { type: "string", format: "uri" };
     if (STRING_TYPES.has(name)) return { type: "string" };
     if (INTEGER_TYPES.has(name)) {
-      return name === "Long" || name === "long" || name === "BigInteger" || name === "AtomicLong"
+      return name === "Long" ||
+        name === "long" ||
+        name === "BigInteger" ||
+        name === "AtomicLong"
         ? { type: "integer", format: "int64" }
         : { type: "integer", format: "int32" };
     }
     if (NUMBER_TYPES.has(name)) return { type: "number" };
     if (BOOLEAN_TYPES.has(name)) return { type: "boolean" };
-    if (DATE_TIME_TYPES.has(name)) return { type: "string", format: "date-time" };
+    if (DATE_TIME_TYPES.has(name))
+      return { type: "string", format: "date-time" };
     if (DATE_TYPES.has(name)) return { type: "string", format: "date" };
     if (TIME_TYPES.has(name)) return { type: "string", format: "time" };
     if (JSON_OBJECT_TYPES.has(name)) return { type: "object" };
-    if (JSON_ARRAY_TYPES.has(name)) return { type: "array", items: { type: "object" } };
+    if (JSON_ARRAY_TYPES.has(name))
+      return { type: "array", items: { type: "object" } };
     if (JSON_VALUE_TYPES.has(name)) return { type: "object" };
     const def = index.resolveDef(name, fileRel, node);
     if (def) {
-      const component = ensureComponentForDef(def, index, undefined, [], depth, new Set());
+      const component = ensureComponentForDef(
+        def,
+        index,
+        undefined,
+        [],
+        depth,
+        new Set(),
+      );
       return { $ref: `#/components/schemas/${component}` };
     }
     return {};
   };
 
-  if (node.type === "scoped_identifier" || node.type === "scoped_type_identifier") {
+  if (
+    node.type === "scoped_identifier" ||
+    node.type === "scoped_type_identifier"
+  ) {
     const name = simpleTypeName(node);
     if (!name) return {};
     if (node.type === "scoped_type_identifier") {
       const fqn = node.text;
       const def = index.resolveFqn(fqn) ?? index.resolveDef(fqn, fileRel, node);
       if (def) {
-        const component = ensureComponentForDef(def, index, undefined, [], depth, new Set());
+        const component = ensureComponentForDef(
+          def,
+          index,
+          undefined,
+          [],
+          depth,
+          new Set(),
+        );
         return { $ref: `#/components/schemas/${component}` };
       }
     }
-    if (isStandardScalar(name) || JSON_OBJECT_TYPES.has(name) || JSON_ARRAY_TYPES.has(name) || JSON_VALUE_TYPES.has(name)) {
+    if (
+      isStandardScalar(name) ||
+      JSON_OBJECT_TYPES.has(name) ||
+      JSON_ARRAY_TYPES.has(name) ||
+      JSON_VALUE_TYPES.has(name)
+    ) {
       return handleSimple(name);
     }
     return {};
@@ -788,7 +940,10 @@ export function javaTypeToSchema(
 }
 
 /** Finds the first named annotation on a declaration (method/parameter). */
-export function findAnnotation(node: TsNode, names: Set<string>): TsNode | null {
+export function findAnnotation(
+  node: TsNode,
+  names: Set<string>,
+): TsNode | null {
   const mods = node.namedChildren.find((c) => c.type === "modifiers");
   if (!mods) return null;
   for (const mod of mods.namedChildren) {
@@ -832,7 +987,9 @@ function findAllStrings(node: TsNode): TsNode[] {
   const out: TsNode[] = [];
   const walk = (n: TsNode) => {
     if (n.type === "string_literal") {
-      const fragment = n.namedChildren.find((c) => c.type === "string_fragment");
+      const fragment = n.namedChildren.find(
+        (c) => c.type === "string_fragment",
+      );
       if (fragment) out.push(fragment);
     }
     for (const child of n.namedChildren) walk(child);
