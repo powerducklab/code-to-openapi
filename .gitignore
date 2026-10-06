@@ -14,3 +14,7 @@ obj/
 target/
 .gradle/
 build/
+
+# Third-party real-world API corpus checkpoints are cloned on demand from
+# pinned commits (see test-corpus/real-apis/fetch-corpus.sh); never vendor them.
+test-corpus/real-apis/repos/
