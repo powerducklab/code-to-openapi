@@ -1,3 +1,5 @@
+import {partialSchema} from '../core/partial-schema.js';
+import { mergeResponseVariants } from "../core/response-variants.js";
 /**
  * Django REST Framework framework pack (Python).
  *
@@ -240,10 +242,9 @@ function drfFieldSchema(call: TsNode, index: SerializerIndex, seen: Set<string>)
 
   if (name === "SerializerMethodField") return {};
   if (name === "ReadOnlyField") {
-    // ReadOnlyField renders the resolved `source` value. A dotted source such as
-    // `owner.username` terminates at a text attribute; without a richer type
-    // resolution DRF represents it as a scalar string.
-    return { type: "string", readOnly: true };
+    // ReadOnlyField passes the source value through without coercion. The
+    // spelling of a dotted source does not establish its runtime type.
+    return { readOnly: true };
   }
   if (name === "DecimalField") return decimalFieldSchema(call, index);
   if (["HyperlinkedIdentityField", "HyperlinkedRelatedField"].includes(name)) {
@@ -283,15 +284,46 @@ function serializerModel(cls: PyClass, index: SerializerIndex): PyClass | undefi
   return index.analysis.classes.find(candidate => candidate.file === binding.file && candidate.name === binding.name);
 }
 
+function inheritedModelFields(model: PyClass, index: SerializerIndex, seen = new Set<string>()): PyClass["fields"] {
+  const key = `${model.file}:${model.name}`;
+  if (seen.has(key)) return [];
+  const next = new Set(seen).add(key);
+  const fields = new Map<string, PyClass["fields"][number]>();
+  for (const base of model.bases) {
+    const binding = index.bindings.resolve(model.file, base.text);
+    const parent = binding && index.analysis.classes.find(candidate => candidate.file === binding.file && candidate.name === binding.name);
+    if (parent) for (const field of inheritedModelFields(parent, index, next)) fields.set(field.name, field);
+  }
+  for (const field of model.fields) fields.set(field.name, field);
+  return [...fields.values()];
+}
+
 function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<string, JsonSchemaLocal> {
   const meta = serializerMeta(cls);
   const model = serializerModel(cls, index);
   const result: Record<string, JsonSchemaLocal> = {};
-  const names = meta.get("fields") ? listElements(meta.get("fields")!).map(n => literalString(n)).filter((n): n is string => !!n) : [];
+  const fields = model ? inheritedModelFields(model, index) : [];
+  const fieldsNode = meta.get("fields");
+  let names = fieldsNode ? listElements(fieldsNode).map(n => literalString(n)).filter((n): n is string => !!n) : [];
   const readOnly = new Set(meta.get("read_only_fields") ? listElements(meta.get("read_only_fields")!).map(n => literalString(n)) : []);
   // Built-in Django models (auth.User, ...) are external to the scanned tree;
   // use their stock field contracts when the model class cannot be resolved.
   const external = model ? null : externalDjangoFields(cls, meta.get("model"), index);
+  if (literalString(fieldsNode ?? null) === "__all__" || (!fieldsNode && meta.has("exclude"))) {
+    if (model) {
+      names = fields.filter(field => field.default?.type === "call" && /(?:Field|ForeignKey)$/.test(callName(field.default.namedChildren[0] ?? null) ?? "")).map(field => field.name);
+      // Django supplies an automatic primary key only when none is declared.
+      if (!fields.some(field => field.default?.type === "call" && keywordArgument(field.default, "primary_key")?.type === "true")) names.unshift("id");
+      if (cls.bases.some(base => baseTail(base) === "HyperlinkedModelSerializer")) names.unshift("url");
+    } else if (external) names = Object.keys(external);
+    else index.untypedConstraints.add(cls.name);
+    const excluded = meta.get("exclude");
+    if (excluded) {
+      if (!["tuple", "list"].includes(excluded.type)) index.untypedConstraints.add(cls.name);
+      const excludedNames = new Set(listElements(excluded).map(node => literalString(node)));
+      names = names.filter(name => !excludedNames.has(name));
+    }
+  }
   const externalRequired = new Set<string>();
   for (const name of names) {
     if (name === "url" && cls.bases.some(b => baseTail(b) === "HyperlinkedModelSerializer")) {result[name] = {type: "string", format: "uri", readOnly: true}; continue;}
@@ -300,18 +332,19 @@ function modelSerializerFields(cls: PyClass, index: SerializerIndex): Record<str
       if (external[name].required) externalRequired.add(name);
       continue;
     }
-    const field = model?.fields.find(f => f.name === name);
+    const field = fields.find(f => f.name === name);
     if (!field?.default || field.default.type !== "call") {
       result[name] = name === "id" && model ? {type: "integer", readOnly: true} : {};
       continue;
     }
     const call = field.default;
     const kind = callName(call.namedChildren[0] ?? null) ?? "";
-    const schema = kind === "DecimalField" ? decimalFieldSchema(call, index) : {...(FIELD_SCHEMAS[kind] ?? (kind === "TextField" ? {type: "string"} : {}))};
+    const integerModelField = /^(?:BigAuto|SmallAuto|Auto|BigInteger|SmallInteger|PositiveInteger|PositiveBigInteger|PositiveSmallInteger)Field$/.test(kind);
+    const schema = kind === "DecimalField" ? decimalFieldSchema(call, index) : {...(FIELD_SCHEMAS[kind] ?? (kind === "TextField" ? {type: "string"} : integerModelField ? {type: "integer"} : {}))};
     const length = literalInteger(keywordArgument(call, "max_length"));
     if (length !== null) schema.maxLength = length;
     if (schema.type === "string" && keywordArgument(call, "blank")?.type !== "true") schema.minLength = 1;
-    if (readOnly.has(name) || keywordArgument(call, "primary_key")?.type === "true" || keywordArgument(call, "auto_now_add")?.type === "true" || keywordArgument(call, "auto_now")?.type === "true") schema.readOnly = true;
+    if (readOnly.has(name) || /^(?:BigAuto|SmallAuto|Auto)Field$/.test(kind) || keywordArgument(call, "editable")?.type === "false" || keywordArgument(call, "auto_now_add")?.type === "true" || keywordArgument(call, "auto_now")?.type === "true") schema.readOnly = true;
     if (keywordArgument(call, "null")?.type === "true" && typeof schema.type === "string") schema.type = [schema.type, "null"];
     const choices = keywordArgument(call, "choices");
     if (choices && ["list", "tuple"].includes(choices.type)) {
@@ -337,7 +370,7 @@ function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<s
   const meta = serializerMeta(cls);
   const model = serializerModel(cls, index);
   for (const [name, schema] of Object.entries(properties)) {
-    const value = model?.fields.find(f => f.name === name)?.default;
+    const value = (model ? inheritedModelFields(model, index) : []).find(f => f.name === name)?.default;
     if (index.externalRequired.get(cls.name)?.has(name)) required.push(name);
     if (schema.readOnly || (value?.type === "call" && !keywordArgument(value, "default") && keywordArgument(value, "blank")?.type !== "true" && keywordArgument(value, "null")?.type !== "true")) required.push(name);
   }
@@ -385,8 +418,9 @@ function buildSerializerSchema(cls: PyClass, index: SerializerIndex, seen: Set<s
     properties,
     ...(required.length ? { required: [...new Set(required)] } : {}),
   };
-  index.componentsByName.set(cls.name, schema);
-  return schema;
+  const result = index.untypedConstraints.has(cls.name) ? partialSchema(schema, "Serializer fields or constraints could not be fully resolved") : schema;
+  index.componentsByName.set(cls.name, result);
+  return result;
 }
 
 function buildSerializerIndex(analysis: PythonAnalysis): SerializerIndex {
@@ -440,7 +474,11 @@ export const drfPack: FrameworkPack<PythonAnalysis> = {
           f.content,
         ),
       );
-    return hasDep && hasFeature;
+    // Split requirements/Pipfile dependencies may not appear in the root
+    // manifest. A direct DRF import is framework evidence in its own right.
+    const hasDirectImport = ctx.index.files.some(f => f.language === "python"
+      && /^\s*(?:from\s+rest_framework(?:\.[\w.]+)?\s+import\b|import\s+rest_framework\b)/m.test(f.content));
+    return hasFeature && (hasDep || hasDirectImport);
   },
 
   extract(analysis, ctx) {
@@ -1082,6 +1120,114 @@ function buildActionRoute(
   };
 }
 
+/** Resolve a serializer in its source module; collisions are not contracts. */
+function declaredDRFSerializer(node: TsNode, file: string, index: SerializerIndex): JsonSchemaLocal | null {
+  const reference = node.type === "call" ? node.namedChildren[0] : node;
+  if (!reference) return null;
+  const symbol = index.bindings.resolve(file, reference.text);
+  if (!symbol || !index.classNames.has(symbol.name)) return null;
+  const definitions = index.analysis.classes.filter(cls => cls.name === symbol.name);
+  // The current serializer component index is keyed by name. Do not reuse a
+  // component from another module when more than one definition has that name.
+  if (definitions.length !== 1 || definitions[0]!.file !== symbol.file || !index.componentsByName.has(symbol.name)) return null;
+  const ref = { $ref: `#/components/schemas/${symbol.name}` };
+  return node.type === "call" && keywordArgument(node, "many")?.type === "true" ? { type: "array", items: ref } : ref;
+}
+
+function decoratedDRFRequest(fn: PyFunction, index: SerializerIndex): JsonSchemaLocal | null {
+  const imports = index.analysis.files.get(fn.file)?.imports;
+  for (const decorator of fn.decorators) {
+    const call = decorator.namedChildren[0], callee = call?.namedChildren[0];
+    if (call?.type !== "call" || callee?.type !== "identifier") continue;
+    const binding = imports?.get(callee.text);
+    if (binding?.module !== "drf_spectacular.utils" || binding.importedName !== "extend_schema") continue;
+    const request = keywordArgument(call, "request");
+    if (request) return declaredDRFSerializer(request, fn.file, index);
+  }
+  return null;
+}
+
+/** Read explicit DRF Response branches; unknown expressions remain visible. */
+function explicitDRFResponses(fn: PyFunction, serializers: SerializerIndex): { responses: RouteCandidate["responses"]; incomplete: boolean } {
+  const imports = serializers.analysis.files.get(fn.file)?.imports;
+  const isResponse = (callee: TsNode): boolean => {
+    if (callee.type === "identifier") {
+      const imported = imports?.get(callee.text);
+      return imported?.module === "rest_framework.response" && imported.importedName === "Response";
+    }
+    const base = callee.namedChildren[0], member = callee.namedChildren[1];
+    return callee.type === "attribute" && member?.text === "Response" && !!base && imports?.get(base.text)?.module === "rest_framework.response";
+  };
+  let incomplete = false;
+  const schema = (node: TsNode | null | undefined, depth = 0): JsonSchemaLocal => {
+    if (!node || depth > 16) { incomplete = true; return {}; }
+    if (node.type === "string" || node.type === "concatenated_string") return { type: "string" };
+    if (node.type === "integer") return { type: "integer" };
+    if (node.type === "float") return { type: "number" };
+    if (node.type === "true" || node.type === "false") return { type: "boolean" };
+    if (node.type === "none") return { type: "null" };
+    if (node.type === "dictionary") {
+      const properties: Record<string, JsonSchemaLocal> = {};
+      for (const pair of node.namedChildren) {
+        if (pair.type !== "pair") { incomplete = true; continue; }
+        const key = literalString(pair.namedChildren[0]);
+        if (key === null) { incomplete = true; continue; }
+        properties[key] = schema(pair.namedChildren[1], depth + 1);
+      }
+      return { type: "object", properties, required: Object.keys(properties) };
+    }
+    if (node.type === "list" || node.type === "tuple") {
+      const values = node.namedChildren.map(child => schema(child, depth + 1));
+      const unique = [...new Map(values.map(value => [JSON.stringify(value), value])).values()];
+      return { type: "array", items: unique.length === 1 ? unique[0] : unique.length ? { anyOf: unique } : {}, ...(values.length ? {} : { maxItems: 0 }) };
+    }
+    if (node.type === "attribute" && node.namedChildren[1]?.text === "data") {
+      let value = node.namedChildren[0];
+      if (value?.type === "identifier") {
+        const name = value.text;
+        const writes = findAll(fn.body, n => n.type === "assignment" && n.namedChildren[0]?.text === name);
+        const write = writes.length === 1 ? writes[0] : undefined;
+        const block = write?.parent?.type === "expression_statement" ? write.parent.parent : write?.parent;
+        if (write && write.startIndex < node.startIndex && block?.id === fn.body?.id) value = write.namedChildren.at(-1)!;
+      }
+      if (value?.type === "call") {
+        const declared = declaredDRFSerializer(value, fn.file, serializers);
+        if (declared) return declared;
+      }
+    }
+    incomplete = true;
+    return {};
+  };
+  const responses = new Map<string, RouteCandidate["responses"][number]>();
+  for (const ret of findAll(fn.body, n => n.type === "return_statement")) {
+    // Nested helper functions have their own return values.
+    let owner = ret.parent;
+    while (owner && owner.type !== "function_definition") owner = owner.parent;
+    if (owner?.id !== fn.node.id) continue;
+    const call = ret.namedChildren[0], callee = call?.namedChildren[0];
+    if (call?.type !== "call" || !callee || !isResponse(callee)) { incomplete = true; continue; }
+    const statusNode = keywordArgument(call, "status") ?? positionalArguments(call)[1];
+    let status = "200";
+    if (statusNode) {
+      const code = literalInteger(statusNode);
+      const statusAlias = statusNode.type === "attribute" ? statusNode.namedChildren[0]?.text : undefined;
+      const binding = statusAlias ? imports?.get(statusAlias) : undefined;
+      const knownStatus = binding?.module === "rest_framework" && binding.importedName === "status" || binding?.module === "rest_framework.status";
+      const named = knownStatus ? /^HTTP_(\d{3})_/.exec(statusNode.namedChildren[1]?.text ?? "")?.[1] : undefined;
+      status = code !== null && code >= 100 && code <= 599 ? String(code) : named ?? "default";
+      if (status === "default") incomplete = true;
+    }
+    const value = keywordArgument(call, "data") ?? positionalArguments(call)[0];
+    const response: RouteCandidate["responses"][number] = {
+      statusCode: status, description: "", confidence: "medium",
+      content: ["204", "304"].includes(status) ? [] : [{ mediaType: "application/json", schema: value ? schema(value) : { type: "null" } }],
+    };
+    const prior = responses.get(status);
+    responses.set(status, prior ? mergeResponseVariants(prior, response) : response);
+  }
+  return { responses: [...responses.values()], incomplete };
+}
+
 function buildClassMethodRoute(
   input: {
     method: string;
@@ -1094,7 +1240,7 @@ function buildClassMethodRoute(
   const gaps = new Set<GapCode>();
   const parameters = pathParams(input.path);
   const origin: SourceLocation = {
-    file: input.file,
+    file: input.fn?.file ?? input.cls.file,
     line: (input.fn?.node ?? input.cls.node).startPosition.row + 1,
     symbol: `${input.cls.name}.${input.method}`,
   };
@@ -1104,16 +1250,24 @@ function buildClassMethodRoute(
     ? { $ref: `#/components/schemas/${input.serializerName}` }
     : null;
 
-  if ((input.method === "post" || input.method === "put" || input.method === "patch") && ref) {
+  const requestSchema = input.fn ? decoratedDRFRequest(input.fn, input.serializers) ?? ref : ref;
+  if ((input.method === "post" || input.method === "put" || input.method === "patch") && requestSchema) {
     requestBody = {
       required: true,
       confidence: "high",
-      content: [{ mediaType: "application/json", schema: ref }],
+      content: [{ mediaType: "application/json", schema: requestSchema }],
     };
   }
 
   let responses: RouteCandidate["responses"];
-  if (input.method === "delete") {
+  const explicit = input.fn ? explicitDRFResponses(input.fn, input.serializers) : undefined;
+  if (explicit?.responses.length) {
+    responses = explicit.responses;
+    if (explicit.incomplete) gaps.add("response-schema-unknown");
+  } else if (input.fn) {
+    responses = [{ statusCode: "default", description: "Response contract is unresolved", confidence: "low", content: [{mediaType: "application/json", schema: {}}] }];
+    gaps.add("response-schema-unknown");
+  } else if (input.method === "delete") {
     responses = [{ statusCode: "204", description: "No Content", confidence: "high", content: [] }];
   } else {
     responses = [

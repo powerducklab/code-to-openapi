@@ -38,7 +38,7 @@ import {
   localGoTypeToSchema as fiberTypeSchema,
   type GoModelIndex,
 } from "../lang/go/schema.js";
-import { resolveGoPackageFunction } from "../lang/go/symbols.js";
+import { resolveGoCall, resolveGoPackageFunction } from "../lang/go/symbols.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
 import {
   childrenOfType,
@@ -576,7 +576,7 @@ export const fiberPack: FrameworkPack<GoAnalysis> = {
           const owner = analysis.files.get(site.origin.file);
           fn =
             resolveGoPackageFunction(analysis, owner, qualifier, name) ??
-            analysis.methods.find((m) => m.name === name) ??
+            resolveGoCall(handlerNode, analysis) ??
             null;
         }
       }

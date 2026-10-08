@@ -2,6 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Corpus checkouts are scan inputs, not this package's executable tests.
+    include: ["test/**/*.test.ts"],
     // TypeScript analysis of real-world multi-file fixtures can exceed the
     // 5s default under concurrent load; give each test a generous budget.
     testTimeout: 20000,

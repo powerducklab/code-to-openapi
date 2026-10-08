@@ -130,6 +130,8 @@ export interface IndexOptions {
   ignore?: readonly string[];
   includeTests?: boolean;
   maxFileBytes?: number;
+  maxFiles?: number;
+  maxTotalBytes?: number;
 }
 
 interface IgnoreLike {
@@ -156,6 +158,15 @@ function loadGitIgnore(root: string): IgnoreLike {
  */
 export function indexProject(root: string, options: IndexOptions = {}): FileIndex {
   const maxFileBytes = options.maxFileBytes ?? 2 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0) throw new Error("maxFileBytes must be a positive safe integer");
+  const maxFiles = options.maxFiles ?? 10_000;
+  const maxTotalBytes = options.maxTotalBytes ?? 64 * 1024 * 1024;
+  for (const [name, value] of Object.entries({maxFiles,maxTotalBytes})) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe integer`);
+  }
+  let totalBytes = 0;
+  const unresolved: NonNullable<FileIndex["unresolved"]> = [];
+  const omitted = (path: string, message: string) => unresolved.push({reason:"source-skipped", message, origin:{file:path || "."}});
   const ig = loadGitIgnore(root);
   if (options.ignore) ig.add(options.ignore);
 
@@ -166,6 +177,7 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
     try {
       entries = readdirSync(dir, { withFileTypes: true }) as Dirent[];
     } catch {
+      omitted(relative(root, dir).split("\\").join("/"), "Source directory could not be read; scan coverage is incomplete");
       return;
     }
 
@@ -210,18 +222,37 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
       try {
         stat = statSync(absolute);
       } catch {
+        omitted(rel, "Source file metadata could not be read");
         continue;
       }
-      if (stat.size > maxFileBytes) continue;
+      if (stat.size > maxFileBytes) {
+        omitted(rel, `Source file exceeds maxFileBytes (${stat.size} > ${maxFileBytes})`);
+        continue;
+      }
 
+      if (files.length >= maxFiles) throw new Error(`Source file limit exceeded (maxFiles=${maxFiles}); narrow the scan or increase the limit`);
+      if (totalBytes + stat.size > maxTotalBytes) throw new Error(`Source byte limit exceeded (maxTotalBytes=${maxTotalBytes}); narrow the scan or increase the limit`);
       let content: string;
       try {
-        content = readFileSync(absolute, "utf8");
+        const raw = readFileSync(absolute);
+        if (raw[0] === 0xff && raw[1] === 0xfe) {
+          if ((raw.length - 2) % 2) { omitted(rel, "Source file has an incomplete UTF-16 code unit"); continue; }
+          content = raw.subarray(2).toString("utf16le");
+        }
+        else if (raw[0] === 0xfe && raw[1] === 0xff) {
+          if ((raw.length - 2) % 2) { omitted(rel, "Source file has an incomplete UTF-16 code unit"); continue; }
+          content = Buffer.from(raw.subarray(2)).swap16().toString("utf16le");
+        } else content = raw.toString("utf8");
       } catch {
+        omitted(rel, "Source file could not be read");
         continue;
       }
-      if (content.includes("\u0000")) continue; // binary guard
+      if (content.includes("\u0000")) {
+        omitted(rel, "Source file contains binary data and could not be parsed");
+        continue;
+      }
 
+      totalBytes += stat.size;
       files.push({
         path: rel,
         absolutePath: absolute,
@@ -237,5 +268,5 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
 
   files.sort((a, b) => a.path.localeCompare(b.path));
   const byPath = new Map(files.map((file) => [file.path, file]));
-  return { files, byPath };
+  return { files, byPath, ...(unresolved.length ? {unresolved} : {}) };
 }

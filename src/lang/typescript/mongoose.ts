@@ -1,3 +1,4 @@
+import {collectRequestProvenance, requestPath, symbolDeclaration, externalReference} from "./requestProvenance.js";
 import type { JsonSchema } from "../../core/types.js";
 import type { TsAnalysis } from "./index.js";
 
@@ -48,6 +49,7 @@ interface ToJsonTransform {
 
 interface MongooseModel {
   name: string;
+  sourceSchema?: SchemaExpr;
   fields: Map<string, MongooseField>;
   /** Top-level schema options that change the serialized document. */
   idField: boolean;
@@ -490,6 +492,7 @@ function buildModel(analysis: TsAnalysis, index: MongooseIndex, name: string, sc
   const fields = new Map<string, MongooseField>();
   const model: MongooseModel = {
     name,
+    sourceSchema: schemaExpr,
     fields,
     idField: true,
     versionKey: "__v",
@@ -1057,6 +1060,15 @@ function resolveModelName(analysis: TsAnalysis, index: MongooseIndex, ident: any
   // even when `mongoose` is not installed and the checker reports the import as
   // unresolved (any). Covers default/named imports, require() and local aliases.
   const source = ident.getSourceFile();
+  const lexical = symbolDeclaration(analysis, ident);
+  if (lexical && ts.isBindingElement(lexical)) {
+    const init = lexical.parent?.parent?.initializer;
+    if (init && ts.isCallExpression(init) && ts.isIdentifier(init.expression) && init.expression.text === 'require' && init.arguments[0] && ts.isStringLiteralLike(init.arguments[0])) {
+      const imported = (lexical.propertyName ?? lexical.name).text;
+      const model = modelFromModule(analysis, index, init.arguments[0].text, file, 'named', imported, seen);
+      if (model) return model;
+    }
+  }
   const syntactic = resolveBindingSyntactically(analysis, index, source, ident.text, seen);
   if (syntactic) return syntactic;
 
@@ -1550,6 +1562,28 @@ function projectInstanceDoc(
   return doc;
 }
 
+/** Custom instance methods/plugins may replace save; don't assume its native
+ * return contract when the schema is extended by code we haven't interpreted. */
+function hasInstanceExtensions(analysis: TsAnalysis, model: MongooseModel): boolean {
+  const {ts} = analysis;
+  const schema = model.sourceSchema;
+  const source = schema && analysis.sourceByPath.get(schema.file);
+  if (!source || !schema) return true;
+  if (schema.options && ts.isObjectLiteralExpression(schema.options) &&
+      schema.options.properties.some((p: any) => propertyName(ts, p) === 'methods')) return true;
+  let extended = false;
+  const visit = (node: any): void => {
+    if (extended) return;
+    if (ts.isPropertyAccessExpression(node) && ['methods', 'method', 'plugin', 'loadClass'].includes(node.name.text)) {
+      const decl = symbolDeclaration(analysis, node.expression);
+      if (decl && ts.isVariableDeclaration(decl) && decl.initializer?.arguments?.[0] === schema.definition) extended = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return extended;
+}
+
 /**
  * Project a Mongoose model call to its serialized response schema. Returns
  * undefined when the receiver is not a registered model or the result cannot
@@ -1571,6 +1605,19 @@ export function mongooseProjection(analysis: TsAnalysis, node: any): JsonSchema 
   }
 
   if (!ts.isCallExpression(node)) return undefined;
+  // Inline construction has no identifier for collectChain to resolve:
+  // `await new ImportedModel(input).save()` returns the persisted document.
+  // Accept only the native zero-argument form and a registered model receiver.
+  if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "save" && node.arguments.length === 0) {
+    let receiver = node.expression.expression;
+    while (ts.isParenthesizedExpression(receiver)) receiver = receiver.expression;
+    if (ts.isNewExpression(receiver) && (receiver.arguments?.length ?? 0) <= 1) {
+      const ident = unwrapRoot(ts, receiver.expression);
+      const name = ident && resolveModelName(analysis, index, ident);
+      const model = name && index.byName.get(name);
+      if (model && !hasInstanceExtensions(analysis, model)) return projectInstanceDoc(analysis, model, receiver.arguments?.[0], enclosingFunction(ts, node));
+    }
+  }
   const chain = collectChain(ts, node);
   if (!chain) return undefined;
   const rootIdent = unwrapRoot(ts, chain.root);
@@ -1846,4 +1893,193 @@ export function inferMongooseRequestBody(
 
   if (!sawWrite || fieldTypes.size === 0) return undefined;
   return { fieldTypes, modelRequired, wholeBodyUpdate };
+}
+
+/** Follow route-local request loaders and a proven model instance method. This
+ * intentionally does not search for a same-named method on unrelated models. */
+export function mongooseInstanceMethodProjection(
+  analysis: TsAnalysis, expression: any, handler: any, loaders: any[], middleware: any[] = [], onUnresolvedFailure?: () => void,
+): JsonSchema | undefined {
+  const {ts, checker} = analysis;
+  if (!ts.isCallExpression(expression) || !ts.isPropertyAccessExpression(expression.expression) || expression.arguments.length) return;
+  const index = buildIndex(analysis);
+  const flow = collectRequestProvenance(analysis, handler, loaders, middleware);
+  if (flow.unresolvedFailures) onUnresolvedFailure?.();
+  const declaration = (node: any): any => symbolDeclaration(analysis, node);
+  const method = (model: MongooseModel, name: string, statics: boolean): any => {
+    const schema = model.sourceSchema;
+    const source = schema && analysis.sourceByPath.get(schema.file);
+    if (!source || !schema?.varName) return;
+    const matches: any[] = [];
+    const isSchema = (node: any): boolean => {
+      const decl = declaration(node);
+      return decl && ts.isVariableDeclaration(decl) && decl.initializer?.arguments?.[0] === schema.definition;
+    };
+    const pick = (obj: any): void => {
+      if (!obj || !ts.isObjectLiteralExpression(obj)) return;
+      for (const prop of obj.properties) if (propertyName(ts, prop) === name) {
+        const fn = ts.isMethodDeclaration(prop) ? prop : ts.isPropertyAssignment(prop) ? prop.initializer : undefined;
+        if (fn && ts.isFunctionLike(fn) && fn.body) matches.push(fn);
+      }
+    };
+    for (const stmt of source.statements) {
+      if (!ts.isExpressionStatement(stmt)) continue;
+      const expr = stmt.expression;
+      if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(expr.left) && isSchema(expr.left.expression) && expr.left.name.text === (statics ? 'statics' : 'methods')) pick(expr.right);
+      if (ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) && isSchema(expr.expression.expression) && expr.expression.name.text === (statics ? 'static' : 'method')) {
+        if (expr.arguments.length === 1) pick(expr.arguments[0]);
+        else if (ts.isStringLiteralLike(expr.arguments[0]) && expr.arguments[0].text === name && expr.arguments[1]?.body) matches.push(expr.arguments[1]);
+      }
+    }
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const ownNodes = (fn: any, predicate: (node: any) => boolean): any[] => {
+    const result: any[] = [];
+    const walk = (node: any): void => {
+      if (node !== fn && ts.isFunctionLike(node)) return;
+      if (predicate(node)) result.push(node);
+      ts.forEachChild(node, walk);
+    };
+    walk(fn); return result;
+  };
+  const modelOf = (node: any, self?: MongooseModel, seen = new Set<any>()): MongooseModel | undefined => {
+    if (!node || seen.has(node) || seen.size > 48) return;
+    const next = new Set([...seen, node]);
+    if (ts.isAwaitExpression(node) || ts.isParenthesizedExpression(node)) return modelOf(node.expression, self, next);
+    const sameModel = (values: any[]): MongooseModel | undefined => {
+      const models = values.map(value => modelOf(value, self, next));
+      return models.length && models[0] && models.every(m => m === models[0]) ? models[0] : undefined;
+    };
+    const key = requestPath(analysis, flow, node);
+    if (key && flow.writes.has(key)) {
+      if ([...flow.writes].some(([parent, values]) => key.startsWith(`${parent}.`) && values.length > 1)) return;
+      return sameModel(flow.writes.get(key)!);
+    }
+    if (ts.isIdentifier(node)) {
+      const decl = declaration(node);
+      if (decl && ts.isParameter(decl) && ownNodes(decl.parent, n => ts.isBinaryExpression(n) && ts.isIdentifier(n.left) && declaration(n.left) === decl && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment).length) return;
+      if (flow.values.has(decl)) return sameModel(flow.values.get(decl)!);
+      if (decl && ts.isParameter(decl)) {
+        const callback = decl.parent;
+        const call = callback.parent;
+        if (ts.isCallExpression(call) && call.arguments[0] === callback && ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === 'then' && callback.parameters[0] === decl) return modelOf(call.expression.expression, self, next);
+      }
+      if (!decl || !ts.isVariableDeclaration(decl)) return;
+      let fn = decl.parent;
+      while (fn && !ts.isFunctionLike(fn) && !ts.isSourceFile(fn)) fn = fn.parent;
+      const values = decl.initializer ? [decl.initializer] : [];
+      if (fn) for (const assignment of ownNodes(fn, n => ts.isBinaryExpression(n) && ts.isIdentifier(n.left) && declaration(n.left) === decl)) {
+        if (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
+        values.push(assignment.right);
+      }
+      const models = values.map(value => modelOf(value, self, next));
+      return models.length && models[0] && models.every(m => m === models[0]) ? models[0] : undefined;
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const receiver = node.expression.expression;
+      const name = node.expression.name.text;
+      if (name === 'exec' && node.arguments.length === 0) return modelOf(receiver, self, next);
+      if (name === 'save' && node.arguments.length === 0) {
+        const instance = modelOf(receiver, self, next);
+        if (instance && !method(instance, 'save', false)) return instance;
+      }
+      if (name === 'assign' && ts.isIdentifier(receiver) && receiver.text === 'Object' && node.arguments.length >= 2 && !(checker.getSymbolAtLocation(receiver)?.declarations ?? []).some((decl: any) => analysis.isProjectFile(decl.getSourceFile().fileName))) {
+        const dataOnly = (value: any, seenValues = new Set<any>()): boolean => {
+          if (!value || seenValues.has(value) || seenValues.size > 24) return false;
+          const more = new Set([...seenValues, value]);
+          if (requestPath(analysis, flow, value) === '.body') return true;
+          if (ts.isIdentifier(value)) return dataOnly(declaration(value)?.initializer, more);
+          if (ts.isCallExpression(value)) {
+            const ref = externalReference(analysis, value.expression);
+            return ref?.module === 'lodash' && ['omit', 'pick'].includes(ref.members.join('.')) && dataOnly(value.arguments[0], more);
+          }
+          if (ts.isObjectLiteralExpression(value)) return value.properties.every((p: any) => ts.isPropertyAssignment(p) && (ts.isStringLiteralLike(p.initializer) || ts.isNumericLiteral(p.initializer) || [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(p.initializer.kind)));
+          return false;
+        };
+        if (node.arguments.slice(1).every((value: any) => dataOnly(value))) return modelOf(node.arguments[0], self, next);
+        return;
+      }
+      const modelName = ts.isIdentifier(receiver) ? resolveModelName(analysis, index, receiver) : undefined;
+      const model = receiver.kind === ts.SyntaxKind.ThisKeyword ? self : modelName ? index.byName.get(modelName) : undefined;
+      if (!model) return;
+      // Projection/populate/lean chains require their own document semantics.
+      if ((name === 'findById' || name === 'findOne') && node.arguments.length === 1) return model;
+      const fn = method(model, name, true);
+      if (!fn) return;
+      const returns = ownNodes(fn, n => ts.isReturnStatement(n));
+      const models = returns.map(ret => modelOf(ret.expression, model, next));
+      return models.length && models[0] && models.every(m => m === models[0]) ? models[0] : undefined;
+    }
+    return;
+  };
+  const model = modelOf(expression.expression.expression);
+  if (!model) return;
+  const fn = method(model, expression.expression.name.text, false);
+  if (!fn || !ts.isBlock(fn.body)) return;
+  // Interpret a pure field-copy projection, including a literal-key forEach.
+  // Every statement must be accounted for; mutations/calls we do not understand
+  // reject the projection rather than exposing the entire database entity.
+  const arrays = new Map<any, string[]>();
+  const objects = new Map<any, {properties: Record<string, JsonSchema>; required: string[]}>();
+  const base = baseDocument(model);
+  const schemaOptions = model.sourceSchema?.options ? objectRecord(analysis, model.sourceSchema.options) : {};
+  const field = (key: string): {schema: JsonSchema; required: boolean} | undefined => {
+    if (key === 'id' && model.idField && schemaOptions.id !== false) return {schema: {type:'string'}, required:true};
+    const schema = base.properties[key];
+    if (!schema) return;
+    return {schema, required:base.required.includes(key)};
+  };
+  const objectProjection = (value: any): {properties: Record<string, JsonSchema>; required: string[]} | undefined => {
+    if (!value || !ts.isObjectLiteralExpression(value)) return;
+    const result: {properties: Record<string, JsonSchema>; required: string[]} = {properties: {}, required: []};
+    for (const prop of value.properties) {
+      if (!ts.isPropertyAssignment(prop) || ts.isComputedPropertyName(prop.name)) return;
+      const name = propertyName(ts, prop);
+      if (name === undefined) return;
+      const input = prop.initializer;
+      const key = ts.isPropertyAccessExpression(input) && input.expression.kind === ts.SyntaxKind.ThisKeyword ? input.name.text : undefined;
+      if (key === undefined) return;
+      const copied = field(key); if (!copied) return;
+      result.properties[name] = copied.schema;
+      if (copied.required) result.required.push(name);
+    }
+    return result;
+  };
+  for (const stmt of fn.body.statements) {
+    if (ts.isVariableStatement(stmt)) {
+      if (!(stmt.declarationList.flags & ts.NodeFlags.Const)) return;
+      for (const decl of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) return;
+        const value = decl.initializer;
+        if (ts.isArrayLiteralExpression(value) && value.elements.every((e:any)=>ts.isStringLiteralLike(e))) arrays.set(decl, value.elements.map((e:any)=>e.text));
+        else if (ts.isObjectLiteralExpression(value)) {
+          const projected = objectProjection(value); if (!projected) return;
+          objects.set(decl, projected);
+        }
+        else return;
+      }
+    } else if (ts.isExpressionStatement(stmt) && ts.isCallExpression(stmt.expression)) {
+      const call = stmt.expression;
+      if (!ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== 'forEach' || call.arguments.length !== 1) return;
+      const keys = arrays.get(declaration(call.expression.expression));
+      const callback = call.arguments[0];
+      if (!keys || !ts.isArrowFunction(callback) || callback.parameters.length !== 1 || !ts.isIdentifier(callback.parameters[0].name)) return;
+      const body = ts.isBlock(callback.body) && callback.body.statements.length === 1 && ts.isExpressionStatement(callback.body.statements[0]) ? callback.body.statements[0].expression : callback.body;
+      if (!ts.isBinaryExpression(body) || body.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isElementAccessExpression(body.left) || !ts.isElementAccessExpression(body.right) || body.right.expression.kind !== ts.SyntaxKind.ThisKeyword) return;
+      const param = callback.parameters[0];
+      if (declaration(body.left.argumentExpression) !== param || declaration(body.right.argumentExpression) !== param) return;
+      const target = objects.get(declaration(body.left.expression));
+      if (!target) return;
+      for (const key of keys) {
+        const value = field(key); if (!value) return;
+        target.properties[key] = value.schema;
+        if (value.required && !target.required.includes(key)) target.required.push(key);
+      }
+    } else if (ts.isReturnStatement(stmt) && stmt === fn.body.statements.at(-1)) {
+      const result = objects.get(declaration(stmt.expression)) ?? objectProjection(stmt.expression);
+      if (!result || !Object.keys(result.properties).length) return;
+      return {type:'object',properties:result.properties,...(result.required.length ? {required:result.required} : {})};
+    } else return;
+  }
+  return;
 }

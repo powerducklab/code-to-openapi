@@ -1,5 +1,32 @@
 import type {TsAnalysis} from './index.js';
 
+/** Lexical fallback for JS references for which TypeScript supplies no symbol.
+ * Search only enclosing scopes; never match a declaration in another function. */
+export function localValueDeclaration(analysis:TsAnalysis,node:any):any|undefined {
+ const {ts,checker}=analysis;
+ if(!node||!ts.isIdentifier(node))return;
+ const symbol=ts.isShorthandPropertyAssignment(node.parent)?checker.getShorthandAssignmentValueSymbol(node.parent):checker.getSymbolAtLocation(node);
+ const declaration=symbol?.valueDeclaration??symbol?.declarations?.[0];
+ if(declaration)return declaration;
+ const binding=(decl:any):any=>{
+  if(ts.isIdentifier(decl.name))return decl.name.text===node.text?decl:undefined;
+  if(decl.name&&(ts.isObjectBindingPattern(decl.name)||ts.isArrayBindingPattern(decl.name)))for(const el of decl.name.elements){if(ts.isBindingElement(el)){const found=binding(el);if(found)return found}}
+ };
+ let scope=node.parent;
+ while(scope){
+  if(ts.isFunctionLike(scope)){for(const param of scope.parameters??[]){const found=binding(param);if(found)return found}}
+  if(ts.isBlock(scope)||ts.isSourceFile(scope)){
+   const matches:any[]=[];
+   for(const stmt of scope.statements){
+    if(ts.isVariableStatement(stmt))for(const decl of stmt.declarationList.declarations){const found=binding(decl);if(found)matches.push(found)}
+    if(ts.isFunctionDeclaration(stmt)&&stmt.name?.text===node.text)matches.push(stmt);
+   }
+   if(matches.length)return matches.length===1?matches[0]:undefined;
+  }
+  scope=scope.parent;
+ }
+}
+
 /** Resolve lexical/imported constants and object members without running code.
  * Only project-local CommonJS modules are followed. Ambiguous exports stay opaque. */
 export function resolveStaticValue(analysis:TsAnalysis,node:any,seen=new Set<any>(),depth=0):any|undefined {
@@ -21,6 +48,15 @@ export function resolveStaticValue(analysis:TsAnalysis,node:any,seen=new Set<any
    const {left,right}=child.expression;
    if(name==='default'&&left.getText()==='module.exports')matches.push(right);
    if(name!=='default'&&['exports.'+name,'module.exports.'+name].includes(left.getText()))matches.push(right);
+   if(name!=='default'&&left.getText()==='module.exports'){
+    const object=follow(right);
+    if(object&&ts.isObjectLiteralExpression(object))for(const prop of object.properties){
+     if(prop.name?.text!==name)continue;
+     if(ts.isPropertyAssignment(prop))matches.push(prop.initializer);
+     else if(ts.isShorthandPropertyAssignment(prop))matches.push(prop.name);
+     else if(ts.isMethodDeclaration(prop))matches.push(prop);
+    }
+   }
   });
   return matches.length===1?follow(matches[0]):undefined;
  };
@@ -29,8 +65,15 @@ export function resolveStaticValue(analysis:TsAnalysis,node:any,seen=new Set<any
   let symbol=ts.isShorthandPropertyAssignment(node.parent)?checker.getShorthandAssignmentValueSymbol(node.parent):checker.getSymbolAtLocation(node);
   const local=(symbol?.declarations??[]).find((d:any)=>ts.isVariableDeclaration(d)&&d.initializer);
   if(local)return follow(local.initializer);
+  const localBinding=localValueDeclaration(analysis,node);
+  if(localBinding&&ts.isBindingElement(localBinding)){
+    const initializer=localBinding.parent?.parent?.initializer;
+    const source=initializer&&moduleSource(initializer);
+    const name=(localBinding.propertyName??localBinding.name).text;
+    if(source&&name)return exported(source,name);
+  }
   if(symbol?.flags&ts.SymbolFlags.Alias)symbol=checker.getAliasedSymbol(symbol);
-  const declaration=symbol?.valueDeclaration??symbol?.declarations?.[0];
+  const declaration=symbol?.valueDeclaration??symbol?.declarations?.[0]??localBinding;
   if(!declaration)return;
   if(ts.isBindingElement(declaration)){
     const initializer=declaration.parent?.parent?.initializer;
@@ -51,7 +94,8 @@ export function resolveStaticValue(analysis:TsAnalysis,node:any,seen=new Set<any
  if(ts.isPropertyAccessExpression(node)||ts.isElementAccessExpression(node)){
   const name=ts.isPropertyAccessExpression(node)?node.name.text:ts.isStringLiteralLike(node.argumentExpression)?node.argumentExpression.text:undefined;
   if(!name)return;
-  const source=moduleSource(node.expression);
+  const receiverDecl=ts.isIdentifier(node.expression)?localValueDeclaration(analysis,node.expression):undefined;
+  const source=moduleSource(node.expression)??(receiverDecl&&ts.isVariableDeclaration(receiverDecl)&&receiverDecl.initializer?moduleSource(receiverDecl.initializer):undefined);
   if(source){const member=exported(source,name);if(member)return member;}
   const base=follow(node.expression);
   if(base&&ts.isObjectLiteralExpression(base)){

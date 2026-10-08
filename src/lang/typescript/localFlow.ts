@@ -1,3 +1,6 @@
+import {externalReference} from './requestProvenance.js';
+import {partialSchema} from '../../core/partial-schema.js';
+import {sequelizeProjection} from './sequelize.js';
 import type {JsonSchema} from '../../core/types.js';
 import type {TsAnalysis} from './index.js';
 import {typeToSchema} from './typeSchema.js';
@@ -87,25 +90,21 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
   }
   if(ts.isAwaitExpression(node)||ts.isParenthesizedExpression(node)||ts.isNonNullExpression(node))return infer(node.expression,next,depth+1);
   if(ts.isAsExpression(node))return fill(infer(node.expression,next,depth+1),fallback(node),0);
- // Ternary `cond ? a : b`: union the proven branches. When both branches prove
- // the same primitive (e.g. boolean), collapse to that primitive.
+ // Compare complete schemas, not merely their top-level type. Two object
+ // branches can expose different fields; an unknown branch must stay unknown.
+ const unionBranches=(a:JsonSchema|undefined,b:JsonSchema|undefined):JsonSchema|undefined=>{
+  if(!a&&!b)return undefined;
+  onEvidence?.();
+  if(!a||!b)return partialSchema(a??b!, 'unresolved-return-branch', true);
+  if(JSON.stringify(a)===JSON.stringify(b))return a;
+  const primitive = a.type === b.type && typeof a.type === "string" && !["object", "array"].includes(a.type);
+  return {...(primitive ? {type:a.type} : {}),anyOf:[a,b]};
+ };
  if(ts.isConditionalExpression(node)){
-  const a=infer(node.whenTrue,next,depth+1);
-  const b=infer(node.whenFalse,next,depth+1);
-  if(a||b){
-   onEvidence?.();
-   if(a&&b&&a.type===b.type&&!Array.isArray(a.type))return a;
-   const branches=[a,b].filter(Boolean) as JsonSchema[];
-   return branches.length===1?branches[0]:{anyOf:branches};
-  }
+  return unionBranches(infer(node.whenTrue,next,depth+1),infer(node.whenFalse,next,depth+1));
  }
- // Null coalescing / logical fallback `a ?? b`, `a || b`: union both sides.
  if(ts.isBinaryExpression(node)&&(node.operatorToken.kind===ts.SyntaxKind.QuestionQuestionToken||node.operatorToken.kind===ts.SyntaxKind.BarBarToken)){
-  const a=infer(node.left,next,depth+1);
-  const b=infer(node.right,next,depth+1);
-  if(a&&b&&a.type===b.type&&!Array.isArray(a.type))return a;
-  const branches=[a,b].filter(Boolean) as JsonSchema[];
-  if(branches.length)return branches.length===1?branches[0]:{anyOf:branches};
+  return unionBranches(infer(node.left,next,depth+1),infer(node.right,next,depth+1));
  }
   if(ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)){
    const property=ts.isPropertyAccessExpression(node)?node.name.text:node.argumentExpression&&ts.isStringLiteralLike(node.argumentExpression)?node.argumentExpression.text:undefined;
@@ -138,6 +137,13 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
    }
   }
   if(ts.isCallExpression(node)){
+   const external = externalReference(analysis, node.expression);
+   if (external?.module === 'jsonwebtoken' && external.members.length === 1 && external.members[0] === 'sign' &&
+       node.arguments.length >= 2 && node.arguments.length <= 3 &&
+       (!node.arguments[2] || ts.isObjectLiteralExpression(resolveStaticValue(analysis, node.arguments[2]) ?? node.arguments[2]))) {
+    onEvidence?.(); return {type:'string'};
+   }
+
    if(ts.isPropertyAccessExpression(node.expression)){
     const name=node.expression.name.text, receiver=node.expression.expression;
     // Only the native Array.map declaration establishes an array result.
@@ -187,7 +193,6 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     }
     const module=resolveStaticValue(analysis,receiver);
     const packageName=module&&ts.isCallExpression(module)&&module.expression.getText()==='require'?module.arguments[0]?.text:undefined;
-    if(packageName==='jsonwebtoken'&&name==='sign'&&node.arguments.length>=2&&node.arguments.length<=3&&(!node.arguments[2]||ts.isObjectLiteralExpression(resolveStaticValue(analysis,node.arguments[2])??node.arguments[2]))){onEvidence?.();return {type:'string'};}
     if(packageName==='lodash'&&['omit','pick'].includes(name)){
      const object=infer(node.arguments[0],next,depth+1);const shape=object&&resolve(object);
      const keys=node.arguments.length===2&&ts.isArrayLiteralExpression(node.arguments[1])?node.arguments[1].elements:node.arguments.slice(1);
@@ -208,6 +213,7 @@ export function localReturnSchema(analysis: TsAnalysis, method: any, fallback: (
     }
    }
    const projection=prismaProjection(analysis,node);if(projection){onEvidence?.();return projection;}
+   const sequelize=sequelizeProjection(analysis,node);if(sequelize){onEvidence?.();return sequelize;}
    const mongoose=mongooseProjection(analysis,node);if(mongoose){onEvidence?.();return mongoose;}
    const fn=localImplementation(analysis,node);
    if(fn){

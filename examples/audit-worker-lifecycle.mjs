@@ -19,7 +19,7 @@ for(let round=0;round<3;round++){
    const id=`${round}-${framework}`;
    const message=await new Promise((accept,reject)=>{
     const cleanup=()=>{clearTimeout(timer);worker.off('message',received);worker.off('error',failed);worker.off('exit',exited);};
-    const received=value=>{if(value.id===id){cleanup();accept(value);}};
+    const received=value=>{if(value.id===id && (value.result || value.error)){cleanup();accept(value);}};
     const failed=error=>{cleanup();reject(error);};
     const exited=code=>failed(new Error(`Worker exited ${code}`));
     const timer=setTimeout(()=>failed(new Error('Worker scan timeout')),60000);

@@ -492,7 +492,7 @@ function collectImports(root: TsNode): { explicit: Map<string, string>; wildcard
   const explicit = new Map<string, string>();
   const wildcards: string[] = [];
   for (const imp of findAll(root, (n) => n.type === "import_declaration")) {
-    const scoped = findFirst(imp, (n) => n.type === "scoped_identifier");
+    const scoped = imp.namedChildren.find(n => n.type === "scoped_identifier" || n.type === "identifier");
     if (!scoped) continue;
     const isWildcard = imp.namedChildren.some((c) => c.type === "asterisk");
     if (isWildcard) {

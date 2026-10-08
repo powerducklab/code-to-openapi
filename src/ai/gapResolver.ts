@@ -14,11 +14,14 @@ import type {
  */
 export interface GapRequest {
   route: { method: string; path: string };
+  audit?: boolean;
+  contract?: unknown;
   origin: SourceLocation;
   /** The specific missing pieces. */
   gaps: GapCode[];
   /** Small source slice: handler function text (2-8 KiB target). */
   handlerSource: string;
+  sourceContext?: import("./sourceContext.js").SourceContext;
   /** Facts already established by AST; the model must not restate them. */
   known: {
     pathParameters: string[];
@@ -38,6 +41,8 @@ export interface ComponentCatalogEntry {
   name: string;
   /** Top-level property names (object components only), capped upstream. */
   properties?: string[];
+  /** Deterministic schema, included only when relevant and within the prompt budget. */
+  schema?: JsonSchema;
 }
 
 export interface GapResolution {
@@ -49,6 +54,7 @@ export interface GapResolution {
   responseSchemas?: Record<string, JsonSchema>;
   sseEvents?: Array<{ name: string; dataSchema?: JsonSchema }>;
   confidence: Confidence;
+  outcome?: "no-change" | "insufficient-evidence";
   /** Short English rationale shown in the review UI. */
   rationale?: string;
 }
@@ -75,8 +81,11 @@ export function gapCacheKey(request: GapRequest, promptVersion: string): string 
         origin: request.origin,
         gaps: request.gaps,
         source: request.handlerSource,
+        sourceContext: request.sourceContext,
         known: request.known,
-        catalog: (request.componentCatalog ?? []).map((entry) => entry.name),
+        audit: request.audit,
+        contract: request.contract,
+        catalog: request.componentCatalog ?? [],
       }),
     )
     .digest("hex");

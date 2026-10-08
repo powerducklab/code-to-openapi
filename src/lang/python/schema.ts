@@ -602,8 +602,11 @@ export function literalToSchema(node: TsNode | null, depth = 0): JsonSchema | nu
     return { type: "object", properties };
   }
   if (node.type === "list" || node.type === "tuple" || node.type === "set") {
-    const first = node.namedChildren[0];
-    return { type: "array", items: first ? literalToSchema(first, depth + 1) ?? {} : {} };
+    const variants = [...new Map(node.namedChildren.map(child => {
+      const schema = literalToSchema(child, depth + 1) ?? {};
+      return [JSON.stringify(schema), schema] as const;
+    })).values()];
+    return { type: "array", items: variants.length === 1 ? variants[0] : variants.length ? {anyOf: variants} : {} };
   }
   if (node.type === "string" || node.type === "string_start") return { type: "string" };
   if (node.type === "integer") return { type: "integer" };

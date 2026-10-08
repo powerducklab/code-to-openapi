@@ -233,7 +233,7 @@ export const springPack: FrameworkPack<JavaAnalysis> = {
           if (!responseBody) {
             // Traditional Spring MVC: the method resolves a server-rendered
             // view (String view name, ModelAndView, or "redirect:/forward:").
-            responses = collectMvcViewResponse(implementation ?? method, returnType, throwing);
+            responses = collectMvcViewResponse(implementation ?? method, returnType, throwing, gaps);
           } else {
             if (throwing) gaps.push("response-unknown");
             responses = throwing
@@ -659,13 +659,14 @@ function isBinaryReturn(node: TsNode | null): boolean {
 /**
  * Resolve the response of a traditional Spring MVC controller method that
  * resolves a server-rendered view (no @ResponseBody). A String return is a
- * view name ("redirect:.."/"forward:.." issue a 302), ModelAndView/View render
+ * view name ("redirect:.." issues a 302; forwarding requires target resolution), ModelAndView/View render
  * HTML 200, and a method that always throws surfaces the container error page.
  */
 function collectMvcViewResponse(
   method: TsNode,
   returnType: TsNode | null,
   throwing: boolean,
+  gaps: GapCode[],
 ): DiscoveredResponse[] {
   const html = (statusCode: string, confidence: Confidence): DiscoveredResponse => ({
     statusCode,
@@ -685,15 +686,25 @@ function collectMvcViewResponse(
       n.type === "object_creation_expression" && /ModelAndView|\bView$/.test(n.text)));
 
   const returns = findAll(method, (n) => n.type === "return_statement");
+  let sawForward = false;
   let sawRedirect = false;
   let sawViewName = false;
   for (const ret of returns) {
     const lit = findFirst(ret, (n) => n.type === "string_literal");
     const text = lit?.text.replace(/^["']|["']$/g, "") ?? "";
-    if (/^(redirect|forward):/.test(text)) sawRedirect = true;
+    if (/^redirect:/.test(text)) sawRedirect = true;
+    else if (/^forward:/.test(text)) sawForward = true;
     else if (text) sawViewName = true;
   }
 
+  if (sawForward) {
+    gaps.push("response-unknown");
+    return [
+      { statusCode: "default", description: "Response depends on the forwarded resource", confidence: "low" },
+      ...(sawRedirect ? [{ statusCode: "302", description: "Redirect", confidence: "medium" as const }] : []),
+      ...(sawViewName ? [html("200", "medium")] : []),
+    ];
+  }
   if (constructsView) return [html("200", "high")];
 
   // String view names: a redirect-only handler returns 302; a handler that may

@@ -1,3 +1,6 @@
+import { fillSchemaGaps } from "./schemaMerge.js";
+import { selectComponentContext } from "./componentContext.js";
+import { applyCompletenessGate } from "../core/completeness.js";
 import { createHash } from "node:crypto";
 
 import type {
@@ -75,9 +78,11 @@ function reviewIdFor(method: string, path: string, file?: string, line?: number)
 /** Packages one unresolved candidate as a reviewable AI gap request. */
 export function buildGapReview(
   candidate: RouteCandidate,
-  componentCatalog: Array<{ name: string }>,
+  componentCatalog: NonNullable<GapRequest["componentCatalog"]>,
+  reviewAll = false,
+  sourceContext?: GapRequest["sourceContext"],
 ): GapReview | null {
-  if (!candidate.gaps.length || !candidate.handlerSource) return null;
+  if ((!candidate.gaps.length && !reviewAll) || !candidate.handlerSource) return null;
   const method = candidate.method;
   const path = candidate.fullPath ?? candidate.path;
   const request: GapRequest = {
@@ -85,6 +90,9 @@ export function buildGapReview(
     origin: candidate.origin,
     gaps: [...candidate.gaps],
     handlerSource: candidate.handlerSource,
+    sourceContext,
+    contract: { parameters: candidate.parameters, requestBody: candidate.requestBody, responses: candidate.responses },
+    ...(reviewAll ? { audit: true } : {}),
     known: {
       pathParameters: candidate.parameters
         .filter((parameter) => parameter.in === "path")
@@ -92,8 +100,10 @@ export function buildGapReview(
       framework: candidate.framework ?? "unknown",
       language: candidate.language ?? "unknown",
     },
-    componentCatalog: componentCatalog.map((entry) => ({ name: entry.name })),
+    componentCatalog,
   };
+  const relevant = new Set(selectComponentContext(request).components.map(entry => entry.name));
+  request.componentCatalog = componentCatalog.map(entry => relevant.has(entry.name) ? entry : {name:entry.name});
   return {
     id: reviewIdFor(method, path, candidate.origin.file, candidate.origin.line),
     method,
@@ -119,6 +129,7 @@ export async function proposeGap(
   const resolution = parseGapResolution(
     raw as unknown as Record<string, unknown>,
     allowed,
+    review.request,
   );
   if (!resolution) return null;
   return { reviewId: review.id, resolution };
@@ -147,6 +158,7 @@ function mergeReviewedParameters(
   confidence: Confidence,
   closed: GapCode[],
   gapCode: GapCode,
+  replaceKnown = false,
 ): void {
   if (!schema?.properties) return;
   const required = new Set<string>(
@@ -160,8 +172,9 @@ function mergeReviewedParameters(
     );
     const tagged = tagAi(propertySchema);
     if (existing) {
-      if (!existing.schema || !Object.keys(existing.schema).length) {
+      if (replaceKnown || !existing.schema || !Object.keys(existing.schema).length) {
         existing.schema = tagged;
+        if (replaceKnown) existing.required = required.has(name);
       }
     } else {
       operation.parameters ??= [];
@@ -222,10 +235,11 @@ export function applyGapDecision(
     return { operation, gapsClosed: [], applied: false };
   }
 
+  if (resolution.outcome) return { operation, gapsClosed: [], applied: false };
   const closed: GapCode[] = [];
   const confidence: Confidence = resolution.confidence === "high" ? "medium" : resolution.confidence;
 
-  if (review.gaps.includes("query-unknown") && resolution.querySchema) {
+  if ((review.request.audit || review.gaps.includes("query-unknown")) && resolution.querySchema) {
     mergeReviewedParameters(
       operation,
       "query",
@@ -233,9 +247,10 @@ export function applyGapDecision(
       confidence,
       closed,
       "query-unknown",
+      review.request.audit === true && review.gaps.length === 0,
     );
   }
-  if (review.gaps.includes("header-unknown") && resolution.headerSchema) {
+  if ((review.request.audit || review.gaps.includes("header-unknown")) && resolution.headerSchema) {
     mergeReviewedParameters(
       operation,
       "header",
@@ -243,20 +258,24 @@ export function applyGapDecision(
       confidence,
       closed,
       "header-unknown",
+      review.request.audit === true && review.gaps.length === 0,
     );
   }
 
   if (
     resolution.bodySchema &&
-    review.gaps.some((gap) => gap === "body-unknown" || gap === "body-schema-unknown")
+    ((review.request.audit && review.gaps.length === 0) || review.gaps.some((gap) => gap === "body-unknown" || gap === "body-schema-unknown"))
   ) {
     const jsonMedia = operation.requestBody?.content?.find(
       (media) => media.mediaType === "application/json",
     );
     if (jsonMedia) {
-      jsonMedia.schema = tagAi(resolution.bodySchema);
-      jsonMedia.confidence = confidence;
-    } else {
+      const merged = review.gaps.length ? fillSchemaGaps(jsonMedia.schema ?? {}, resolution.bodySchema, new Map()) : resolution.bodySchema;
+      if (JSON.stringify(merged) !== JSON.stringify(jsonMedia.schema)) {
+        jsonMedia.schema = tagAi(merged);
+        jsonMedia.confidence = confidence;
+      }
+    } else if (!operation.requestBody) {
       operation.requestBody = {
         required: true,
         confidence,
@@ -271,23 +290,28 @@ export function applyGapDecision(
 
   if (
     resolution.responseSchemas &&
-    review.gaps.some((gap) => gap === "response-unknown" || gap === "response-schema-unknown")
+    (review.request.audit || review.gaps.some((gap) => gap === "response-unknown" || gap === "response-schema-unknown"))
   ) {
+    let responseUpdated = false;
     for (const [status, schema] of Object.entries(resolution.responseSchemas)) {
+      if (/^(1\d\d|204|205|304)$/.test(status)) continue;
       const existing = operation.responses.find(
         (response) => response.statusCode === status,
       );
       const tagged = tagAi(schema);
       if (existing) {
-        existing.content ??= [];
+        if (!existing.content?.length || /^(1\d\d|204|205|304)$/.test(status)) continue;
         const media = existing.content.find((item) => item.mediaType === "application/json");
         if (media) {
-          media.schema = tagged;
-          media.confidence = confidence;
-        } else {
-          existing.content.push({ mediaType: "application/json", schema: tagged, confidence });
+          const merged = review.gaps.length ? fillSchemaGaps(media.schema ?? {}, schema, new Map()) : schema;
+          if (JSON.stringify(merged) !== JSON.stringify(media.schema)) {
+            media.schema = tagAi(merged);
+            media.confidence = confidence;
+            responseUpdated = true;
+          }
         }
       } else {
+        responseUpdated = true;
         operation.responses.push({
           statusCode: status,
           description: "",
@@ -299,7 +323,11 @@ export function applyGapDecision(
     const responseGap = review.gaps.find(
       (gap) => gap === "response-schema-unknown" || gap === "response-unknown",
     );
-    if (responseGap && !closed.includes(responseGap)) closed.push(responseGap);
+    if (responseUpdated && responseGap && !closed.includes(responseGap)) closed.push(responseGap);
+  }
+
+  if (JSON.stringify(operation) === JSON.stringify(target)) {
+    return { operation, gapsClosed: [], applied: false };
   }
 
   operation.gaps = (operation.gaps ?? []).filter((gap) => !closed.includes(gap));
@@ -307,5 +335,7 @@ export function applyGapDecision(
     operation.confidence = confidence === "low" ? "low" : "medium";
   }
 
-  return { operation, gapsClosed: closed, applied: true };
+  const checked = applyCompletenessGate({ ...operation, fullPath: operation.path } as RouteCandidate);
+  operation.gaps = checked.gaps;
+  return { operation, gapsClosed: closed.filter(gap => !checked.gaps.includes(gap)), applied: true };
 }

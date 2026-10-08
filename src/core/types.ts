@@ -52,6 +52,8 @@ export interface FileEntry {
 }
 
 export interface FileIndex {
+  /** Source paths omitted unexpectedly; intentional ignore rules are excluded. */
+  unresolved?: DiscoveredUnresolved[];
   files: FileEntry[];
   byPath: Map<string, FileEntry>;
 }
@@ -156,6 +158,10 @@ export interface ScanOptions {
   frameworks?: readonly string[];
   /** File size cap per source file, bytes. Default 2 MiB. */
   maxFileBytes?: number;
+  /** Maximum indexed source files. Default 10,000; exceeding it fails the scan. */
+  maxFiles?: number;
+  /** Maximum total indexed source bytes. Default 64 MiB; exceeding it fails the scan. */
+  maxTotalBytes?: number;
   /** Progress sink for host UIs (indexing, extraction, AI gap fills). */
   onProgress?: (phase: string, detail?: string) => void;
   /** AI gap resolver; absent means deterministic-only output. */
@@ -166,6 +172,8 @@ export interface ScanOptions {
    * the host to propose, show to the user, and apply only after acceptance.
    */
   aiReview?: "auto" | "manual";
+  /** Include evidence-backed routes without gaps for optional manual audit. */
+  reviewAll?: boolean;
 }
 
 export interface ScanReport {

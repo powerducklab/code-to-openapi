@@ -11,6 +11,7 @@
  */
 
 import { goSourceFile, resolveGoCall, resolveGoPackageFunction } from "../lang/go/symbols.js";
+import { goStaticString } from "../lang/go/static-string.js";
 import { mergeResponseVariants } from "../core/response-variants.js";
 import { namespaceComponents, remapSchemaReferences } from "../core/schema-references.js";
 import type {
@@ -459,6 +460,16 @@ function analyzeEchoHandler(
       }
     }
 
+    // Returning an opaque error delegates status/body selection to Echo's
+    // error handler. A known success response must not hide this missing branch.
+    for (const ret of findAll(body, n => n.type === "return_statement")) {
+      let parent = ret.parent;
+      while (parent && parent.id !== body.id && parent.type !== "func_literal") parent = parent.parent;
+      if (parent?.type === "func_literal") continue;
+      const value = ret.namedChildren[0]?.type === "expression_list" ? ret.namedChildren[0].namedChildren[0] : ret.namedChildren[0];
+      if (value?.type === "identifier" && value.text !== "nil") gaps.add("response-unknown");
+    }
+
     for (const name of declaredParams) {
       if (!parameters.some((p) => p.name === name && p.in === "path")) {
         parameters.push({ name, in: "path", required: true, schema: { type: "string" }, confidence: "medium" });
@@ -507,104 +518,142 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
     const servers = new Set<string>();
     const sites: RouteSite[] = [];
 
-    // Echo instances and groups: name -> prefix.
-    const echoVars = new Map<string, string>();
-    const groupDecls: Array<{ name: string; parent: string; prefix: string; middleware: TsNode[] }> = [];
-
-    for (const file of analysis.files.values()) {
-      for (const decl of findAll(file.root, (n) => n.type === "short_var_declaration")) {
-        const left = decl.namedChildren.find((c) => c.type === "expression_list");
-        const lists = decl.namedChildren.filter((c) => c.type === "expression_list");
-        const right = lists.length > 1 ? lists[lists.length - 1] : undefined;
-        if (!right) continue;
-        for (const call of findAll(right, (c) => c.type === "call_expression")) {
-          const sel = selectorCall(call);
-          if (!sel) continue;
-          const name = left?.namedChildren.find((c) => c.type === "identifier");
-          // e := echo.New()
-          if (sel.receiver.type === "identifier" && sel.receiver.text === "echo" && sel.method === "New") {
-            if (name) echoVars.set(name.text, "");
+    type Binding = {prefix: string; key: string; middleware: TsNode[]};
+    const groupDecls: Array<{name: string; middleware: TsNode[]}> = [];
+    const seenSites = new Set<string>();
+    const isEchoConstructor = (node: TsNode): boolean => {
+      const sel = selectorCall(node);
+      const file = goSourceFile(node, analysis);
+      if (!sel || sel.method !== "New" || !file) return false;
+      return findAll(file.root, n => n.type === "import_spec").some(spec => {
+        const path = literalString(spec.childForFieldName("path") ?? spec.namedChildren.find(n => n.type === "interpreted_string_literal"));
+        const alias = spec.childForFieldName("name")?.text ?? "echo";
+        return (path === "github.com/labstack/echo/v4" || path === "github.com/labstack/echo") && sel.receiver.text === alias;
+      });
+    };
+    // Each registration invocation owns its bindings. Passing a group into a
+    // helper must neither register unused helpers nor merge independent mounts.
+    const walk = (node: TsNode, env: Map<string, Binding>, stack: Set<number>): Binding | undefined => {
+      const file = goSourceFile(node, analysis);
+      if (!file || node.type === "func_literal") return;
+      if (node.type === "block") {
+        const local = new Map(env);
+        for (const child of node.namedChildren) {
+          const returned = walk(child, local, stack);
+          if (returned) return returned;
+        }
+        return;
+      }
+      if (node.type === "return_statement") {
+        const value = node.namedChildren[0]?.type === "expression_list" ? node.namedChildren[0].namedChildren[0] : node.namedChildren[0];
+        return value?.type === "identifier" ? env.get(value.text) : undefined;
+      }
+      if (node.type === "statement_list") {
+        for (const child of node.namedChildren) {
+          const returned = walk(child, env, stack);
+          if (returned) return returned;
+        }
+        return;
+      }
+      if (node.type === "short_var_declaration" || node.type === "assignment_statement") {
+        const lists = node.namedChildren.filter(n => n.type === "expression_list");
+        const names = lists[0]?.namedChildren ?? [];
+        const values = lists[1]?.namedChildren ?? [];
+        for (let i = 0; i < names.length; i++) {
+          const name = names[i]!;
+          const value = values[i];
+          if (name.type !== "identifier") continue;
+          let binding: Binding | undefined;
+          if (value?.type === "identifier") binding = env.get(value.text);
+          else if (value?.type === "call_expression") {
+            const sel = selectorCall(value);
+            if (isEchoConstructor(value)) binding = {prefix: "", key: `${file.path}:${node.startIndex}`, middleware: []};
+            else if (sel?.method === "Group" && env.has(sel.receiver.text)) {
+              const parent = env.get(sel.receiver.text)!;
+              const args = positionalArguments(value);
+              const prefix = goStaticString(args[0], file);
+              if (prefix === null) unresolved.push({reason: "dynamic-path", message: "Echo group prefix cannot be statically resolved", origin: {file: file.path, line: value.startPosition.row + 1}});
+              else binding = {prefix: joinPath(parent.prefix, prefix), key: `${parent.key}:${node.startIndex}`, middleware: [...parent.middleware, ...args.slice(1)]};
+            } else {
+              const factory = resolveGoCall(value, analysis);
+              const resultType = factory ? functionResultTypeNode(factory)?.text : undefined;
+              const routerType = resultType?.match(/^\*(\w+)\.(?:Echo|Group)$/);
+              const owner = factory ? analysis.files.get(factory.file) : undefined;
+              const returnsEcho = routerType && owner && findAll(owner.root, n => n.type === "import_spec").some(spec => {
+                const path = literalString(spec.childForFieldName("path") ?? spec.namedChildren.find(n => n.type === "interpreted_string_literal"));
+                return (path === "github.com/labstack/echo/v4" || path === "github.com/labstack/echo") && (spec.childForFieldName("name")?.text ?? "echo") === routerType[1];
+              });
+              if (returnsEcho && factory?.body && !stack.has(factory.node.id)) {
+                const returns = findAll(factory.body, n => {
+                  if (n.type !== "return_statement") return false;
+                  let parent = n.parent;
+                  while (parent && parent.id !== factory.body!.id) {
+                    if (parent.type === "func_literal") return false;
+                    parent = parent.parent;
+                  }
+                  return true;
+                });
+                // Multiple return branches need a union of bindings; do not guess.
+                if (returns.length === 1) binding = walk(factory.body, new Map(), new Set([...stack, factory.node.id]));
+              }
+            }
           }
-          // r := pkg.New() where the constructor internally builds echo.New().
-          // Many apps wrap echo.New() in their own constructor.
-          if (sel.method === "New" && name) {
-            const ctor = (analysis.functions.get("New") ?? []).find((f) => f.node.text.includes("echo.New("));
-            if (ctor) echoVars.set(name.text, "");
-          }
-          // g := e.Group("/api", middleware...)
-          if (sel.method === "Group" && sel.receiver.type === "identifier" && name) {
-            const groupArgs = positionalArguments(call);
-            const prefix = literalString(groupArgs[0]) ?? "";
-            groupDecls.push({ name: name.text, parent: sel.receiver.text, prefix, middleware: groupArgs.slice(1) });
-          }
+          if (binding) {
+            env.set(name.text, binding);
+            groupDecls.push({name: binding.key, middleware: binding.middleware});
+          } else env.delete(name.text);
         }
       }
-    }
-
-    // Resolve group prefixes breadth-first.
-    let grew = true;
-    let guard = 0;
-    while (grew && guard < 16) {
-      grew = false;
-      guard++;
-      for (const g of groupDecls) {
-        const parentPrefix = echoVars.get(g.parent);
-        if (parentPrefix === undefined) continue;
-        const resolved = joinPath(parentPrefix, g.prefix);
-        if (echoVars.get(g.name) !== resolved) {
-          echoVars.set(g.name, resolved);
-          grew = true;
-        }
-      }
-    }
-
-    for (const file of analysis.files.values()) {
-      for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
-        const sel = selectorCall(call);
-        if (!sel) continue;
-        if (sel.receiver.type !== "identifier" || !echoVars.has(sel.receiver.text)) continue;
-        const verb = sel.method.toLowerCase();
-        if (!VERBS.has(verb)) continue;
-        const args = positionalArguments(call);
-        const rawPath = args[0] ? literalString(args[0]) : null;
-        if (rawPath === null) {
-          if (args[0]) {
-            unresolved.push({
-              reason: "dynamic-path",
-              message: "Echo route path is not a static string literal",
-              origin: { file: file.path, line: call.startPosition.row + 1 },
-            });
+      if (node.type === "call_expression") {
+        const sel = selectorCall(node);
+        const binding = sel ? env.get(sel.receiver.text) : undefined;
+        const args = positionalArguments(node);
+        const verb = sel?.method.toLowerCase();
+        if (binding && verb && VERBS.has(verb)) {
+          const raw = goStaticString(args[0], file);
+          if (raw === null) unresolved.push({reason: "dynamic-path", message: "Echo route path cannot be statically resolved", origin: {file: file.path, line: node.startPosition.row + 1}});
+          else {
+            const {path, params} = echoPathToOas(raw);
+            const fullPath = joinPath(binding.prefix, path);
+            const key = `${file.path}:${node.startIndex}:${verb}:${fullPath}`;
+            if (!seenSites.has(key)) {
+              seenSites.add(key);
+              sites.push({method: verb, path: fullPath, params, handler: args[1] ?? null, origin: {file: file.path, line: node.startPosition.row + 1}, groupVar: binding.key});
+            }
           }
-          continue;
-        }
-        const { path, params } = echoPathToOas(rawPath);
-        sites.push({
-          method: verb,
-          path: joinPath(echoVars.get(sel.receiver.text) ?? "", path),
-          params,
-          handler: args[1] ?? null,
-          origin: { file: file.path, line: call.startPosition.row + 1 },
-          groupVar: sel.receiver.text,
-        });
-      }
-
-      // Server: e.Start(":8080") or http.ListenAndServe.
-      for (const call of findAll(file.root, (n) => n.type === "call_expression")) {
-        const sel = selectorCall(call);
-        if (!sel) continue;
-        if (sel.method === "Start" && sel.receiver.type === "identifier" && echoVars.has(sel.receiver.text)) {
-          const addr = literalString(positionalArguments(call)[0]);
+        } else if (binding && (sel?.method === "Use" || sel?.method === "Pre")) {
+          binding.middleware.push(...args);
+        } else if (binding && sel?.method === "Start") {
+          const addr = literalString(args[0]);
           if (addr) servers.add(addrToUrl(addr));
+        } else if (args.some(arg => arg.type === "identifier" && env.has(arg.text))) {
+          const target = resolveGoCall(node, analysis);
+          if (target?.body && !stack.has(target.node.id)) {
+            const params = target.node.childForFieldName("parameters")?.namedChildren.flatMap(p => p.namedChildren.filter(n => n.type === "identifier")) ?? [];
+            const passed = new Map<string, Binding>();
+            args.forEach((arg, i) => {
+              const value = arg.type === "identifier" ? env.get(arg.text) : undefined;
+              if (value && params[i]) passed.set(params[i]!.text, value);
+            });
+            if (passed.size) walk(target.body, passed, new Set([...stack, target.node.id]));
+          }
         }
       }
+      for (const child of node.namedChildren) walk(child, env, stack);
+    };
+    for (const functions of analysis.functions.values()) {
+      for (const fn of functions) if (fn.body) walk(fn.body, new Map(), new Set([fn.node.id]));
     }
+    for (const fn of analysis.methods) if (fn.body) walk(fn.body, new Map(), new Set([fn.node.id]));
 
     // Resolve group-level middleware contracts (e.g. JWT returning 401/403) so
     // protected routes inherit the authentication error responses.
     const groupContracts = new Map<string, GroupMiddlewareContract>();
+    const unknownMiddleware = new Set<string>();
     for (const group of groupDecls) {
       for (const mw of group.middleware) {
         const contract = resolveGroupMiddleware(mw, analysis, modelIndex);
+        if (!contract) unknownMiddleware.add(group.name);
         if (contract) {
           const previous = groupContracts.get(group.name);
           if (previous) {
@@ -632,6 +681,23 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
         if (block) {
           fn = { name: "<anonymous>", file: site.origin.file, node: handlerNode, body: block, receiver: null };
         }
+      } else if (handlerNode?.type === "call_expression") {
+        const factory = resolveGoCall(handlerNode, analysis);
+        const returned = factory?.body ? findAll(factory.body, node => {
+          if (node.type !== "return_statement") return false;
+          let parent = node.parent;
+          while (parent && parent.id !== factory.body!.id) {
+            if (parent.type === "func_literal") return false;
+            parent = parent.parent;
+          }
+          return true;
+        }) : [];
+        // A single explicitly returned closure is proven to handle requests;
+        // arbitrary callbacks elsewhere in a factory are not handlers.
+        const value = returned.length === 1 ? returned[0]!.namedChildren[0] : undefined;
+        const closure = value?.type === "expression_list" ? value.namedChildren[0] : value;
+        const block = closure?.type === "func_literal" ? closure.namedChildren.find(node => node.type === "block") : undefined;
+        if (block && factory && closure) fn = {...factory, node: closure, body: block};
       } else if (handlerNode) {
         let name: string | null = null;
         let qualifier: string | undefined;
@@ -647,7 +713,7 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
           const owner = analysis.files.get(site.origin.file);
           fn =
             resolveGoPackageFunction(analysis, owner, qualifier, name) ??
-            analysis.methods.find((m) => m.name === name) ??
+            resolveGoCall(handlerNode, analysis) ??
             null;
         }
       }
@@ -667,6 +733,7 @@ export const echoPack: FrameworkPack<GoAnalysis> = {
             gaps: new Set<GapCode>(["response-unknown"]),
           };
 
+      if (site.groupVar && unknownMiddleware.has(site.groupVar)) evidence.gaps.add("response-unknown");
       const confidence: Confidence = evidence.gaps.size > 0 ? "medium" : "high";
 
       // Inherit group middleware responses (authentication 401/403), honoring a

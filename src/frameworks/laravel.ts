@@ -356,6 +356,23 @@ function buildRoute(
     }
   }
 
+  // Read only the fluent chain belonging to this route, not constraints on
+  // adjacent registrations or calls nested in middleware arguments.
+  for (let chained = call.parent; chained?.type === "member_call_expression"; chained = chained.parent) {
+    const method = chained.namedChildren.find(node => node.type === "name")?.text;
+    if (method !== "where") continue;
+    const argumentsNode = chained.namedChildren.find(node => node.type === "arguments");
+    const values = argumentsNode ? childrenOfType(argumentsNode, "argument") : [];
+    const name = phpStringText(values[0]?.namedChildren.find(node => node.type === "string"));
+    const regex = phpStringText(values[1]?.namedChildren.find(node => node.type === "string"));
+    if (!name || regex === null || regex === undefined) continue;
+    const parameter = parameters.find(parameter => parameter.in === "path" && parameter.name === name);
+    if (!parameter) continue;
+    const pattern = `^(?:${regex})$`;
+    try { new RegExp(pattern); } catch { continue; }
+    parameter.schema = {...parameter.schema, pattern};
+  }
+
   const responses = handlerNode
     ? collectResponses(handlerNode, model, gaps)
     : [
@@ -985,7 +1002,12 @@ function collectConstructedRequestParams(
   }
 }
 
-function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]): DiscoveredResponse[] {
+function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[], visited = new Set<number>()): DiscoveredResponse[] {
+  if (visited.has(handler.id) || visited.size >= 24) {
+    gaps.push("response-unknown");
+    return [];
+  }
+  const next = new Set(visited).add(handler.id);
   // Arrow functions use an expression body without a return statement, e.g.
   // Route::get('ping', fn () => null) or fn () => response()->json(...).
   if (handler.type === "arrow_function") {
@@ -1018,7 +1040,7 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
     if (direct) return [direct];
     const conditional = ret.namedChildren.find((c) => c.type === "conditional_expression");
     if (conditional) {
-      return conditional.namedChildren.filter(
+      return (conditional.namedChildren.length >= 3 ? conditional.namedChildren.slice(1) : conditional.namedChildren).filter(
         (c) =>
           c.type === "member_call_expression" ||
           c.type === "scoped_call_expression" ||
@@ -1059,6 +1081,19 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
       continue;
     }
     for (const expression of expressions) {
+      // Controllers commonly delegate to private rendering/redirect helpers.
+      // Follow the actual method on this controller, preserving every status
+      // and media type instead of selecting the first returned branch.
+      if (expression.type === "member_call_expression" && expression.namedChildren[0]?.text === "$this") {
+        const method = expression.namedChildren.find(node => node.type === "name")?.text;
+        const ownerName = enclosingPhpClassName(handler);
+        const owner = ownerName ? resolvePhpClass(ownerName, model.analysis, handler) : undefined;
+        const helper = owner && method && !/^respond(?:[A-Z]|$)/.test(method) ? findPhpMethod(owner, method, model.analysis) : undefined;
+        if (helper) {
+          responses.push(...collectResponses(helper, model, gaps, next));
+          continue;
+        }
+      }
       let response = interpretResponse(expression, model, gaps, handler, factoryVisited);
       if (!response && expression.type === "variable_name") {
         // $r = new StreamedResponse(...); ... return $r; — interpret the
@@ -1079,6 +1114,7 @@ function collectResponses(handler: TsNode, model: PhpModelIndex, gaps: GapCode[]
         }
       }
       if (response) responses.push(response);
+      else gaps.push("response-unknown");
     }
   }
 
@@ -1260,6 +1296,19 @@ function interpretResponse(
     const args = expression.namedChildren.find((c) => c.type === "arguments");
     const argNodes = args ? childrenOfType(args, "argument") : [];
 
+    // Turbo Laravel returns an HTML stream, not a JSON model. Require the
+    // declared package type so an unrelated application macro is not guessed.
+    if (method?.toLowerCase() === "turbostream") {
+      let owner = handler;
+      while (owner.parent) owner = owner.parent;
+      const file = [...model.analysis.files.values()].find(file => file.root.id === owner.id);
+      const declared = handler.namedChildren.find(child => child.type === "named_type")?.text;
+      const fqcn = declared && (file?.imports.get(declared) ?? declared.replace(/^\\/, ""));
+      if (fqcn === "HotwiredLaravel\\TurboLaravel\\Http\\MultiplePendingTurboStreamResponse" || fqcn === "HotwiredLaravel\\TurboLaravel\\Http\\PendingTurboStreamResponse") {
+        return { statusCode: "200", description: "", confidence: "high", content: [{mediaType: "text/vnd.turbo-stream.html", schema: {type: "string"}}] };
+      }
+    }
+
     // Decorator chains such as response()->noContent()->header(...) or
     // response()->json($data)->setStatusCode(201): locate the terminal call
     // that actually describes the response and interpret that instead.
@@ -1296,10 +1345,10 @@ function interpretResponse(
         expression,
         (n) =>
           n.type === "function_call_expression" &&
-          n.namedChildren.find((c) => c.type === "name")?.text === "redirect",
+          ["redirect", "back"].includes(n.namedChildren.find((c) => c.type === "name")?.text ?? ""),
       );
       if (redirectRoot) {
-        return { statusCode: "302", description: "", confidence: "high" };
+        return interpretResponse(redirectRoot, model, gaps, handler);
       }
       // view('page')->with('k', $v): a view chain renders an HTML document.
       const viewRoot = findFirst(
@@ -1325,7 +1374,7 @@ function interpretResponse(
 
     if (method === "redirect" || method === "redirectRoute" || method === "redirectGuest") {
       const status = responseStatus(argNodes[1], "302", gaps);
-      return { statusCode: status, description: "", confidence: "high" };
+      return { statusCode: status, description: "Redirect", headers: {Location: {type: "string", format: "uri-reference"}}, confidence: "high" };
     }
 
     // Base-class response helpers such as $this->respondDownload($path),
@@ -1416,11 +1465,11 @@ function interpretResponse(
   // Global helper redirect('/path', 301).
   if (expression.type === "function_call_expression") {
     const fnName = expression.namedChildren.find((c) => c.type === "name")?.text;
-    if (fnName === "redirect") {
+    if (fnName === "redirect" || fnName === "back") {
       const args = expression.namedChildren.find((c) => c.type === "arguments");
       const argNodes = args ? childrenOfType(args, "argument") : [];
-      const status = responseStatus(argNodes[1], "302", gaps);
-      return { statusCode: status, description: "", confidence: "high" };
+      const status = responseStatus(argNodes[fnName === "back" ? 0 : 1], "302", gaps);
+      return { statusCode: status, description: "Redirect", headers: {Location: {type: "string", format: "uri-reference"}}, confidence: "high" };
     }
     // view('page') renders an HTML document.
     if (fnName === "view") {

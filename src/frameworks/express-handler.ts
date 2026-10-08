@@ -12,7 +12,7 @@ import type {
 } from "../core/types.js";
 import type { TsAnalysis } from "../lang/typescript/index.js";
 import { localReturnSchema, localObjectFields, localImplementation } from "../lang/typescript/localFlow.js";
-import { inferMongooseRequestBody } from "../lang/typescript/mongoose.js";
+import { inferMongooseRequestBody, mongooseInstanceMethodProjection } from "../lang/typescript/mongoose.js";
 import { resolveStaticValue } from "../lang/typescript/staticValue.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { convertZodNode } from "../lang/typescript/zod.js";
@@ -626,7 +626,8 @@ function findExportedDeclaration(
       if (target) return;
       if (
         ts.isFunctionDeclaration(child) &&
-        child.name?.text === identifier
+        (child.name?.text === identifier || (identifier === "default"
+          && child.modifiers?.some((m: any) => m.kind === ts.SyntaxKind.DefaultKeyword)))
       ) {
         target = child;
       }
@@ -796,6 +797,20 @@ export function resolveHandler(
     ts.isFunctionDeclaration(node)
   ) {
     return { node, file: sourceFile };
+  }
+
+  // The checker resolves imported controller instances to their actual method
+  // declaration, including default exports such as `export default new Controller()`.
+  // Do not select an arbitrary implementation from a union or an external type.
+  if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    const symbol = analysis.checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node.argumentExpression);
+    const declarations = symbol?.declarations ?? [];
+    if (declarations.length === 1) {
+      const method = declarations[0];
+      if (ts.isMethodDeclaration(method) && method.body && analysis.isProjectFile(method.getSourceFile().fileName)) {
+        return {node: method, file: method.getSourceFile()};
+      }
+    }
   }
 
   // Namespaced handler: `controllers.login` where `controllers` is an imported
@@ -1091,6 +1106,8 @@ export function analyzeHandler(
   origin: SourceLocation,
   context: {
     pathParams: Set<string>;
+    requestLoaders?: any[];
+    requestMiddleware?: any[];
     validators: ValidatedField[];
     bodyReferencedHint?: boolean;
     customResponseMethods?: Map<string, CustomResponseMethod>;
@@ -1108,6 +1125,18 @@ export function analyzeHandler(
 ): HandlerFacts {
   const { ts, checker } = analysis;
   const gaps = new Set<GapCode>();
+  // Parameter loaders can delegate failures to an application error handler.
+  // Recovering the success payload does not prove those error contracts.
+  for (const loader of context.requestLoaders ?? []) {
+    const next = loader.parameters?.[2]?.name;
+    if (!next || !ts.isIdentifier(next)) continue;
+    const visit = (node: any): void => {
+      if (node !== loader && ts.isFunctionLike(node)) return;
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === next.text && node.arguments.length) gaps.add("response-unknown");
+      ts.forEachChild(node, visit);
+    };
+    visit(loader);
+  }
   const parameters: RouteParameter[] = [];
   const paramNames = new Map<string, RouteParameter>();
 
@@ -1879,6 +1908,8 @@ export function analyzeHandler(
         }
         if (arg) {
           let { schema, typed } = schemaFromNode(analysis, arg);
+          const instanceProjection = mongooseInstanceMethodProjection(analysis, arg, handler, context.requestLoaders ?? [], context.requestMiddleware ?? [], () => gaps.add("response-unknown"));
+          if (instanceProjection) { schema = instanceProjection; typed = false; }
           // Pure-JS fall-through: the checker hands back `any` for locals, so
           // ground `res.json(localVar)` by resolving the local value.
           if (!schema) {

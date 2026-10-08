@@ -348,7 +348,7 @@ export function resolveLocalType(
         value.namedChildren[0]?.type === "identifier" &&
         value.namedChildren[0]?.text === "new"
       ) {
-        return value.namedChildren.find((c) => c.type === "type_identifier") ?? null;
+        return value.namedChildren.find((c) => c.type === "type_identifier" || c.type === "qualified_type") ?? positionalArguments(value)[0] ?? null;
       }
     }
   }
@@ -371,8 +371,8 @@ export function resolveLocalType(
       value.namedChildren[0]?.type === "identifier" &&
       value.namedChildren[0]?.text === "new"
     ) {
-      const args = value.namedChildren.filter((c) => c.type === "type_identifier");
-      if (args[0]) return args[0];
+      const type = value.namedChildren.find(c => c.type === "type_identifier" || c.type === "qualified_type") ?? positionalArguments(value)[0];
+      if (type) return type;
     }
   }
 
@@ -1366,7 +1366,9 @@ export function localGoTypeToSchema(node: TsNode, analysis: GoAnalysis, index: G
     if (!path) return {};
     const candidates = [...analysis.structs.values()].filter(def => {
       const directory = def.file.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
-      return def.name === name.text && directory && (path === directory || path.endsWith("/" + directory));
+      if (def.name !== name.text) return false;
+      if (analysis.modulePath) return path === (directory ? analysis.modulePath + "/" + directory : analysis.modulePath);
+      return !!directory && (path === directory || path.endsWith("/" + directory));
     });
     if (candidates.length !== 1) return {};
     const selected = candidates[0]!;

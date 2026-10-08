@@ -6,6 +6,8 @@
  * re-walking the tree. No framework knowledge lives here.
  */
 
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { FileEntry, ScanContext } from "../../core/types.js";
 import { parseSource, type TsNode } from "../treesitter/runtime.js";
 import { childrenOfType, findAll, findFirst } from "../treesitter/ast.js";
@@ -50,6 +52,7 @@ export interface GoFile {
 
 export interface GoAnalysis {
   readonly id: "go";
+  readonly modulePath?: string;
   readonly files: Map<string, GoFile>;
   /** Keyed by `${file}::${name}`. */
   readonly structs: Map<string, GoStruct>;
@@ -242,7 +245,11 @@ export async function createGoAnalysis(ctx: ScanContext): Promise<GoAnalysis | n
     }
   }
 
-  return { id: "go", files, structs, functions, methods, vars };
+  let modulePath: string | undefined;
+  try {
+    modulePath = /^module\s+([^\s]+)\s*$/m.exec(await readFile(join(ctx.root, "go.mod"), "utf8"))?.[1];
+  } catch { /* A standalone Go source directory need not have go.mod. */ }
+  return { id: "go", files, structs, functions, methods, vars, modulePath };
 }
 
 export type { FileEntry };

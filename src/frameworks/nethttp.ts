@@ -31,7 +31,7 @@ import type {
 } from "../core/types.js";
 import type { DiscoveredUnresolved } from "@powerduck/x-to-openapi";
 import type { GoAnalysis, GoFunction } from "../lang/go/index.js";
-import { resolveGoPackageFunction } from "../lang/go/symbols.js";
+import { goExpressionType, goSourceFile, resolveGoCall, resolveGoPackageFunction } from "../lang/go/symbols.js";
 import { buildGoModelIndex } from "../lang/go/schema.js";
 import { analyzeStdHTTPHandler, selectorCall } from "../lang/go/httphandler.js";
 import type { TsNode } from "../lang/treesitter/runtime.js";
@@ -113,7 +113,8 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
       goSeen = true;
       const content = file.content;
       // Another framework owns routing here — never double-claim.
-      if (OTHER_GO_FRAMEWORKS.some((f) => content.includes(f))) return false;
+      const imports = [...content.matchAll(/(?:^|\n)\s*(?:import\s+)?(?:[.\w]+\s+)?"([^"\n]+)"/g)].map(match => match[1]!);
+      if (OTHER_GO_FRAMEWORKS.some(f => imports.some(path => path.includes(f)))) return false;
       if (
         /\bhttp\.NewServeMux\s*\(/.test(content) ||
         /\bhttp\.HandleFunc\s*\(/.test(content) ||
@@ -185,9 +186,20 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
           sel.receiver.type === "identifier" &&
           sel.receiver.text === "http" &&
           (sel.method === "Handle" || sel.method === "HandleFunc");
+        const isTypedMux = (): boolean => {
+          let type = goExpressionType(sel.receiver, analysis);
+          while (type?.type === "pointer_type") type = type.namedChildren[0];
+          if (type?.type !== "qualified_type" || type.namedChildren[1]?.text !== "ServeMux") return false;
+          const qualifier = type.namedChildren[0]?.text;
+          const owner = goSourceFile(type, analysis);
+          return !!owner && findAll(owner.root, n => n.type === "import_spec").some(spec => {
+            const path = spec.childForFieldName("path") ?? spec.namedChildren.find(n => n.type === "interpreted_string_literal");
+            return path && literalString(path) === "net/http" && (spec.childForFieldName("name")?.text ?? "http") === qualifier;
+          });
+        };
         const onKnownMux =
-          sel.receiver.type === "identifier" && muxVars.has(sel.receiver.text) &&
-          (sel.method === "Handle" || sel.method === "HandleFunc");
+          (sel.method === "Handle" || sel.method === "HandleFunc") &&
+          ((sel.receiver.type === "identifier" && muxVars.has(sel.receiver.text)) || isTypedMux());
         if (!onDefaultMux && !onKnownMux) continue;
 
         const recv = onDefaultMux ? "http" : sel.receiver.text!;
@@ -246,7 +258,38 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
 
     // Resolve each route site to a handler function and its evidence.
     for (const site of sites) {
-      const handlerNode = site.handler;
+      let handlerNode = site.handler;
+      let wrapped = false;
+      // Alice's Then/ThenFunc terminal is a handler, not the middleware
+      // chain itself. Require a proven alice.Chain receiver so a similarly
+      // named application method cannot be mistaken for this adapter.
+      const isAliceChain = (node: TsNode, depth = 0): boolean => {
+        if (depth > 24) return false;
+        const type = goExpressionType(node, analysis);
+        if (type?.type === "qualified_type" && type.namedChildren[1]?.text === "Chain") {
+          const owner = goSourceFile(type, analysis);
+          const qualifier = type.namedChildren[0]?.text;
+          if (owner && findAll(owner.root, n => n.type === "import_spec").some(spec => {
+            const path = spec.childForFieldName("path");
+            return path && literalString(path) === "github.com/justinas/alice" && (spec.childForFieldName("name")?.text ?? "alice") === qualifier;
+          })) return true;
+        }
+        const call = node.type === "call_expression" ? selectorCall(node) : null;
+        if (!call) return false;
+        if (call.method === "Append") return isAliceChain(call.receiver, depth + 1);
+        if (call.method !== "New" || call.receiver.type !== "identifier") return false;
+        const owner = goSourceFile(node, analysis);
+        return !!owner && findAll(owner.root, n => n.type === "import_spec").some(spec => {
+          const path = spec.childForFieldName("path");
+          return path && literalString(path) === "github.com/justinas/alice" && (spec.childForFieldName("name")?.text ?? "alice") === call.receiver.text;
+        });
+      };
+      const terminal = handlerNode?.type === "call_expression" ? selectorCall(handlerNode) : null;
+      if (terminal && ["Then", "ThenFunc"].includes(terminal.method) && isAliceChain(terminal.receiver)) {
+        handlerNode = positionalArguments(handlerNode!)[0] ?? null;
+        wrapped = true;
+        unresolved.push({ reason: "handler-unresolved", message: "Alice terminal handler resolved; middleware may add authentication or error responses and requires contract verification", origin: site.origin });
+      }
       let fn: GoFunction | null = null;
       if (handlerNode?.type === "func_literal") {
         const block = findFirst(handlerNode, (c) => c.type === "block");
@@ -266,10 +309,8 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
         }
         if (name) {
           const owner = analysis.files.get(site.origin.file);
-          fn =
-            resolveGoPackageFunction(analysis, owner, qualifier, name) ??
-            analysis.methods.find((m) => m.name === name) ??
-            null;
+          fn = resolveGoCall(handlerNode, analysis) ??
+            (handlerNode.type === "identifier" ? resolveGoPackageFunction(analysis, owner, qualifier, name) : undefined) ?? null;
         }
       }
 
@@ -295,6 +336,11 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
             extensions: undefined as RouteCandidate["extensions"],
           };
 
+      if (wrapped) {
+        // Do not report complete coverage while wrapper behavior is unverified.
+        evidence.gaps.add("response-unknown");
+        evidence.gaps.add("auth-unknown");
+      }
       const confidence: Confidence = evidence.gaps.size > 0 ? "medium" : "high";
       for (const method of site.methods) {
         routes.push({

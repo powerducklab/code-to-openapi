@@ -7,7 +7,7 @@ import {scanProject} from '../src/index.js';
 // Covers P1-3 DRF gaps: external auth.User model fields, ReadOnlyField(source=...)
 // mapping, and dynamic choices that cannot be statically enumerated (flagged,
 // never fabricated).
-it('resolves external auth.User fields, ReadOnlyField source and dynamic choices',async()=>{
+it('resolves external auth.User fields but preserves unproven ReadOnlyField and choice contracts',async()=>{
  const root=await mkdtemp(join(tmpdir(),'drf-external-'));
  try {
  await writeFile(join(root,'requirements.txt'),'Django==6.1.1\ndjangorestframework==3.18.1');
@@ -24,9 +24,10 @@ class Snippet(models.Model):
     owner=models.ForeignKey('auth.User',related_name='snippets',on_delete=models.CASCADE)
 class SnippetSerializer(serializers.HyperlinkedModelSerializer):
     owner=serializers.ReadOnlyField(source='owner.username')
+    count=serializers.ReadOnlyField(source='computed_count')
     class Meta:
         model=Snippet
-        fields=('url','id','title','language','owner')
+        fields=('url','id','title','language','owner','count')
 class UserSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model=User
@@ -44,8 +45,10 @@ urlpatterns=[path('',include(router.urls))]
  expect(converted.documentValid).toBe(true);
  const schemas=(converted.document as any).components.schemas;
 
- // ReadOnlyField(source='owner.username') renders a read-only string.
- expect(schemas.SnippetSerializer.properties.owner).toEqual({type:'string',readOnly:true});
+ // ReadOnlyField does not coerce its source to a string. Without resolving the
+ // source, neither a text-looking name nor a numeric-looking name proves type.
+ expect(schemas.SnippetSerializer.properties.owner).toEqual({readOnly:true});
+ expect(schemas.SnippetSerializer.properties.count).toEqual({readOnly:true});
 
  // Dynamic choices are honestly flagged, never enumerated from a runtime call.
  const language=schemas.SnippetSerializer.properties.language;

@@ -141,6 +141,7 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
       models.set(rel, modelFile(analysis, rel, source));
     }
 
+    collectBootstrapRoutes(analysis, models);
     const allNodes = new Map<string, HonoNode>();
     const routes: RouteReg[] = [];
     for (const model of models.values()) {
@@ -307,6 +308,79 @@ export const honoPack: FrameworkPack<TsAnalysis> = {
   },
 };
 
+/** Follow executed registration helpers with the actual Hono argument binding. */
+function collectBootstrapRoutes(analysis: TsAnalysis, models: Map<string, FileModel>): void {
+  const { ts, checker } = analysis;
+  const sourceModels = new Map([...models.values()].map(model => [model.source, model]));
+  const visited = new Set<string>();
+  const follow = (call: any, owner: FileModel, bindings: Map<any, HonoNode>, depth: number): void => {
+    if (depth > 24) return;
+    const actuals = call.arguments.map((arg: any) => ts.isIdentifier(arg) ? bindings.get(checker.getSymbolAtLocation(arg)) : undefined);
+    if (!actuals.some(Boolean)) return;
+    const resolved = resolveHandler(analysis, owner.source, call.expression);
+    const fn = resolved?.node;
+    const model = resolved ? sourceModels.get(resolved.file) : undefined;
+    if (!fn?.body || !model) return;
+    const key = `${model.rel}:${fn.pos}:${actuals.map((node: HonoNode | undefined) => node?.id ?? "").join("|")}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    const parameters = new Map<any, HonoNode>();
+    fn.parameters.forEach((param: any, i: number) => {
+      if (ts.isIdentifier(param.name) && actuals[i]) parameters.set(checker.getSymbolAtLocation(param.name), actuals[i]);
+    });
+    const visit = (node: any): void => {
+      if (node !== fn.body && ts.isFunctionLike(node)) return;
+      if (ts.isCallExpression(node)) {
+        if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
+          const instance = parameters.get(checker.getSymbolAtLocation(node.expression.expression));
+          if (instance) classifyCall(analysis, model, node, instance);
+        }
+        follow(node, model, parameters, depth + 1);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(fn.body);
+  };
+  for (const model of models.values()) {
+    const bindings = new Map<any, HonoNode>();
+    const visit = (node: any): void => {
+      if (ts.isFunctionLike(node)) return;
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && isHonoInstance(analysis, node.initializer)) {
+        const instance = model.nodes.get(node.name.text);
+        if (instance) bindings.set(checker.getSymbolAtLocation(node.name), instance);
+      }
+      if (ts.isCallExpression(node)) follow(node, model, bindings, 0);
+      ts.forEachChild(node, visit);
+    };
+    model.source.forEachChild(visit);
+  }
+}
+
+function staticHonoString(analysis: TsAnalysis, node: any, seen = new Set<any>()): string | undefined {
+  const {ts, checker} = analysis;
+  if (!node || seen.has(node) || seen.size > 24) return undefined;
+  const next = new Set(seen).add(node);
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    let text = node.head.text;
+    for (const span of node.templateSpans) {
+      const value = staticHonoString(analysis, span.expression, next);
+      if (value === undefined) return undefined;
+      text += value + span.literal.text;
+    }
+    return text;
+  }
+  if (ts.isIdentifier(node)) {
+    let symbol = checker.getSymbolAtLocation(node);
+    if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+    const declarations = symbol?.declarations ?? [];
+    if (declarations.length !== 1) return undefined;
+    const declaration = declarations[0];
+    if (ts.isVariableDeclaration(declaration) && declaration.initializer && declaration.parent.flags & ts.NodeFlags.Const) return staticHonoString(analysis, declaration.initializer, next);
+  }
+  return undefined;
+}
+
 function relId(file: string, varName: string): string {
   return `${file}::${varName}`;
 }
@@ -454,10 +528,10 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
         for (const prop of arg.properties) {
           if (!ts.isPropertyAssignment(prop)) continue;
           const k = prop.name?.getText(source);
-          if (k === "method" && ts.isStringLiteralLike(prop.initializer)) {
-            method = prop.initializer.text.toLowerCase();
-          } else if (k === "path" && ts.isStringLiteralLike(prop.initializer)) {
-            path = prop.initializer.text;
+          if (k === "method") {
+            method = staticHonoString(analysis, prop.initializer)?.toLowerCase();
+          } else if (k === "path") {
+            path = staticHonoString(analysis, prop.initializer);
           }
         }
         if (method && path)
@@ -534,7 +608,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
   return model;
 }
 
-function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
+function classifyCall(analysis: TsAnalysis, model: FileModel, node: any, boundInstance?: HonoNode): void {
   const { ts } = analysis;
   if (!ts.isPropertyAccessExpression(node.expression)) return;
   const access = node.expression;
@@ -549,7 +623,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
 
   // Only proven Hono instances may register declarative routes. An unrelated
   // object's openapi() method must not produce a root-level API.
-  if (method === "openapi" && model.nodes.has(rootName)) {
+  if (method === "openapi" && (boundInstance || model.nodes.has(rootName))) {
     const arg = node.arguments[0];
     const handlerNode = [...node.arguments]
       .slice(1)
@@ -557,7 +631,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
       .find((a: any) => a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a)));
     if (arg && handlerNode) {
       model.pendingOpenapi.push({
-        nodeId: model.nodes.get(rootName)?.id ?? "",
+        nodeId: boundInstance?.id ?? model.nodes.get(rootName)?.id ?? "",
         arg,
         handlerNode,
         origin,
@@ -566,7 +640,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
     return;
   }
 
-  const nodeVar = model.nodes.get(rootName);
+  const nodeVar = boundInstance ?? model.nodes.get(rootName);
   if (!nodeVar) return;
 
   // app.route('/prefix', subApp)
@@ -619,7 +693,14 @@ function resolveRouteDef(
   // Local routeDef: openapi(loginRoute, ...)
   if (ts.isIdentifier(arg)) {
     const def = model.routeDefs.get(arg.text);
-    return def ? { ...def, ownerRel: model.rel } : undefined;
+    if (def) return { ...def, ownerRel: model.rel };
+    let symbol = analysis.checker.getSymbolAtLocation(arg);
+    if (symbol?.flags & ts.SymbolFlags.Alias) symbol = analysis.checker.getAliasedSymbol(symbol);
+    const declarations = (symbol?.declarations ?? []).filter((declaration: any) => ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name));
+    if (declarations.length !== 1) return undefined;
+    const declaration = declarations[0];
+    const target = [...models.values()].find(candidate => candidate.source === declaration.getSourceFile());
+    return target?.routeDefs.get(declaration.name.text);
   }
   // Namespace member: openapi(routes.getCurrentUser, ...)
   if (ts.isPropertyAccessExpression(arg) && ts.isIdentifier(arg.expression)) {

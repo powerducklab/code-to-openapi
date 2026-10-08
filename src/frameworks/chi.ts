@@ -316,7 +316,9 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         inherited: TsNode[] = [],
       ) => {
         if (visited.has(scope)) return;
+        visited = new Set(visited);
         visited.add(scope);
+        const scopeFile = goSourceFile(scope, analysis) ?? file;
         const middleware = [...inherited];
         // Walk without descending into nested func literals: their receiver is
         // a different (often shadowing) parameter and is handled explicitly
@@ -325,6 +327,16 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
           if (node.type === "func_literal" && node !== scope) return;
           if (node.type === "call_expression") {
             handleCall(node);
+            const args = positionalArguments(node);
+            const at = args.findIndex(arg => arg.type === "identifier" && arg.text === receiverName);
+            if (at >= 0) {
+              const target = resolveGoCall(node, analysis);
+              if (target?.body) {
+                const params = target.node.childForFieldName("parameters")?.namedChildren.flatMap(parameter => parameter.namedChildren.filter(child => child.type === "identifier")) ?? [];
+                const parameter = params[at];
+                if (parameter) collectCalls(target.body, parameter.text, prefix, visited, middleware);
+              }
+            }
           }
           for (const child of node.namedChildren) walk(child);
         };
@@ -363,7 +375,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
               unresolved.push({
                 reason: "dynamic-path",
                 message: "Chi route path is not a static string literal",
-                origin: { file: file.path, line: call.startPosition.row + 1 },
+                origin: { file: scopeFile.path, line: call.startPosition.row + 1 },
               });
               return;
             }
@@ -383,7 +395,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
               path: joinPath(prefix, normalizeChiPath(rawPath)),
               handlerName: methodHandlerName,
               handlerNode: handler?.type === "func_literal" ? handler : null,
-              origin: { file: file.path, line: call.startPosition.row + 1 },
+              origin: { file: scopeFile.path, line: call.startPosition.row + 1 },
             });
             return;
           }
@@ -414,7 +426,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
               return;
             }
             if (callback) {
-              const setupFn = resolveChiCallbackFn(callback, analysis, file);
+              const setupFn = resolveChiCallbackFn(callback, analysis, scopeFile);
               if (setupFn?.body) {
                 const routerParam = chiRouterParamName(setupFn);
                 if (routerParam) {
@@ -439,7 +451,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
                   ? target.namedChildren[0].text
                   : null;
               let factory: GoFunction | undefined = factoryName
-                ? analysis.functions.get(factoryName)?.find((fn) => fn.file === file.path)
+                ? analysis.functions.get(factoryName)?.find((fn) => fn.file === scopeFile.path)
                 : undefined;
               // Method-value factory on a value, e.g. `usersResource{}.Routes()`.
               if (!factory && factorySel) {
@@ -450,7 +462,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
                       m.name === factorySel.method &&
                       receiverTypeName(m) === receiverType,
                   );
-                  factory = matches.find((m) => m.file === file.path) ?? matches[0];
+                  factory = matches.find((m) => m.file === scopeFile.path) ?? matches[0];
                 }
               }
               if (factory?.body) collectFactory(factory, joinPath(prefix, mountPrefix), visited);
@@ -483,26 +495,6 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
       // Entry points: routers declared in main-like top-level functions.
       // Follow registration helpers such as `setupRoutes(r)` so apps that
       // factor route groups out of main are still fully discovered.
-      const followQueue: Array<{ fn: GoFunction; routerParam: string; prefix: string }> = [];
-      const enqueueSetupCalls = (body: TsNode, knownRouters: Set<string>) => {
-        for (const call of findAll(body, (n) => n.type === "call_expression")) {
-          const callee = call.namedChildren[0];
-          if (!callee || callee.type !== "identifier") continue;
-          const args = positionalArguments(call);
-          const routerArg = args.find(
-            (a) => a.type === "identifier" && knownRouters.has(a.text),
-          );
-          if (!routerArg) continue;
-          const target = analysis.functions.get(callee.text)?.[0];
-          if (!target?.body) continue;
-          const paramList = target.node.namedChildren.find((c) => c.type === "parameter_list");
-          const routerParam =
-            paramList?.namedChildren.find((c) => /chi\.Router|Router/.test(c.text))
-              ?.namedChildren.find((c) => c.type === "identifier")?.text;
-          if (routerParam) followQueue.push({ fn: target, routerParam, prefix: "" });
-        }
-      };
-
       for (const fn of file.root.namedChildren.filter((c) => c.type === "function_declaration")) {
         const name = fn.namedChildren[0];
         const body = fn.namedChildren.find((c) => c.type === "block");
@@ -513,7 +505,6 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         for (const routerName of mainRouters) {
           collectCalls(body, routerName, "", new Set());
         }
-        enqueueSetupCalls(body, mainRouters);
         for (const call of findAll(body, (n) => n.type === "call_expression")) {
           const sel = selectorCall(call);
           if (
@@ -572,17 +563,7 @@ export const chiPack: FrameworkPack<GoAnalysis> = {
         for (const routerName of created) collectCalls(body, routerName, "", new Set());
       }
 
-      // Breadth-first expansion of setup helpers.
-      const visitedSetups = new Set<string>();
-      while (followQueue.length) {
-        const item = followQueue.shift()!;
-        const key = `${item.fn.file}::${item.fn.name}`;
-        if (visitedSetups.has(key)) continue;
-        visitedSetups.add(key);
-        const body = item.fn.body!;
-        collectCalls(body, item.routerParam, item.prefix, new Set());
-        enqueueSetupCalls(body, new Set([item.routerParam]));
-      }
+
     }
 
     // A factory reached both as an entry point and via Mount/Route must only

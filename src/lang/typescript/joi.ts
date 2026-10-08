@@ -50,6 +50,8 @@ function propertyName(ts: any, name: any): string | null {
 /** True when a call chain is rooted at the Joi default import (`Joi.string()`). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function isJoiSchema(ts: any, node: any): boolean {
+  if (!node) return false;
+  if (ts.isObjectLiteralExpression(node)) return node.properties.length > 0 && node.properties.every((prop: any) => ts.isPropertyAssignment(prop) && !ts.isComputedPropertyName(prop.name) && isJoiSchema(ts, prop.initializer));
   const chain = callChain(ts, node);
   if (!chain) return false;
   const root = chain.base;
@@ -84,11 +86,12 @@ function convert(ts: any, node: any, depth: number): Conversion | null {
     node.arguments[0] &&
     ts.isObjectLiteralExpression(node.arguments[0]);
 
+  const shorthandObject = ts.isObjectLiteralExpression(node) && isJoiSchema(ts, node);
   const chain = callChain(ts, node);
-  if (!chain && !directObject) return null;
+  if (!chain && !directObject && !shorthandObject) return null;
 
   const steps = chain?.steps ?? [];
-  const typeName = directObject ? "object" : (steps[0]?.name ?? "any");
+  const typeName = directObject || shorthandObject ? "object" : (steps[0]?.name ?? "any");
   const rest = directObject ? [] : steps.slice(1);
 
   let required = false;
@@ -169,7 +172,7 @@ function convert(ts: any, node: any, depth: number): Conversion | null {
   if (typeName === "object") {
     schema.type = "object";
     const keysArg =
-      (directObject ? node.arguments[0] : undefined) ??
+      (shorthandObject ? node : directObject ? node.arguments[0] : undefined) ??
       rest.find((step) => step.name === "keys" && step.args[0])?.args[0];
     if (keysArg && ts.isObjectLiteralExpression(keysArg)) {
       const properties: Record<string, JsonSchema> = {};

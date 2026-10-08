@@ -27,13 +27,24 @@ function packageFiles(owner:GoFile,qualifier:string|undefined,analysis:GoAnalysi
  if(!qualifier)return [...analysis.files.values()].filter(file=>dirname(file.path)===dirname(owner.path)&&file.packageName===owner.packageName);
  const imports=findAll(owner.root,n=>n.type==='import_spec').filter(n=>{
   const path=n.childForFieldName('path')??n.namedChildren.find(c=>c.type==='interpreted_string_literal');
-  const alias=n.childForFieldName('name')?.text??path?.text.slice(1,-1).split('/').pop();
-  return alias===qualifier;
+  const explicit=n.childForFieldName('name')?.text;
+  if(explicit)return explicit===qualifier;
+  const imported=path?.text.slice(1,-1);
+  // Go imports use the declared package name, which need not match its directory.
+  const local=[...analysis.files.values()].filter(file=>{
+   const dir=dirname(file.path).replace(/\\/g,'/');
+   return analysis.modulePath&&imported===(dir==='.'?analysis.modulePath:analysis.modulePath+'/'+dir);
+  });
+  return local.length ? local.every(file=>file.packageName===qualifier) : imported?.split('/').pop()===qualifier;
  });
  if(imports.length!==1)return [];
  const path=imports[0]!.childForFieldName('path')??imports[0]!.namedChildren.find(c=>c.type==='interpreted_string_literal');
  const imported=path?.text.slice(1,-1);if(!imported)return [];
- const files=[...analysis.files.values()].filter(file=>{const dir=dirname(file.path).replace(/\\/g,'/');return dir!=='.'&&(imported===dir||imported.endsWith('/'+dir));});
+ const files=[...analysis.files.values()].filter(file=>{
+  const dir=dirname(file.path).replace(/\\/g,'/');
+  if(analysis.modulePath)return imported===(dir==='.'?analysis.modulePath:analysis.modulePath+'/'+dir);
+  return dir!=='.'&&(imported===dir||imported.endsWith('/'+dir));
+ });
  return new Set(files.map(file=>dirname(file.path))).size===1?files:[];
 }
 export function goTypeDeclaration(type:TsNode,analysis:GoAnalysis):TypeDeclaration|undefined {
@@ -154,8 +165,7 @@ function builtinMakeType(call:TsNode,analysis:GoAnalysis):TsNode|undefined{
  * Resolve a package-level function referenced as `pkg.Func` (or bare `Func`)
  * in a route registration file. The qualifier disambiguates same-named
  * functions across packages (e.g. services.CreateTodo vs dal.CreateTodo);
- * falls back to the first same-named candidate only when the package cannot
- * be resolved uniquely.
+ * never substitutes a same-named function from another package.
  */
 export function resolveGoPackageFunction(
   analysis: GoAnalysis,
@@ -165,11 +175,11 @@ export function resolveGoPackageFunction(
 ): GoFunction | undefined {
   const candidates = analysis.functions.get(name) ?? [];
   if (candidates.length === 0) return undefined;
-  if (!qualifier || !owner) return candidates[0];
+  if (!owner) return undefined;
   const paths = new Set(packageFiles(owner, qualifier, analysis).map((file) => file.path));
-  if (paths.size === 0) return candidates[0];
+  if (paths.size === 0) return undefined;
   const filtered = candidates.filter((fn) => paths.has(fn.file));
-  return filtered.length === 1 ? filtered[0] : (filtered[0] ?? candidates[0]);
+  return filtered.length === 1 ? filtered[0] : undefined;
 }
 export function resolveGoCall(call:TsNode,analysis:GoAnalysis,depth=0):GoFunction|undefined { if(depth>12)return;
  const callee=call.type==='call_expression'?call.namedChildren[0]:call,owner=goSourceFile(call,analysis);if(!callee||!owner)return;

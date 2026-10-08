@@ -208,7 +208,9 @@ await scanProject({
   ignore: ["legacy/**"], // merged with .gitignore / .powerduckignore
   includeTests: false, // include test and fixture files (default: false)
   frameworks: ["express"], // restrict framework packs
-  maxFileBytes: 2 * 1024 * 1024, // per-file cap (default 2 MiB)
+  maxFileBytes: 2 * 1024 * 1024, // skipped files are reported as unresolved
+  maxFiles: 10_000,             // exceeding this source-file budget fails the scan
+  maxTotalBytes: 64 * 1024 * 1024, // total indexed source budget (64 MiB)
   onProgress: (phase, detail) => console.log(phase, detail ?? ""),
   gapResolver, // optional; omit for fully deterministic output
 });

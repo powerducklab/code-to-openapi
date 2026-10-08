@@ -31,6 +31,7 @@ function walkUnknown(
     if (!current || typeof current !== "object" || seen.has(current)) continue;
     seen.add(current);
     const value = current as Record<string, unknown>;
+    if (Array.isArray(value["x-discovery-incomplete"]) && value["x-discovery-incomplete"].length) return true;
     if (!Object.keys(value).some(key => !SCHEMA_ANNOTATIONS.has(key) && !key.startsWith("x-"))) return true;
     if (components && typeof value.$ref === "string" && value.$ref.startsWith("#/components/schemas/")) {
       const name = value.$ref.slice("#/components/schemas/".length).replace(/~1/g, "/").replace(/~0/g, "~");
@@ -83,32 +84,11 @@ function walkUnknown(
         }
       }
     }
-    // anyOf/oneOf describe alternatives: if at least one data-bearing branch
-    // is fully typed, consumers already have a concrete shape, so a weak
-    // sibling (for example the unauthenticated variant) is not an unknown gap.
-    // A pure `null` branch carries no data shape, so it cannot by itself make
-    // a nullable dynamic object count as known; its object sibling is still
-    // examined and stays a gap when its fields are untyped. allOf still
-    // requires every branch to be complete.
-    for (const key of ["anyOf", "oneOf"] as const) {
-      const branches = value[key];
-      if (Array.isArray(branches) && branches.length > 0) {
-        const isPureNull = (branch: unknown): boolean => {
-          if (!branch || typeof branch !== "object") return false;
-          const record = branch as Record<string, unknown>;
-          return record.type === "null" &&
-            Object.keys(record).every((k) => ["type", "description", "title"].includes(k));
-        };
-        const dataBranches = branches.filter((branch) => !isPureNull(branch));
-        const candidates = dataBranches.length > 0 ? dataBranches : branches;
-        const someTyped = candidates.some(
-          (branch) =>
-            branch &&
-            typeof branch === "object" &&
-            !walkUnknown(branch, components, new Set(seen)),
-        );
-        if (!someTyped) for (const item of candidates) pending.push(item);
-      }
+    // A known success branch must not hide an unresolved alternative. This
+    // gate measures completeness of the entire contract, not whether at least
+    // one example can be generated. Share the cycle set across every branch.
+    for (const key of ["anyOf", "oneOf"]) {
+      if (Array.isArray(value[key])) for (const item of value[key] as unknown[]) pending.push(item);
     }
     for (const key of ["allOf", "prefixItems"]) {
       if (Array.isArray(value[key])) for (const item of value[key] as unknown[]) pending.push(item);

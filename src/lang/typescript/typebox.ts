@@ -47,6 +47,9 @@ function optionsObject(ts: any, node: any): Record<string, unknown> {
       else if (ts.isNumericLiteral(v)) out[key] = Number(v.text);
       else if (v.kind === ts.SyntaxKind.TrueKeyword) out[key] = true;
       else if (v.kind === ts.SyntaxKind.FalseKeyword) out[key] = false;
+      else if (ts.isArrayLiteralExpression(v) && v.elements.every((el: any) => ts.isStringLiteralLike(el) || ts.isNumericLiteral(el))) {
+        out[key] = v.elements.map((el: any) => ts.isNumericLiteral(el) ? Number(el.text) : el.text);
+      }
     }
     return out;
   }
@@ -114,11 +117,14 @@ export function convertTypeBoxNode(node: any, rc: TypeBoxResolveContext): JsonSc
   const args = node.arguments;
 
   switch (name) {
-    case "Object":
-      return convertObject(ts, args[0], rc);
+    case "Object": {
+      const schema = convertObject(ts, args[0], rc);
+      return schema ? { ...schema, ...optionsObject(ts, { arguments: [args[1]] }) } : null;
+    }
     case "String": {
       const opts = optionsObject(ts, node);
       return {
+        ...opts,
         type: "string",
         ...(typeof opts.format === "string" ? { format: opts.format } : {}),
         ...(typeof opts.pattern === "string" ? { pattern: opts.pattern } : {}),
@@ -153,7 +159,7 @@ export function convertTypeBoxNode(node: any, rc: TypeBoxResolveContext): JsonSc
       return {};
     case "Array": {
       const items = convertTypeBoxNode(args[0], { ...rc, depth: depth + 1 });
-      return { type: "array", items: items ?? {} };
+      return { ...optionsObject(ts, { arguments: [args[1]] }), type: "array", items: items ?? {} };
     }
     case "Union": {
       if (args[0] && ts.isArrayLiteralExpression(args[0])) {

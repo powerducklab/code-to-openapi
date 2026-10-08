@@ -86,57 +86,43 @@ export const axumPack: FrameworkPack<RustAnalysis> = {
     const candidates: RouteCandidate[] = [];
     const model = buildRustModelIndex(analysis);
 
+    // Resolve each mount to a single module-owned function. Expanding every
+    // same-named `routes()` cross-products unrelated modules and loses prefixes.
+    const nested = new Set<number>();
     for (const [rel, file] of analysis.files) {
-      // Router functions referenced by .nest()/.merge() own their routes; the
-      // global scan must not double-count them without the nested prefix.
-      const nestedRouterFns = new Set<string>();
-      for (const nestCall of findAll(file.root, isNestCall)) {
-        const args = childrenOfType(nestCall, "arguments")[0];
-        const routerCall = args?.namedChildren.find((a) => a.type === "call_expression");
-        const fnName = routerCall ? calleeIdentifier(routerCall) : null;
-        if (fnName) nestedRouterFns.add(fnName);
-      }
-
-      // Top-level route chains.
-      for (const call of findAll(file.root, isRouteCall)) {
-        if (insideNamedFunction(call, nestedRouterFns)) continue;
-        const args = childrenOfType(call, "arguments")[0];
-        const argNodes = args ? args.namedChildren : [];
-        const routeLiteral = argNodes.find((a) => a.type === "string_literal");
-        const handlerExpr = argNodes.find((a) => a.type === "call_expression");
-        if (!routeLiteral || !handlerExpr) continue;
-        const route = stringLiteralText(routeLiteral);
-        for (const { verb, handler } of collectVerbHandlers(handlerExpr)) {
-          const candidate = buildCandidate(
-            analysis,
-            model,
-            verb,
-            route,
-            handler,
-            rel,
-            handler.startPosition.row + 1,
-            "",
-          );
-          if (candidate) candidates.push(candidate);
-        }
-      }
-
-      // .nest("/prefix", router_fn()) / .merge(router_fn()).
       for (const call of findAll(file.root, isNestCall)) {
-        const args = childrenOfType(call, "arguments")[0];
-        const argNodes = args ? args.namedChildren : [];
-        const fieldName = chainFieldName(call);
-        const prefix =
-          fieldName === "nest"
-            ? normalizeRoute(stringLiteralText(argNodes.find((a) => a.type === "string_literal")!))
-            : "";
-        const routerCall = argNodes.find((a) => a.type === "call_expression");
-        const fnName = routerCall ? calleeIdentifier(routerCall) : null;
-        if (!fnName) continue;
-        // Modules commonly each define their own `router()`; all same-named
-        // builders are expanded and deduped by method+path downstream.
-        for (const routerFn of analysis.functions.get(fnName) ?? []) {
-          collectRouterFunctionRoutes(analysis, model, routerFn, rel, prefix, candidates);
+        const args = childrenOfType(call, "arguments")[0]?.namedChildren ?? [];
+        const routerCall = args.find(a => a.type === "call_expression");
+        const ref = routerCall?.namedChildren[0];
+        const target = ref ? resolveRustFunction(analysis, ref, rel) : null;
+        if (target) nested.add(target.id);
+      }
+    }
+    const walk = (node: TsNode, rel: string, prefix: string, ancestors: Set<number>): void => {
+      if (ancestors.has(node.id)) {
+        unresolved.push({ reason: "path-dynamic", message: "Cyclic router mount", origin: { file: rel } });
+        return;
+      }
+      const next = new Set(ancestors).add(node.id);
+      collectRouterFunctionRoutes(analysis, model, node, rel, prefix, candidates);
+      for (const call of findAll(node, isNestCall)) {
+        const args = childrenOfType(call, "arguments")[0]?.namedChildren ?? [];
+        const routerCall = args.find(a => a.type === "call_expression");
+        const ref = routerCall?.namedChildren[0];
+        const target = ref ? resolveRustFunction(analysis, ref, rel) : null;
+        const literal = args.find(a => a.type === "string_literal");
+        if (!target || (chainFieldName(call) === "nest" && !literal)) {
+          unresolved.push({ reason: "path-dynamic", message: "Router mount target or prefix could not be resolved", origin: { file: rel, line: call.startPosition.row + 1 } });
+          continue;
+        }
+        const mountedPrefix = chainFieldName(call) === "nest" ? joinRoute(prefix, stringLiteralText(literal!)) : prefix;
+        walk(target, rustNodeFile(analysis, target) ?? rel, mountedPrefix, next);
+      }
+    };
+    for (const [rel, file] of analysis.files) {
+      for (const fn of findAll(file.root, n => n.type === "function_item")) {
+        if (!nested.has(fn.id) && (findAll(fn, isRouteCall).length || findAll(fn, isNestCall).length)) {
+          walk(fn, rel, "", new Set());
         }
       }
     }
@@ -181,6 +167,30 @@ function disambiguateOperationIds(routes: RouteCandidate[]): void {
     r.operationId = candidate;
     used.add(candidate);
   }
+}
+
+function rustNodeFile(analysis: RustAnalysis, node: TsNode): string | undefined {
+  let root = node;
+  while (root.parent) root = root.parent;
+  return [...analysis.files].find(([, file]) => file.root.id === root.id)?.[0];
+}
+
+function resolveRustFunction(analysis: RustAnalysis, ref: TsNode, owner: string): TsNode | null {
+  const parts = ref.text.split("::");
+  const name = parts.pop()!;
+  const candidates = analysis.functions.get(name) ?? [];
+  if (parts.length) {
+    const module = parts.at(-1)!;
+    const matches = candidates.filter(fn => {
+      const path = rustNodeFile(analysis, fn) ?? "";
+      return path.endsWith(`/${module}.rs`) || path.endsWith(`/${module}/mod.rs`);
+    });
+    if (matches.length === 1) return matches[0];
+    return null;
+  }
+  const local = candidates.filter(fn => rustNodeFile(analysis, fn) === owner);
+  if (local.length === 1) return local[0];
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function collectRouterFunctionRoutes(
@@ -355,7 +365,7 @@ function buildCandidate(
     handlerRef.type === "identifier" || handlerRef.type === "scoped_identifier"
       ? handlerRef.text.split("::").pop()!
       : null;
-  const fn = fnName ? analysis.functions.get(fnName)?.[0] ?? null : null;
+  const fn = fnName ? resolveRustFunction(analysis, handlerRef, rel) : null;
   if (!fn) return null;
 
   const fullPath = normalizeRoute(route);
@@ -481,7 +491,7 @@ function collectHandlerParameters(
           addParam("path", field.name, field.schema, "high", true);
         }
       } else {
-        const name = binding ?? pathParamName(pathParams) ?? "id";
+        const name = pathParamName(pathParams) ?? binding ?? "id";
         addParam(
           "path",
           name,

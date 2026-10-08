@@ -115,13 +115,16 @@ export const slimPack: FrameworkPack<PhpAnalysis> = {
           }
         }
         const pathNode = argNodes[offset]?.namedChildren[0];
-        const pathStr = pathNode?.type === "string" ? pathNode : undefined;
-        const rawPath = pathStr ? phpStringText(pathStr) : null;
+        const rawPath = staticPathString(pathNode);
         if (rawPath === null) {
           unresolved.push({reason:"dynamic-path",message:"Cannot resolve Slim route path",origin:{file:rel,line:call.startPosition.row+1}});
           continue;
         }
         const prefix = groupPrefixChain(call);
+        if (prefix === null) {
+          unresolved.push({reason:"dynamic-path",message:"Cannot resolve Slim group prefix",origin:{file:rel,line:call.startPosition.row+1}});
+          continue;
+        }
         const fullPath = normalizeRoute(prefix + rawPath);
 
         // Skip the framework-agnostic CORS pre-flight catch-all such as
@@ -220,7 +223,13 @@ function resolveHandlerClass(arg: TsNode | undefined, analysis: PhpAnalysis): Ph
  * Walk up from a verb call, collecting every enclosing `$app->group('/prefix',
  * closure)` prefix in outer-to-inner order.
  */
-function groupPrefixChain(call: TsNode): string {
+function staticPathString(node: TsNode | undefined): string | null {
+  if (!node || !["string", "encapsed_string"].includes(node.type)) return null;
+  if (node.namedChildren.some(child => child.type !== "string_content")) return null;
+  return phpStringText(node);
+}
+
+function groupPrefixChain(call: TsNode): string | null {
   const prefixes: string[] = [];
   let cur: TsNode | null = call.parent ?? null;
   while (cur) {
@@ -237,8 +246,8 @@ function groupPrefixChain(call: TsNode): string {
           if (method === "group") {
             const gArgs = p.namedChildren.find((c) => c.type === "arguments");
             const first = gArgs ? childrenOfType(gArgs, "argument")[0] : undefined;
-            const str = first?.type === "string" ? first : first?.namedChildren.find((c) => c.type === "string");
-            const text = str ? phpStringText(str) : null;
+            const text = staticPathString(first?.type === "argument" ? first.namedChildren[0] : first);
+            if (text === null) return null;
             if (text) prefixes.unshift(text);
             break;
           }

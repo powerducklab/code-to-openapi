@@ -112,7 +112,7 @@ describe("parseGapResolution", () => {
   it("returns null for empty or garbage responses", () => {
     expect(parseGapResolution("nonsense")).toBeNull();
     expect(parseGapResolution("{}")).toBeNull();
-    expect(parseGapResolution({ confidence: "low" })).toBeNull();
+    expect(parseGapResolution({ confidence: "low" })?.outcome).toBe("insufficient-evidence");
   });
 
   it("validates SSE event names and keeps data schemas", () => {
@@ -255,3 +255,5 @@ describe("sanitizeSchema", () => {
     });
   });
 });
+
+it("retains a bounded explanation when the model lacks evidence",()=>{const r=parseGapResolution({confidence:"low",rationale:"missing transport implementation ".repeat(30)});expect(r?.outcome).toBe("insufficient-evidence");expect(r?.rationale?.length).toBeGreaterThan(300);});

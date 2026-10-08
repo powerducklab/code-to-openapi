@@ -1,3 +1,4 @@
+import { staticString } from '../lang/typescript/staticString.js';
 /**
  * Koa framework pack (typescript/javascript).
  *
@@ -48,6 +49,7 @@ interface RouterModel {
   file: string;
   varName: string;
   prefix: string;
+  dynamicPrefix?: boolean;
   initializer: any;
 }
 
@@ -144,6 +146,10 @@ export const koaPack: FrameworkPack<TsAnalysis> = {
       const stack=[{id:root,prefix:routers.get(root)?.prefix??'',ancestors:new Set<string>()}];
       while(stack.length){
         const {id,prefix,ancestors}=stack.pop()!;
+        if (routers.get(id)?.dynamicPrefix) {
+          unresolved.push({reason:'path-dynamic',message:'Koa router prefix depends on runtime values',origin:{file:routers.get(id)!.file}});
+          continue;
+        }
         if(ancestors.has(id)){unresolved.push({reason:'path-dynamic',message:'Cyclic Koa router mount requires review',origin:{file:routers.get(id)?.file??''}});continue;}
         const key=id+'\0'+prefix;if(visited.has(key))continue;
         if(visited.size>=10000){unresolved.push({reason:'path-dynamic',message:'Koa mount expansion exceeded 10000 paths',origin:{file:routers.get(id)?.file??''}});return;}
@@ -153,14 +159,16 @@ export const koaPack: FrameworkPack<TsAnalysis> = {
       }
     };
     for(const id of routers.keys())if(!incoming.has(id))walk(id);
-    for(const id of routers.keys())if(!prefixes.has(id))walk(id);
+    for (const [id, router] of routers) if (!prefixes.has(id) && incoming.has(id)) {
+      unresolved.push({reason:'path-dynamic',message:'Koa router has no statically resolved mount path',origin:{file:router.file}});
+    }
 
     const yupRegistry = koaSchemaRegistry(analysis);
     const candidates: RouteCandidate[] = [];
     const seenOp = new Map<string, RouteCandidate>();
 
     for (const route of routes) {
-     for (const prefix of prefixes.get(route.routerId) ?? [""]) {
+     for (const prefix of prefixes.get(route.routerId) ?? []) {
       const normalized = normalizeColonPath(route.rawPath);
       const fullPath = joinPath(prefix, normalized.path);
       const facts = analyzeKoaHandler(analysis, route.file, route.handlerNode, {
@@ -262,15 +270,17 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       model.ctorNames.has(node.initializer.expression.text)
     ) {
       let prefix = "";
+      let dynamicPrefix = false;
       const arg = node.initializer.arguments?.[0];
       if (arg && ts.isObjectLiteralExpression(arg)) {
         for (const prop of arg.properties) {
           if (
             ts.isPropertyAssignment(prop) &&
-            prop.name?.getText(source) === "prefix" &&
-            ts.isStringLiteralLike(prop.initializer)
+            prop.name?.getText(source) === "prefix"
           ) {
-            prefix = prop.initializer.text;
+            const value = staticString(analysis, prop.initializer);
+            dynamicPrefix = value === undefined;
+            prefix = value ?? "";
           }
         }
       }
@@ -279,6 +289,7 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
         file: rel,
         varName: node.name.text,
         prefix,
+        dynamicPrefix,
         initializer: node.initializer,
       });
     }
@@ -290,11 +301,12 @@ function modelFile(analysis: TsAnalysis, rel: string, source: any): FileModel {
       node.expression.name.text === "prefix" &&
       ts.isIdentifier(node.expression.expression) &&
       model.routers.has(node.expression.expression.text) &&
-      node.arguments[0] &&
-      ts.isStringLiteralLike(node.arguments[0])
+      node.arguments[0]
     ) {
       const r = model.routers.get(node.expression.expression.text)!;
-      r.prefix = joinPath(r.prefix, node.arguments[0].text);
+      const value = staticString(analysis, node.arguments[0]);
+      r.dynamicPrefix = r.dynamicPrefix || value === undefined;
+      r.prefix = joinPath(r.prefix, value ?? "");
     }
 
     if (ts.isCallExpression(node)) classifyCall(analysis, model, node);
@@ -315,7 +327,8 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
   const method = access.name.text;
   if (!VERBS.has(method)) return;
   const pathArg = node.arguments[0];
-  if (!pathArg || !ts.isStringLiteralLike(pathArg)) return;
+  const path = staticString(analysis, pathArg);
+  if (path === undefined) return;
   const isHandlerLike = (a: any): boolean =>
     Boolean(
       a &&
@@ -331,7 +344,7 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any): void {
     routerId: router.id,
     file: model.rel,
     method: method === "del" ? "delete" : method,
-    rawPath: pathArg.text,
+    rawPath: path,
     handlerNode,
     origin: locationAt(ts, model.source, node, model.rel),
   });
@@ -444,8 +457,12 @@ function analyzeKoaHandler(
         } else if (chain.names[0] === "body") {
           hasResponseSite = true;
           const { schema: declared, typed } = schemaFromNode(analysis, node.right);
-          const schema=values.size?inferValue(node.right)??declared:declared;
-          responses.record(pendingStatus, "application/json", schema, values.size ? "medium" : typed ? "high" : "medium");
+          const declaration = ts.isIdentifier(node.right) ? analysis.checker.getSymbolAtLocation(node.right)?.valueDeclaration : undefined;
+          const explicitlyTyped = declaration?.type || ts.isAsExpression(node.right) ||
+            (ts.isCallExpression(node.right) && analysis.checker.getResolvedSignature(node.right)?.declaration?.type);
+          const inferred = typed && explicitlyTyped && !values.size ? undefined : inferValue(node.right);
+          const schema = inferred ?? declared;
+          responses.record(pendingStatus, "application/json", schema, inferred ? "medium" : typed ? "high" : "medium");
           pendingStatus = "200";
         }
       }
@@ -458,8 +475,7 @@ function analyzeKoaHandler(
       node.expression.name.text === "get" &&
       ts.isIdentifier(node.expression.expression) &&
       node.expression.expression.text === ctxName &&
-      node.arguments[0] &&
-      ts.isStringLiteralLike(node.arguments[0])
+      node.arguments[0]
     ) {
       addParam(
         parameters,

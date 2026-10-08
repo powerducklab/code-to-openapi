@@ -88,6 +88,7 @@ interface FileModel {
   scopedMiddleware: Array<MiddlewareRef & { scopePath: string }>;
   /** Four-argument error handlers `(err, req, res, next)` registered via use(). */
   errorHandlers: Array<MiddlewareRef & { routerId: string; pos: number }>;
+  paramMiddleware: Array<MiddlewareRef & {routerId: string; param: string}>;
   routes: RouteCall[];
   unresolved: DiscoveredUnresolved[];
   listenPorts: number[];
@@ -326,6 +327,8 @@ export const expressPack: FrameworkPack<TsAnalysis> = {
           unresolved,
           customResponseMethods,
           schemaOverrides,
+          model.paramMiddleware.filter(mw => mw.routerId === route.routerId && pathParams.has(mw.param)),
+          allMiddleware.map(mw => mw.node),
         );
         const facts = analysisResult.facts;
         // Inspect proven ordinary middleware bodies for explicit responses. Do not
@@ -469,6 +472,7 @@ function modelFile(
     mounts: [],
     unscopedMiddleware: [],
     scopedMiddleware: [],
+    paramMiddleware: [],
     errorHandlers: [],
     routes: [],
     unresolved: [],
@@ -916,6 +920,11 @@ function classifyCall(analysis: TsAnalysis, model: FileModel, node: any) {
   }
 
   if (!router) {
+    return;
+  }
+
+  if (method === "param" && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0]) && node.arguments[1]) {
+    model.paramMiddleware.push({routerId: router.id, param: node.arguments[0].text, node: node.arguments[1], file: model.rel});
     return;
   }
 
@@ -1425,6 +1434,8 @@ function resolveAndAnalyze(
   unresolved: DiscoveredUnresolved[],
   customResponseMethods: Map<string, import("./express-handler.js").CustomResponseMethod>,
   schemaOverrides: { body?: JsonSchema; query?: JsonSchema; params?: JsonSchema } = {},
+  paramMiddleware: MiddlewareRef[] = [],
+  requestMiddleware: any[] = [],
 ): { facts: import("./express-handler.js").HandlerFacts; handlerSource?: string } {
   const noFacts: import("./express-handler.js").HandlerFacts = {
     parameters: [],
@@ -1452,6 +1463,8 @@ function resolveAndAnalyze(
     validators,
     customResponseMethods,
     validatedRequest: schemaOverrides,
+    requestMiddleware,
+    requestLoaders: paramMiddleware.map(mw => resolveHandler(analysis, analysis.sourceByPath.get(mw.file) ?? model.source, mw.node)?.node).filter(Boolean),
   });
   return {
     facts,

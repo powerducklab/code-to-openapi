@@ -343,21 +343,12 @@ function resolveHandler(index: Map<string, IndexedHandler[]>, reference: string)
   const candidates = index.get(bare);
   if (!candidates || candidates.length === 0) return undefined;
   const modPath = segments.slice(0, -1).filter((s) => s !== "crate" && s !== "self" && s !== "super");
-  if (modPath.length === 0) return candidates[0]!.fn;
-  let best = candidates[0]!;
-  let bestScore = -1;
-  for (const candidate of candidates) {
-    const mods = candidate.mods;
-    let score = 0;
-    const tail = mods.slice(mods.length - modPath.length);
-    if (tail.length === modPath.length && modPath.every((m, i) => tail[i] === m)) score = 3;
-    else if (mods.includes(modPath[modPath.length - 1]!)) score = 1;
-    if (score > bestScore) {
-      bestScore = score;
-      best = candidate;
-    }
-  }
-  return best.fn;
+  if (modPath.length === 0) return candidates.length === 1 ? candidates[0]!.fn : undefined;
+  const matches = candidates.filter(candidate => {
+    const tail = candidate.mods.slice(-modPath.length);
+    return tail.length === modPath.length && modPath.every((part, i) => tail[i] === part);
+  });
+  return matches.length === 1 ? matches[0]!.fn : undefined;
 }
 
 function collectResourceRoutes(
@@ -373,17 +364,26 @@ function collectResourceRoutes(
     const fe = routeCall.namedChildren.find((c) => c.type === "field_expression");
     let receiver = fe?.namedChildren[0];
     let hops = 0;
-    while (receiver?.type === "call_expression" && calleeText(receiver) !== "web::resource" && hops++ < 50) {
+    const constructors = new Set(["web::resource", "web::scope", "App::new", "actix_web::App::new"]);
+    while (receiver?.type === "call_expression" && !constructors.has(calleeText(receiver) ?? "") && hops++ < 50) {
       receiver = receiver.namedChildren.find(c => c.type === "field_expression")?.namedChildren[0];
     }
-    if (!receiver || receiver.type !== "call_expression" || calleeText(receiver) !== "web::resource") {
-      continue;
+    if (!receiver || receiver.type !== "call_expression") continue;
+    const constructor = calleeText(receiver);
+    if (!constructors.has(constructor ?? "")) continue;
+    const args = childrenOfType(routeCall, "arguments")[0]?.namedChildren ?? [];
+    const resource = constructor === "web::resource";
+    const lit = resource ? childrenOfType(receiver, "arguments")[0]?.namedChildren[0] : args[0];
+    if (lit?.type !== "string_literal" && lit?.type !== "raw_string_literal") continue;
+    let prefix = "";
+    if (constructor === "web::scope") {
+      const scopePath = childrenOfType(receiver, "arguments")[0]?.namedChildren[0];
+      if (scopePath?.type !== "string_literal" && scopePath?.type !== "raw_string_literal") continue;
+      prefix = unquoteRustString(scopePath.text);
     }
-    const lit = findFirst(receiver, (n) => n.type === "string_literal");
-    if (!lit) continue;
-    const route = normalizeRoute(unquoteRustString(lit.text));
+    const route = joinRoute(prefix, normalizeRoute(unquoteRustString(lit.text)));
 
-    const routeArg = childrenOfType(routeCall, "arguments")[0]?.namedChildren[0];
+    const routeArg = args[resource ? 0 : 1];
     const { verb, handlerName } = parseRouteTo(routeArg);
     if (!verb || !handlerName) continue;
     const fn = resolveHandler(handlerIndex, handlerName);
@@ -658,11 +658,12 @@ function collectResponses(fn: TsNode, model: RustModelIndex, gaps: GapCode[]): D
       continue;
     }
     if (mediaType === "application/json") {
+      if (!schema || !Object.keys(schema).length) gaps.push("response-schema-unknown");
       responses.push({
         statusCode: status,
         description: "",
         confidence: schema ? "high" : "medium",
-        ...(schema ? { content: [{ mediaType, schema }] } : {}),
+        content: [{ mediaType, schema: schema ?? {} }],
       });
       continue;
     }
@@ -730,6 +731,14 @@ function payloadSchema(arg: TsNode | undefined, model: RustModelIndex, fn: TsNod
   if (arg.type === "identifier") {
     const declarations = findAll(fn, n => n.type === "let_declaration" && n.namedChildren[0]?.text === arg.text);
     if (declarations.length === 1) {
+      const declaration = declarations[0]!;
+      const explicitType = declaration.childForFieldName("type");
+      if (explicitType) return rustTypeToSchema(explicitType, model);
+      const value = declaration.childForFieldName("value");
+      if (value?.type === "struct_expression") {
+        const type = value.childForFieldName("name") ?? value.namedChildren[0];
+        if (type) return rustTypeToSchema(type, model);
+      }
       const call = findFirst(declarations[0]!, n => n.type === "call_expression");
       const type = call ? deserializedJsonType(call) : undefined;
       if (type) return rustTypeToSchema(type, model);
@@ -738,6 +747,27 @@ function payloadSchema(arg: TsNode | undefined, model: RustModelIndex, fn: TsNod
   if (arg.type === "struct_expression") {
     const name = arg.namedChildren.find((c) => c.type === "type_identifier")?.text;
     if (name) return ensureRustComponent(name, model) ?? undefined;
+  }
+  if (arg.type === "macro_invocation" && /^serde_json::json!/.test(arg.text)) {
+    const tokens = arg.namedChildren.find(node => node.type === "token_tree");
+    if (tokens) {
+      try {
+        const value: unknown = JSON.parse(tokens.text.slice(1, -1));
+        const literalSchema = (item: unknown): JsonSchema => {
+          if (item === null) return {type: "null"};
+          if (typeof item === "string") return {type: "string"};
+          if (typeof item === "boolean") return {type: "boolean"};
+          if (typeof item === "number") return {type: Number.isInteger(item) ? "integer" : "number"};
+          if (Array.isArray(item)) {
+            const variants = [...new Map(item.map(child => {const schema = literalSchema(child); return [JSON.stringify(schema), schema];})).values()];
+            return {type: "array", items: variants.length === 1 ? variants[0] : variants.length ? {anyOf: variants} : {}, ...(item.length ? {} : {maxItems: 0})};
+          }
+          if (typeof item === "object") return {type: "object", properties: Object.fromEntries(Object.entries(item).map(([key, value]) => [key, literalSchema(value)])), required: Object.keys(item)};
+          return {};
+        };
+        return literalSchema(value);
+      } catch { /* Nonliteral macro arguments require Rust expression analysis. */ }
+    }
   }
   if (arg.type === "macro_invocation" && /^vec!/.test(arg.text)) {
     const inner = findFirst(arg, (n) => n.type === "struct_expression");

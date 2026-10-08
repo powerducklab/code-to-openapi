@@ -1,3 +1,4 @@
+import {pythonStaticIterableElements} from '../lang/python/staticRouting.js';
 import { remapSchemaReferences, namespaceComponents } from "../core/schema-references.js";
 /**
  * FastAPI framework pack (Python).
@@ -663,14 +664,31 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         if (!mc) continue;
         if (mc.method !== "include_router") continue;
         if (mc.receiver.type !== "identifier") continue;
-        const parent = routerById(file.path, mc.receiver.text);
+        const parent = resolveRouterRef(file.path, mc.receiver);
         const childArg = positionalArguments(call)[0];
         if (!parent || !childArg) continue;
-        const child = resolveRouterRef(file.path, childArg);
-        if (!child) continue;
+        // A statically declared tuple/list is commonly used to mount imported
+        // routers. Resolve only the enclosing loop binding, not same-named
+        // variables elsewhere in the project.
+        let childRefs = [{file: file.path, node: childArg}];
+        if (childArg.type === "identifier" && !resolveRouterRef(file.path, childArg)) {
+          let loop = call.parent;
+          while (loop && !["for_statement", "function_definition", "class_definition"].includes(loop.type)) loop = loop.parent;
+          if (loop?.type === "for_statement" && loop.childForFieldName("left")?.text === childArg.text) {
+            const iterable = loop.childForFieldName("right");
+            childRefs = iterable ? pythonStaticIterableElements(analysis, file.path, iterable) ?? [] : [];
+          }
+        }
+        const resolved = childRefs.map(ref => resolveRouterRef(ref.file, ref.node));
+        const children = resolved.filter((router): router is RouterInstance => router !== null);
+        if (resolved.some(router => router === null)) unresolved.push({reason: "handler-unresolved", message: "Included router list contains an unresolved entry", origin: {file: file.path, line: call.startPosition.row + 1}});
+        if (!children.length) {
+          unresolved.push({ reason: "handler-unresolved", message: `Cannot resolve included router ${childArg.text}`, origin: { file: file.path, line: call.startPosition.row + 1 } });
+          continue;
+        }
         const prefixNode = keywordArgument(call, "prefix");
         const tagsNode = keywordArgument(call, "tags");
-        edges.push({
+        for (const child of children) edges.push({
           parent: parent.id,
           child: child.id,
           ...prefixInfo(prefixNode, file.path),
@@ -826,7 +844,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
           index.mode = "output"; index.byAlias = byAlias; index.outputRequired = !omitDefaults;
           variant = { index, routes: [] }; outputVariants.set(variantKey, variant);
         }
-        const candidate = buildRoute(site, normalizePath(joinPrefix(mount.prefix, site.rawPath)), mount.tags, analysis, modelIndex, securityBindings, resolveAnnotatedAlias, variant?.index ?? outputModelIndex);
+        const candidate = buildRoute(site, normalizePath((mount.prefix.replace(/\/+$/, "") + site.rawPath) || "/"), mount.tags, analysis, modelIndex, securityBindings, resolveAnnotatedAlias, variant?.index ?? outputModelIndex);
         variant?.routes.push(candidate);
         if (keywordArgument(site.call, "response_model_include") || keywordArgument(site.call, "response_model_exclude")) candidate.gaps.push("response-schema-unknown");
         if (mount.dynamicPrefix) {

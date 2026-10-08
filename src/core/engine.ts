@@ -1,3 +1,5 @@
+import { fillSchemaGaps } from "../ai/schemaMerge.js";
+import { createSourceContextBuilder } from "../ai/sourceContext.js";
 import ignoreFactory from "ignore";
 import { readFileSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { extname, join, resolve, relative, isAbsolute } from "node:path";
@@ -9,7 +11,7 @@ import {
   discoveryToOpenApi,
 } from "@powerduck/x-to-openapi";
 
-import { applyCompletenessGate, hasUnknownSchema } from "./completeness.js";
+import { applyCompletenessGate } from "./completeness.js";
 import { hoistLocalSchemaDefinitions } from "./hoistDefinitions.js";
 import { indexProject } from "./indexer.js";
 import { probeManifest } from "./probe.js";
@@ -224,40 +226,13 @@ function buildComponentCatalog(
       .slice(0, 40);
     catalog.push({
       name,
+      schema,
       ...(properties.length ? { properties } : {}),
     });
   }
   return catalog;
 }
 
-/** Fill only unknown leaves. Model output cannot replace proven schema facts. */
-function fillSchemaGaps(
-  known: JsonSchema,
-  proposed: JsonSchema,
-  components: ReadonlyMap<string, JsonSchema>,
-): JsonSchema {
-  if (Object.keys(known).length === 0) return structuredClone(proposed);
-  // When the deterministic leaf is itself incomplete and the model provides
-  // a fully gate-complete replacement (for example a noisy stdlib union of
-  // untyped arrays replaced by an array of an existing component), take the
-  // model subtree wholesale instead of trying to merge incompatible shapes.
-  if (
-    hasUnknownSchema(known, components) &&
-    !hasUnknownSchema(proposed, components)
-  ) {
-    return structuredClone(proposed);
-  }
-  const result = structuredClone(known);
-  const kp = known.properties as Record<string, JsonSchema> | undefined;
-  const pp = proposed.properties as Record<string, JsonSchema> | undefined;
-  if (kp && pp) result.properties = Object.fromEntries(Object.entries(kp).map(([name, schema]) =>
-    [name, pp[name] ? fillSchemaGaps(schema, pp[name]!, components) : schema]));
-  if (known.items && proposed.items && typeof known.items === "object" && typeof proposed.items === "object"
-      && !Array.isArray(known.items) && !Array.isArray(proposed.items)) {
-    result.items = fillSchemaGaps(known.items as JsonSchema, proposed.items as JsonSchema, components);
-  }
-  return result;
-}
 
 interface AiGapOutcome {
   candidate: RouteCandidate;
@@ -272,6 +247,7 @@ async function applyAiGaps(
   resolver: GapResolver,
   components: ReadonlyMap<string, JsonSchema>,
   componentCatalog: ComponentCatalogEntry[],
+  sourceContext?: import("../ai/gapResolver.js").GapRequest["sourceContext"],
 ): Promise<AiGapOutcome> {
   if (!candidate.gaps.length || !candidate.handlerSource) {
     return { candidate, gapsClosed: 0, status: "empty" };
@@ -283,6 +259,8 @@ async function applyAiGaps(
     origin: candidate.origin,
     gaps: candidate.gaps,
     handlerSource: candidate.handlerSource,
+    contract: { parameters: candidate.parameters, requestBody: candidate.requestBody, responses: candidate.responses },
+    sourceContext,
     known: {
       pathParameters: candidate.parameters
         .filter((p) => p.in === "path")
@@ -377,16 +355,23 @@ async function applyAiGaps(
       media.confidence = resolution.confidence;
     }
   }
+  let responseUpdated = false;
   for (const [status, schema] of Object.entries(
     candidate.gaps.some(g => g === "response-unknown" || g === "response-schema-unknown") ? resolution.responseSchemas ?? {} : {},
   ) as Array<[string, JsonSchema]>) {
+    if (/^(1\d\d|204|205|304)$/.test(status)) continue;
     const existing = next.responses.find((r) => r.statusCode === status);
     if (existing) {
-      existing.content = existing.content ?? [];
+      if (!existing.content?.length || /^(1\d\d|204|205|304)$/.test(status)) continue;
       const media = existing.content.find((m) => m.mediaType === "application/json");
-      if (media) media.schema = fillSchemaGaps(media.schema ?? {}, schema, components);
-      else if (!media) existing.content.push({ mediaType: "application/json", schema });
+      if (media) {
+        const updated = fillSchemaGaps(media.schema ?? {}, schema, components);
+        responseUpdated ||= JSON.stringify(updated) !== JSON.stringify(media.schema);
+        media.schema = updated;
+      }
+      // A JSON-only proposal cannot alter a proven non-JSON representation.
     } else {
+      responseUpdated = true;
       next.responses.push({
         statusCode: status,
         description: "",
@@ -406,7 +391,7 @@ async function applyAiGaps(
       return false;
     if (
       (gap === "response-schema-unknown" || gap === "response-unknown") &&
-      resolution.responseSchemas
+      responseUpdated
     )
       return false;
     if (gap === "sse-events-unknown" && resolution.sseEvents?.length) return false;
@@ -493,7 +478,10 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     ignore: options.ignore,
     includeTests: options.includeTests,
     maxFileBytes: options.maxFileBytes,
+    maxFiles: options.maxFiles,
+    maxTotalBytes: options.maxTotalBytes,
   });
+  let indexedBytes = indexed.files.reduce((sum,file)=>sum+file.bytes,0);
   const explicitIgnore = (ignoreFactory as unknown as () => { add(value: string | string[]): unknown; ignores(path: string): boolean })();
   if (options.ignore) explicitIgnore.add([...options.ignore]);
   const powerduckIgnore = join(root, ".powerduckignore");
@@ -505,10 +493,17 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       throw new Error(`Additional source root must be a subdirectory of the project: ${sourceRoot}`);
     }
     if (!statSync(absolute).isDirectory()) throw new Error(`Additional source root is not a directory: ${sourceRoot}`);
-    const extra = indexProject(absolute, { includeTests: options.includeTests, maxFileBytes: options.maxFileBytes });
+    const extra = indexProject(absolute, { includeTests: options.includeTests, maxFileBytes: options.maxFileBytes, maxFiles: options.maxFiles, maxTotalBytes: options.maxTotalBytes });
+    for (const issue of extra.unresolved ?? []) {
+      const path = relative(root, resolve(absolute, issue.origin?.file ?? ".")).split("\\").join("/");
+      if (!explicitIgnore.ignores(path)) (indexed.unresolved ??= []).push({...issue, origin:{...issue.origin, file:path}});
+    }
     for (const file of extra.files) {
       const path = relative(root, file.absolutePath).split("\\").join("/");
       if (!explicitIgnore.ignores(path) && !indexed.byPath.has(path)) {
+        if (indexed.files.length >= (options.maxFiles ?? 10_000)) throw new Error("Source file limit exceeded across additional source roots");
+        if (indexedBytes + file.bytes > (options.maxTotalBytes ?? 64 * 1024 * 1024)) throw new Error("Source byte limit exceeded across additional source roots");
+        indexedBytes += file.bytes;
         const entry = { ...file, path };
         indexed.files.push(entry);
         indexed.byPath.set(path, entry);
@@ -518,9 +513,10 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   indexed.files.sort((a, b) => a.path.localeCompare(b.path));
   index.files = indexed.files;
   index.byPath = indexed.byPath;
+  index.unresolved = indexed.unresolved;
 
   const manifest = probeManifest(root, index);
-  const diagnostics: string[] = [];
+  const diagnostics: string[] = (index.unresolved ?? []).map(issue => `${issue.origin?.file}: ${issue.message}`);
   const ctx: ScanContext = {
     root,
     index,
@@ -529,6 +525,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     report: (message) => diagnostics.push(message),
   };
 
+  const scanFailures: NonNullable<FileIndex["unresolved"]> = [];
   const extractions: Array<{ result: ExtractionResult; language: string; framework: string }> = [];
   const activeLanguages: string[] = [];
   const candidateLanguages: string[] = [];
@@ -552,6 +549,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       diagnostics.push(`language "${entry.pack.id}" analysis failed: ${message}`);
+      scanFailures.push({reason:"analysis-failed",message:`${entry.pack.id} source analysis failed; scan coverage is incomplete`,origin:{file:"."}});
       continue;
     }
     if (!analysis) continue;
@@ -576,11 +574,14 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
             origin: { file: "" },
           });
         }
+        // Real extraction batches, without source text or schema payloads.
+        for (let i = 0; i < result.routes.length; i += 40) ctx.onProgress?.("routes-discovered", JSON.stringify({ framework: pack.id, routes: result.routes.slice(i, i + 40).map(route => ({ method: route.method, path: route.fullPath ?? route.path })) }));
         extractions.push({ result, language: pack.language, framework: pack.id });
       } catch (error) {
         // One broken framework pack must never erase results from the others.
         const message = error instanceof Error ? error.message : String(error);
         ctx.report?.(`framework pack "${pack.id}" failed: ${message}`);
+        scanFailures.push({reason:"extraction-failed",message:`${pack.id} route extraction failed; scan coverage is incomplete`,origin:{file:"."}});
       }
     }
   }
@@ -592,6 +593,9 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       throw new Error(
         `Source files were found for ${candidateLanguages.join(", ")} but analysis failed: ${diagnostics.join("; ")}`,
       );
+    }
+    if (index.unresolved?.length) {
+      throw new Error(`No scannable source files remain: ${diagnostics.join("; ")}`);
     }
     throw new Error(
       "No supported source files found. Supported languages: TypeScript/JavaScript, Python, Go, Java, C#, Rust, PHP.",
@@ -608,6 +612,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
       languageAnalyses,
       options,
       diagnostics,
+      scanFailures,
     });
     if (leafExtractions.found) {
       extractions.push(...leafExtractions.extractions);
@@ -667,13 +672,23 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   let aiResolved = 0;
   const aiResolvedRoutes: ScanReport["aiResolvedRoutes"] = [];
   const componentCatalog = buildComponentCatalog(componentsByName);
+  const sourceContext = createSourceContextBuilder(index,
+    languageAnalyses.find(item => item.entry.pack.id === "php")?.analysis as import("../lang/php/index.js").PhpAnalysis | undefined,
+    languageAnalyses.find(item => item.entry.pack.id === "typescript")?.analysis as import("../lang/typescript/index.js").TsAnalysis | undefined,
+    {
+      python: languageAnalyses.find(item => item.entry.pack.id === "python")?.analysis as import("../lang/python/index.js").PythonAnalysis | undefined,
+      go: languageAnalyses.find(item => item.entry.pack.id === "go")?.analysis as import("../lang/go/index.js").GoAnalysis | undefined,
+      java: languageAnalyses.find(item => item.entry.pack.id === "java")?.analysis as import("../lang/java/index.js").JavaAnalysis | undefined,
+      csharp: languageAnalyses.find(item => item.entry.pack.id === "csharp")?.analysis as import("../lang/csharp/index.js").CSharpAnalysis | undefined,
+      rust: languageAnalyses.find(item => item.entry.pack.id === "rust")?.analysis as import("../lang/rust/index.js").RustAnalysis | undefined,
+    });
   let gapReviews: import("../ai/review.js").GapReview[] | undefined;
   const reviewMode = options.aiReview ?? (options.gapResolver ? "auto" : "manual");
   if (reviewMode === "manual") {
     // Surface unresolved handlers for interactive review without calling a
     // model; the host proposes and the user accepts/edits/rejects each one.
     gapReviews = candidates
-      .map((candidate) => buildGapReview(candidate, componentCatalog))
+      .map((candidate) => buildGapReview(candidate, componentCatalog, options.reviewAll, candidate.handlerSource && (candidate.gaps.length || options.reviewAll) ? sourceContext(candidate) : undefined))
       .filter((review): review is import("../ai/review.js").GapReview => review !== null);
     ctx.onProgress?.("ai-review-pending", JSON.stringify({ total: gapReviews.length }));
   } else if (options.gapResolver) {
@@ -691,7 +706,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
           const routeLabel = `${candidate.method} ${candidate.fullPath ?? candidate.path}`;
           let outcome: AiGapOutcome;
           try {
-            outcome = await applyAiGaps(candidate, options.gapResolver!, componentsByName, componentCatalog);
+            outcome = await applyAiGaps(candidate, options.gapResolver!, componentsByName, componentCatalog, sourceContext(candidate));
           } catch (error) {
             diagnostics.push(
               `AI gap resolution failed for ${routeLabel}: ${error instanceof Error ? error.message : String(error)}`,
@@ -747,7 +762,7 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
 
   const securitySchemes = extractions.flatMap((entry) => entry.result.securitySchemes);
   const servers = extractions.flatMap((entry) => entry.result.servers);
-  const unresolved = extractions.flatMap((entry) => entry.result.unresolved);
+  const unresolved = [...(index.unresolved ?? []), ...scanFailures, ...extractions.flatMap((entry) => entry.result.unresolved)];
 
   const meta = projectMeta(root);
   const project: DiscoveredProject = {
@@ -953,8 +968,9 @@ async function scanMonorepoLeaves(args: {
   languageAnalyses: Array<{ entry: (typeof REGISTRY)[number]; analysis: unknown }>;
   options: ScanOptions;
   diagnostics: string[];
+  scanFailures: NonNullable<FileIndex["unresolved"]>;
 }): Promise<LeafScanResult> {
-  const { root, ctx, languageAnalyses, options, diagnostics } = args;
+  const { root, ctx, languageAnalyses, options, diagnostics, scanFailures } = args;
   const leaves = discoverMonorepoLeaves(root);
   if (!leaves.length) return { found: false, leafCount: 0, extractions: [] };
 
@@ -981,10 +997,13 @@ async function scanMonorepoLeaves(args: {
             route.language = pack.language;
             route.framework = pack.id;
           }
-          extractions.push({ result, language: pack.language, framework: pack.id });
+          // Real extraction batches, without source text or schema payloads.
+        for (let i = 0; i < result.routes.length; i += 40) ctx.onProgress?.("routes-discovered", JSON.stringify({ framework: pack.id, routes: result.routes.slice(i, i + 40).map(route => ({ method: route.method, path: route.fullPath ?? route.path })) }));
+        extractions.push({ result, language: pack.language, framework: pack.id });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           diagnostics.push(`monorepo leaf pack "${pack.id}" failed: ${message}`);
+          scanFailures.push({reason:"extraction-failed",message:`${pack.id} workspace route extraction failed; scan coverage is incomplete`,origin:{file:relative(root,leafAbs).split("\\").join("/")}});
         }
       }
     }

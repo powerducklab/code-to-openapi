@@ -16,6 +16,8 @@ import type {
 import { dirname, isAbsolute, join, sep } from "node:path";
 
 import type { TsAnalysis } from "../lang/typescript/index.js";
+import { fastifyZodReference } from "../lang/typescript/fastifyZod.js";
+import { convertTypeBoxNode } from "../lang/typescript/typebox.js";
 import { convertFluentNode } from "../lang/typescript/fluentSchema.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import {
@@ -305,6 +307,17 @@ function collectPrefixAliases(ts: any, scopeNode: any): Map<string, any> {
  * S.ref("..."), S.raw({...})). The base identifier name is irrelevant; plain
  * JavaScript projects import it under any name.
  */
+function isTypeBoxSchemaNode(ts: any, node: any): boolean {
+  if (!node || !ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)
+      || !ts.isIdentifier(node.expression.expression)) return false;
+  const name = node.expression.expression.text;
+  const source = ts.getOriginalNode(node).getSourceFile?.();
+  return !!source?.statements?.some((stmt: any) => ts.isImportDeclaration(stmt)
+    && ["@sinclair/typebox", "@fastify/type-provider-typebox"].includes(stmt.moduleSpecifier.text)
+    && stmt.importClause?.namedBindings?.elements?.some((el: any) =>
+      el.name.text === name && (el.propertyName?.text ?? el.name.text) === "Type"));
+}
+
 function isFluentSchemaNode(ts: any, node: any): boolean {
   if (!node || !ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
     return false;
@@ -354,6 +367,9 @@ function isFluentSchemaNode(ts: any, node: any): boolean {
  */
 function schemaValueToJson(ts: any, node: any, depth = 0): JsonSchema | undefined {
   if (!node || depth > 12) return undefined;
+  if (isTypeBoxSchemaNode(ts, node)) {
+    return convertTypeBoxNode(node, { ts, sourceFile: ts.getOriginalNode(node).getSourceFile(), resolveBinding: () => null }) ?? undefined;
+  }
   if (isFluentSchemaNode(ts, node)) {
     const schema = convertFluentNode(node, { ts, depth });
     if (schema) delete (schema as Record<string, unknown>).$schema;
@@ -553,6 +569,54 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
     for (const [rel, source] of analysis.sourceByPath) {
       models.set(rel, modelFile(analysis, rel, source));
     }
+
+    // Shared schemas registered by addSchema are not external network refs.
+    // Only globally unambiguous IDs are promoted; conflicting encapsulated
+    // registrations must not be silently assigned to an arbitrary contract.
+    const sharedSchemas = new Map<string, JsonSchema>();
+    const conflictingIds = new Set<string>();
+    for (const owner of models.values()) {
+      const visit = (node: any) => {
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+            && node.expression.name.text === "addSchema" && node.arguments[0]) {
+          const resolved = resolveSchemaValueNode(ts, analysis, models, owner, node.arguments[0], new Set());
+          const schema = resolved ? schemaValueToJson(ts, resolved.node) : undefined;
+          if (schema && typeof schema.$id === "string") {
+            const id = schema.$id.replace(/#$/, "");
+            if (sharedSchemas.has(id) && JSON.stringify(sharedSchemas.get(id)) !== JSON.stringify(schema)) conflictingIds.add(id);
+            else sharedSchemas.set(id, schema);
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(owner.source);
+    }
+    for (const id of conflictingIds) sharedSchemas.delete(id);
+    const sharedNames = new Map([...sharedSchemas.keys()].map((id, i) => [id, `FastifySharedSchema${i + 1}`]));
+    const rewriteShared = (value: any): any => {
+      if (!value || typeof value !== "object") return value;
+      if (Array.isArray(value)) return value.map(rewriteShared);
+      const out: any = {};
+      for (const [key, child] of Object.entries(value)) {
+        if (key === "$id") continue;
+        if (key === "$ref" && typeof child === "string") {
+          const [id, fragment = ""] = child.split("#");
+          const name = sharedNames.get(id);
+          out[key] = name && (!fragment || fragment.startsWith("/")) ? `#/components/schemas/${name}${fragment}` : child;
+        } else out[key] = rewriteShared(child);
+      }
+      return out;
+    };
+    for (const [id, schema] of sharedSchemas) analysis.schemaContext.components.set(sharedNames.get(id)!, rewriteShared(schema));
+    const resolveSharedRoot = (schema: JsonSchema | undefined): JsonSchema | undefined => {
+      if (!schema) return schema;
+      if (typeof schema.$ref === "string") {
+        const [id, fragment = ""] = schema.$ref.split("#");
+        const target = sharedSchemas.get(id);
+        if (target && !fragment) return rewriteShared({...target, ...schema, $ref: undefined});
+      }
+      return rewriteShared(schema);
+    };
 
     const unresolved: DiscoveredUnresolved[] = [];
     const candidates: RouteCandidate[] = [];
@@ -1237,6 +1301,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           models,
           model,
           schemaResolved?.node ?? null,
+          resolveSharedRoot,
         );
         let resolvedHandler: any = site.handler;
         let handlerFile: any = model.source;
@@ -1270,7 +1335,7 @@ export const fastifyPack: FrameworkPack<TsAnalysis> = {
           resolvedHandler = resolveLocalHandlerFactory(site.handlerFactoryName);
         }
         const handlerFacts = resolvedHandler
-          ? analyzeFastifyHandler(analysis, handlerFile, resolvedHandler, site.origin, pathParams, site.genericNode)
+          ? analyzeFastifyHandler(analysis, handlerFile, resolvedHandler, site.origin, pathParams, site.genericNode, site.method)
           : { parameters: [], responses: [], gaps: ["response-unknown" as GapCode], sse: false, bodyKnown: false };
 
         // Merge: explicit JSON Schema (high confidence) wins over inferred.
@@ -2069,7 +2134,7 @@ function resolvePluginExport(
 function findLocalSchemaValue(ts: any, sf: any, name: string): any | null {
   let found: any = null;
   const acceptable = (init: any) =>
-    ts.isObjectLiteralExpression(init) || isFluentSchemaNode(ts, init);
+    ts.isObjectLiteralExpression(init) || (isFluentSchemaNode(ts, init) || isTypeBoxSchemaNode(ts, init));
   const walk = (n: any) => {
     if (found) return;
     if (
@@ -2112,7 +2177,7 @@ function resolveSchemaValueNode(
     return model;
   };
   if (!node) return null;
-  if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node)) {
+  if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node) || isTypeBoxSchemaNode(ts, node)) {
     return { node, file: model.source };
   }
 
@@ -2214,7 +2279,7 @@ function exportedSchemaValue(
       }
     });
     if (rhs) {
-      if (ts.isObjectLiteralExpression(rhs) || isFluentSchemaNode(ts, rhs)) return rhs;
+      if (ts.isObjectLiteralExpression(rhs) || (isFluentSchemaNode(ts, rhs) || isTypeBoxSchemaNode(ts, rhs))) return rhs;
       if (ts.isIdentifier(rhs)) return findLocalSchemaValue(ts, file, rhs.text);
     }
   }
@@ -2234,7 +2299,7 @@ function exportedSchemaValue(
           decl.name.text === exportName &&
           decl.initializer &&
           (ts.isObjectLiteralExpression(decl.initializer) ||
-            isFluentSchemaNode(ts, decl.initializer))
+            (isFluentSchemaNode(ts, decl.initializer) || isTypeBoxSchemaNode(ts, decl.initializer)))
         ) {
           exported = decl.initializer;
         }
@@ -2256,31 +2321,35 @@ function extractRouteSchema(
   models: Map<string, FileModel>,
   ownerModel: FileModel,
   schemaNode: any,
+  resolveShared: (schema: JsonSchema | undefined) => JsonSchema | undefined = schema => schema,
 ): Facts {
   const facts = emptyFacts();
   if (!schemaNode || !ts.isObjectLiteralExpression(schemaNode)) return facts;
 
+  const sourceOwners = new Map([...models.values()].map(model => [model.source, model]));
   // Sections may be identifiers or property access pointing at declarations
   // in another file (CJS schema tables); resolve before converting.
   const resolveSection = (node: any): any => {
     if (!node) return null;
-    if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node)) return node;
+    if (fastifyZodReference(analysis, node)) return node;
+    if (ts.isObjectLiteralExpression(node) || isFluentSchemaNode(ts, node) || isTypeBoxSchemaNode(ts, node)) return node;
     const resolved = resolveSchemaValueNode(
       ts,
       analysis,
       models,
-      ownerModel,
+      sourceOwners.get(node.getSourceFile?.()) ?? ownerModel,
       node,
       new Set(),
     );
     return resolved?.node ?? null;
   };
 
-  const sourceOwners = new Map([...models.values()].map(model => [model.source, model]));
   // Expand schema references before syntactic fluent conversion. This keeps
   // nested items(User) and imported profile schemas in the owning file's scope.
   const convertSection = (node: any): JsonSchema | undefined => {
     if (!node) return undefined;
+    const zodReference = fastifyZodReference(analysis, node);
+    if (zodReference) return zodReference;
     let budget = 10000;
     const transformed = ts.transform(node, [(context: any) => {
       const visit = (current: any, seen: Set<any>, depth: number): any => {
@@ -2299,7 +2368,7 @@ function extractRouteSchema(
       };
       return (root: any) => visit(root, new Set(), 0);
     }]);
-    try { return schemaValueToJson(ts, transformed.transformed[0]); }
+    try { return resolveShared(schemaValueToJson(ts, transformed.transformed[0])); }
     finally { transformed.dispose(); }
   };
 
@@ -2393,6 +2462,7 @@ function analyzeFastifyHandler(
   origin: SourceLocation,
   pathParams: Set<string>,
   routeGenericNode: any | null = null,
+  httpMethod?: string,
 ): Facts {
   const { ts, checker } = analysis;
   const gaps = new Set<GapCode>();
@@ -2563,6 +2633,19 @@ function analyzeFastifyHandler(
   };
 
   const body = handler.body;
+  let dynamicResponseMedia = false;
+  const findDynamicMedia = (node: any) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+        && rootIdentifier(node.expression.expression) === replyName
+        && node.expression.name.text === "header"
+        && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])
+        && node.arguments[0].text.toLowerCase() === "content-type"
+        && node.arguments[1] && !ts.isStringLiteralLike(node.arguments[1])) {
+      dynamicResponseMedia = true;
+    }
+    ts.forEachChild(node, findDynamicMedia);
+  };
+  if (body) findDynamicMedia(body);
   if (body) {
     const helperSeen = new Set<string>();
 
@@ -2615,21 +2698,62 @@ function analyzeFastifyHandler(
     };
 
     const visit = (node: any, roots: { req: string; reply: string }, helperDepth: number) => {
+      // A shared handler can read a body only for one registered HTTP method.
+      // Narrow only literal comparisons on the mapped request parameter;
+      // unknown conditions retain both branches.
+      const methodCondition = (expression: any): boolean | undefined => {
+        if (!httpMethod || httpMethod === "all") return undefined;
+        if (ts.isParenthesizedExpression(expression)) return methodCondition(expression.expression);
+        if (!ts.isBinaryExpression(expression)) return undefined;
+        const {left, right, operatorToken} = expression;
+        const isMethod = (value: any) => ts.isPropertyAccessExpression(value) &&
+          ts.isIdentifier(value.expression) && value.expression.text === roots.req && value.name.text === "method";
+        const literal = isMethod(left) && ts.isStringLiteral(right) ? right :
+          isMethod(right) && ts.isStringLiteral(left) ? left : undefined;
+        if (!literal) return undefined;
+        const equal = httpMethod.toUpperCase() === literal.text;
+        if ([ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken].includes(operatorToken.kind)) return equal;
+        if ([ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(operatorToken.kind)) return !equal;
+        return undefined;
+      };
+      if (ts.isConditionalExpression(node) || ts.isIfStatement(node)) {
+        const condition = methodCondition(ts.isConditionalExpression(node) ? node.condition : node.expression);
+        if (condition !== undefined) {
+          const branch = ts.isConditionalExpression(node) ? (condition ? node.whenTrue : node.whenFalse) :
+            (condition ? node.thenStatement : node.elseStatement);
+          if (branch) visit(branch, roots, helperDepth);
+          return;
+        }
+      }
+
       // `const alias = request.body | .query | .params` records a local alias so
       // later `alias.field` accesses are attributed to the right request member.
+      let aliasSource = ts.isVariableDeclaration(node) ? node.initializer : undefined;
+      // Parentheses/assertions do not change provenance. An empty-object
+      // fallback supplies no fields, so reads still describe the request.
+      while (aliasSource) {
+        if (ts.isParenthesizedExpression(aliasSource) || ts.isAsExpression(aliasSource)
+            || ts.isTypeAssertionExpression(aliasSource) || ts.isNonNullExpression(aliasSource)) {
+          aliasSource = aliasSource.expression;
+        } else if (ts.isBinaryExpression(aliasSource)
+            && aliasSource.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+            && ts.isObjectLiteralExpression(aliasSource.right)
+            && aliasSource.right.properties.length === 0) {
+          aliasSource = aliasSource.left;
+        } else break;
+      }
       if (
-        ts.isVariableDeclaration(node) &&
-        node.initializer &&
-        ts.isPropertyAccessExpression(node.initializer) &&
-        rootIdentifier(node.initializer) === roots.req &&
+        ts.isVariableDeclaration(node) && aliasSource &&
+        ts.isPropertyAccessExpression(aliasSource) &&
+        ts.isIdentifier(aliasSource.expression) && aliasSource.expression.text === roots.req &&
         ts.isIdentifier(node.name)
       ) {
-        const aliasMember = node.initializer.name.text;
+        const aliasMember = aliasSource.name.text;
         const aliasName = node.name.text;
         if (aliasMember === "body") {
           bodyAliases.add(aliasName);
           factsBody.referenced = true;
-          const bodyType = typeAt(node.initializer);
+          const bodyType = typeAt(aliasSource);
           if (bodyType && !factsBody.schema) factsBody.schema = bodyType;
         } else if (aliasMember === "query") {
           queryAliases.add(aliasName);
@@ -2669,7 +2793,7 @@ function analyzeFastifyHandler(
           }
         } else if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText(file) === `${roots.req}.body`) {
           factsBody.referenced = true;
-          factsBody.fields.set(member, schema);
+          factsBody.fields.set(member, schema ?? factsBody.fields.get(member));
         }
       }
 
@@ -2686,7 +2810,7 @@ function analyzeFastifyHandler(
         const schema = typeAt(node);
         if (bodyAliases.has(root)) {
           factsBody.referenced = true;
-          factsBody.fields.set(member, schema);
+          factsBody.fields.set(member, schema ?? factsBody.fields.get(member));
         } else if (queryAliases.has(root)) {
           queryFields.set(member, schema);
         } else if (paramAliases.has(root)) {
@@ -2746,7 +2870,13 @@ function analyzeFastifyHandler(
         }
         const payload = node.arguments[0];
         if (payload) {
-          recordResponse(status, typeAt(payload), "high", mediaType);
+          const schema = typeAt(payload);
+          // A string sent with a runtime content type may be serialized JSON,
+          // HTML, or upstream bytes. Its JS type is not its wire schema.
+          if (dynamicResponseMedia && schema?.type === "string") {
+            recordResponse(status, undefined, "low", mediaType);
+            gaps.add("response-schema-unknown");
+          } else recordResponse(status, schema, schema ? "high" : "low", mediaType);
         } else {
           recordResponse(status, undefined, "medium", mediaType);
         }
@@ -2821,6 +2951,7 @@ function analyzeFastifyHandler(
         const fnFile = resolved?.file ?? file;
         if (fnNode?.parameters && fnNode.body) {
           const nextRoots = { ...roots };
+          const mappedBodies: string[] = [];
           let mapped = false;
           fnNode.parameters.forEach((param: any, i: number) => {
             const arg = node.arguments[i];
@@ -2831,6 +2962,9 @@ function analyzeFastifyHandler(
               mapped = true;
             } else if (arg.text === roots.reply) {
               nextRoots.reply = paramName;
+              mapped = true;
+            } else if (bodyAliases.has(arg.text) && ts.isIdentifier(param.name)) {
+              mappedBodies.push(paramName);
               mapped = true;
             }
           });
@@ -2843,10 +2977,18 @@ function analyzeFastifyHandler(
             fnNode.pos >= handlerBody.pos &&
             fnNode.end <= handlerBody.end;
           if (isClosure) mapped = true;
-          const key = `${fnFile.fileName}:${fnNode.pos ?? 0}:${nextRoots.req}:${nextRoots.reply}`;
+          const key = `${fnFile.fileName}:${fnNode.pos ?? 0}:${nextRoots.req}:${nextRoots.reply}:${mappedBodies.join(",")}`;
           if (mapped && !helperSeen.has(key)) {
             helperSeen.add(key);
+            // A helper has its own parameter scope. Do not leak its aliases
+            // into subsequent handlers/helpers (or inherit same-named locals).
+            const savedBodies = new Set(bodyAliases);
+            bodyAliases.clear();
+            if (isClosure) for (const name of savedBodies) bodyAliases.add(name);
+            for (const name of mappedBodies) bodyAliases.add(name);
             visit(fnNode.body, nextRoots, helperDepth + 1);
+            bodyAliases.clear();
+            for (const name of savedBodies) bodyAliases.add(name);
           }
         }
       }
@@ -2901,7 +3043,7 @@ function analyzeFastifyHandler(
       const properties: Record<string, JsonSchema> = {};
       let incomplete = false;
       for (const [name, schema] of factsBody.fields) {
-        if (!schema) incomplete = true;
+        if (!schema || (schema.type === "array" && (!schema.items || Object.keys(schema.items).length === 0))) incomplete = true;
         properties[name] = schema ?? {};
       }
       requestBody = {
@@ -2983,7 +3125,8 @@ function mergeFacts(schema: Facts, inferred: Facts, pathParams: Set<string>): Fa
         }
       : undefined);
   // Explicit JSON Schema responses win; otherwise use handler inference.
-  const responses = schema.responses.length ? schema.responses : inferred.responses;
+  const explicitStatuses = new Set(schema.responses.map(response => response.statusCode));
+  const responses = [...schema.responses, ...inferred.responses.filter(response => !explicitStatuses.has(response.statusCode))];
 
   // Recompute gaps against the merged evidence instead of trusting either side.
   const gaps = new Set<GapCode>();

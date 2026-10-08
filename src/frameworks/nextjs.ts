@@ -25,7 +25,7 @@ import type { TsAnalysis } from "../lang/typescript/index.js";
 import { typeToSchema } from "../lang/typescript/typeSchema.js";
 import { createBindingResolver } from "../lang/typescript/bindings.js";
 import { convertZodNode } from "../lang/typescript/zod.js";
-import { analyzeHandler } from "./express-handler.js";
+import { analyzeHandler, resolveHandler } from "./express-handler.js";
 import { httpMethodReachability } from '../lang/typescript/httpMethodFlow.js';
 import {
   addParam,
@@ -136,7 +136,7 @@ function collectAppRouter(
   const fullPath = appPathFromFile(rel);
   const pathParams = pathParamsFromPath(fullPath);
 
-  const exportedFns: Array<{ name: string; node: any }> = [];
+  const exportedFns: Array<{ name: string; node: any; originNode?: any }> = [];
   source.forEachChild((child: any) => {
     // export async function GET(...) {}
     if (
@@ -154,11 +154,21 @@ function collectAppRouter(
       for (const decl of child.declarationList.declarations) {
         if (
           ts.isIdentifier(decl.name) &&
-          decl.initializer &&
-          (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))
+          decl.initializer
         ) {
           exportedFns.push({ name: decl.name.text, node: decl.initializer });
         }
+      }
+    }
+    // Named aliases and re-exports are equally valid App Router handlers.
+    if (ts.isExportDeclaration(child) && !child.isTypeOnly && child.exportClause && ts.isNamedExports(child.exportClause)) {
+      for (const specifier of child.exportClause.elements) {
+        if (specifier.isTypeOnly || !VERBS.has(specifier.name.text.toLowerCase())) continue;
+        let symbol = analysis.checker.getSymbolAtLocation(specifier.name);
+        if (symbol?.flags & ts.SymbolFlags.Alias) symbol = analysis.checker.getAliasedSymbol(symbol);
+        const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+        const value = declaration && ts.isVariableDeclaration(declaration) ? declaration.initializer : declaration;
+        exportedFns.push({name: specifier.name.text, node: value ?? specifier, originNode: specifier});
       }
     }
   });
@@ -166,8 +176,15 @@ function collectAppRouter(
   for (const fn of exportedFns) {
     const method = fn.name.toLowerCase();
     if (!VERBS.has(method)) continue;
-    const origin = locationAt(ts, source, fn.node, rel);
-    const facts = analyzeAppHandler(analysis, source, fn.node, { pathParams });
+    const origin = locationAt(ts, source, fn.originNode ?? fn.node, rel);
+    const resolved = resolveHandler(analysis, fn.node.getSourceFile?.() ?? source, fn.node);
+    const handler = resolved?.node ?? fn.node;
+    const facts = analyzeAppHandler(analysis, resolved?.file ?? source, handler, { pathParams });
+    if (!handler.body) {
+      for (const gap of ["query-unknown", "header-unknown", "response-unknown", ...(["post", "put", "patch"].includes(method) ? ["body-unknown"] : [])] as GapCode[]) {
+        if (!facts.gaps.includes(gap)) facts.gaps.push(gap);
+      }
+    }
 
     const confidence = !facts.gaps.length
       ? "high"
@@ -188,6 +205,8 @@ function collectAppRouter(
       confidence,
       gaps: facts.gaps,
       components: [],
+      handlerSource: handler.getText(resolved?.file ?? source).slice(0, 8192),
+      framework: "nextjs", language: "typescript",
     });
   }
 }
@@ -277,6 +296,8 @@ function collectPagesRouter(
     confidence: facts.gaps.length ? "medium" : "high",
     gaps: facts.gaps,
     components: [],
+    handlerSource: handlerNode.getText(source).slice(0, 8192),
+    framework: "nextjs", language: "typescript",
   });
   }
 }

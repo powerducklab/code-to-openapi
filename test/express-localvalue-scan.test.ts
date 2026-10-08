@@ -38,7 +38,11 @@ describe("express pure-JS local-value tracking", () => {
     // 3. Ternary resolves to the observed literal shape.
     const flag = op(ops, "get", "/flag");
     expect(flag.gaps).not.toContain("response-unknown");
-    expect(flag.responses[0]?.content?.[0]?.schema?.properties?.state?.type).toBe("string");
+    const flagBranches = flag.responses[0]?.content?.[0]?.schema?.anyOf as any[];
+    expect(flagBranches).toHaveLength(2);
+    expect(flagBranches.map(branch => branch.properties.state)).toEqual([
+      {type: "string", const: "on"}, {type: "string", const: "off"},
+    ]);
 
     // 4. Cross-file monkey-patched `res.ok(...)` expands to {message, data}.
     const custom = op(ops, "get", "/custom");

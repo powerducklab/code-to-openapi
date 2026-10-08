@@ -1,3 +1,6 @@
+import { validatedJsonBody } from "../lang/python/requestModel.js";
+import { pythonBindingResolver } from "../lang/python/symbols.js";
+import { pythonFrameworkSubclass, pythonStaticIterableElements } from "../lang/python/staticRouting.js";
 /**
  * Flask framework pack (Python).
  *
@@ -58,6 +61,7 @@ interface FlaskInstance {
   name: string;
   kind: "app" | "blueprint";
   prefix: string;
+  dynamicPrefix?: boolean;
 }
 
 interface FlaskSite {
@@ -465,7 +469,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
 
   extract(analysis, ctx) {
     const instances = new Map<string, FlaskInstance>();
-    const registrations: Array<{ app: string; blueprint: string; prefix: string }> = [];
+    const registrations: Array<{ app: string; blueprint: string; prefix?: string }> = [];
     const sites: FlaskSite[] = [];
     const unresolved: ExtractionResult["unresolved"] = [];
     const securitySchemes: ExtractionResult["securitySchemes"] = [];
@@ -488,8 +492,12 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
         moduleToFile.set(segments.slice(0, -1).join("."), pyFile.path);
       }
     }
+    const instanceBindings = pythonBindingResolver(analysis);
     const resolveInstanceRef = (file: string, node: TsNode): FlaskInstance | null => {
       if (node.type !== "identifier" && node.type !== "attribute") return null;
+      const symbol = instanceBindings.resolve(file, node.text);
+      const bound = symbol ? byVar(symbol.file, symbol.name) : undefined;
+      if (bound) return bound;
       if (node.type === "identifier") {
         const local = byVar(file, node.text);
         if (local) return local;
@@ -545,7 +553,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
         const value = assignment.namedChildren[assignment.namedChildren.length - 1];
         if (!target || target.type !== "identifier" || value?.type !== "call") continue;
         const constructorName = callName(value.namedChildren[0] ?? null);
-        if (constructorName === "Flask") {
+        if (constructorName === "Flask" || pythonFrameworkSubclass(analysis, file.path, value.namedChildren[0]!, "flask", "Flask")) {
           instances.set(`${file.path}::${target.text}`, {
             id: `${file.path}::${target.text}`,
             file: file.path,
@@ -561,6 +569,7 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
             name: target.text,
             kind: "blueprint",
             prefix: prefixNode ? literalString(prefixNode) ?? "" : "",
+            dynamicPrefix: !!prefixNode && literalString(prefixNode) === null,
           });
         }
       }
@@ -627,14 +636,29 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
         if (mc.method === "register_blueprint") {
           const app = byVar(file.path, mc.receiver.text);
           const childArg = positionalArguments(call)[0];
-          const blueprint = childArg ? resolveInstanceRef(file.path, childArg) : null;
-          if (app?.kind === "app" && blueprint?.kind === "blueprint") {
-            const prefixNode = keywordArgument(call, "url_prefix");
-            registrations.push({
-              app: app.id,
-              blueprint: blueprint.id,
-              prefix: prefixNode ? literalString(prefixNode) ?? "" : "",
-            });
+          let refs = childArg ? [{file: file.path, node: childArg}] : [];
+          if (childArg && !resolveInstanceRef(file.path, childArg)) {
+            let loop = call.parent;
+            while (loop && !["for_statement", "function_definition", "class_definition"].includes(loop.type)) loop = loop.parent;
+            if (loop?.type === "for_statement" && loop.childForFieldName("left")?.text === childArg.text) {
+              const iterable = loop.childForFieldName("right");
+              if (iterable) refs = pythonStaticIterableElements(analysis, file.path, iterable) ?? [];
+            }
+          }
+          for (const ref of refs) {
+            const blueprint = resolveInstanceRef(ref.file, ref.node);
+            if (app?.kind === "app" && blueprint?.kind === "blueprint") {
+              const prefixNode = keywordArgument(call, "url_prefix");
+              if (prefixNode && literalString(prefixNode) === null) {
+                unresolved.push({reason: "dynamic-path", message: "Blueprint registration prefix is unresolved", origin: {file: file.path, line: call.startPosition.row + 1}});
+                continue;
+              }
+              registrations.push({
+                app: app.id,
+                blueprint: blueprint.id,
+                prefix: prefixNode ? literalString(prefixNode)! : undefined,
+              });
+            }
           }
         }
         if (mc.method === "run" && byVar(file.path, mc.receiver.text)?.kind === "app") {
@@ -653,11 +677,15 @@ export const flaskPack: FrameworkPack<PythonAnalysis> = {
     for (const registration of registrations) {
       const blueprint = instances.get(registration.blueprint);
       if (!blueprint) continue;
+      if (registration.prefix === undefined && blueprint.dynamicPrefix) {
+        unresolved.push({reason: "dynamic-path", message: "Blueprint default prefix is unresolved", origin: {file: blueprint.file, symbol: blueprint.name}});
+        continue;
+      }
       // A url_prefix passed at registration overrides the blueprint's own
       // url_prefix; otherwise the blueprint prefix applies.
       reachablePrefix.set(
         registration.blueprint,
-        registration.prefix || blueprint.prefix,
+        registration.prefix ?? blueprint.prefix,
       );
     }
 
@@ -1028,12 +1056,14 @@ function buildFlaskRoute(
       return false;
     };
     if (evidenceForMethod("get_json") || evidenceForMethod("json")) {
+      const validated = validatedJsonBody(marsh.analysis, fn, marsh.models);
+      for (const [name, component] of marsh.models.componentsByName) marsh.componentsByName.set(name, component.schema);
       requestBody = {
         required: true,
         confidence: "medium",
-        content: [{ mediaType: "application/json", schema: {} }],
+        content: [{ mediaType: "application/json", schema: validated ?? {} }],
       };
-      gaps.add("body-schema-unknown");
+      if (!validated || isLooseLiteralSchema(validated)) gaps.add("body-schema-unknown");
     } else if (evidenceForMethod("files")) {
       requestBody = {
         required: true,
@@ -1377,21 +1407,30 @@ function buildFlaskResponses(
     if (value.type === "call") {
       const name = callName(value.namedChildren[0] ?? null);
       if (name === "jsonify") {
-        const arg = positionalArguments(value)[0];
-        const schema = arg && (arg.type === "dictionary" || arg.type === "list")
-          ? literalToSchema(arg)
-          : {};
+        const args = positionalArguments(value);
+        const keywords = childrenOfType(value, 'argument_list').flatMap(list => childrenOfType(list, 'keyword_argument'));
+        let schema: JsonSchemaLocal = {};
+        if (!args.length && keywords.length) {
+          const properties: Record<string, JsonSchemaLocal> = {};
+          for (const keyword of keywords) {
+            const [key, item] = keyword.namedChildren;
+            if (key) properties[key.text] = literalToSchema(item ?? null) ?? {};
+          }
+          schema = {type: 'object', properties, required: Object.keys(properties)};
+        } else if (!keywords.length && args.length === 1) {
+          schema = literalToSchema(args[0]!) ?? {};
+        } else if (!keywords.length && args.length > 1 && args.every(arg => !['list_splat', 'dictionary_splat'].includes(arg.type))) {
+          const variants = [...new Map(args.map(arg => {
+            const item = literalToSchema(arg) ?? {};
+            return [JSON.stringify(item), item] as const;
+          })).values()];
+          schema = {type: 'array', items: variants.length === 1 ? variants[0] : {anyOf: variants}};
+        } else if (!args.length && !keywords.length) schema = {type:'null'};
         responses.push({
-          statusCode: String(status),
-          description: "",
-          confidence: "medium",
-          content: [{ mediaType: "application/json", schema: schema ?? {} }],
+          statusCode: String(status), description: '', confidence: 'medium',
+          content: [{mediaType:'application/json',schema}],
         });
-        if (!arg || (arg.type !== "dictionary" && arg.type !== "list")) {
-          gaps.add("response-schema-unknown");
-        } else if (schema === null || isLooseLiteralSchema(schema)) {
-          gaps.add("response-schema-unknown");
-        }
+        if (isLooseLiteralSchema(schema)) gaps.add('response-schema-unknown');
         proven = true;
         continue;
       }

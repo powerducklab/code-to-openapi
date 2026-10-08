@@ -1,3 +1,4 @@
+import { partialSchema } from "../../core/partial-schema.js";
 import type { JsonSchema } from "../../core/types.js";
 
 /**
@@ -121,25 +122,41 @@ export function convertZodNode(node: any, rc: ZodResolveContext): JsonSchema | n
     switch (step.name) {
       case "object": {
         const properties: Record<string, JsonSchema> = {};
-        const required: string[] = [];
-        if (arg0 && ts.isObjectLiteralExpression(arg0)) {
-          for (const member of arg0.properties) {
-            if (!ts.isPropertyAssignment(member)) continue;
-            const name = propertyNameText(ts, member.name);
-            if (name === null) continue;
-            const child = convertZodNode(member.initializer, { ...rc, depth: depth + 1 });
-            if (!child) { properties[name] = {}; continue; }
-            const isOptional = child["x-optional"] === true;
-            delete child["x-optional"];
-            properties[name] = child;
-            if (!isOptional) required.push(name);
+        const required = new Set<string>();
+        let incomplete = false;
+        const readShape = (value: any, from: any, seen = new Set<any>(), level = 0): void => {
+          if (!value || level > 16 || seen.has(value)) { incomplete = true; return; }
+          const next = new Set(seen).add(value);
+          if (ts.isIdentifier(value)) {
+            const target = rc.resolveSchemaBinding(value.text, from);
+            readShape(target, target?.getSourceFile?.() ?? from, next, level + 1);
+            return;
           }
-        }
-        schema = {
-          type: "object",
-          ...(Object.keys(properties).length ? { properties } : {}),
-          ...(required.length ? { required } : {}),
+          if (!ts.isObjectLiteralExpression(value)) { incomplete = true; return; }
+          for (const member of value.properties) {
+            if (ts.isSpreadAssignment(member)) {
+              readShape(member.expression, from, next, level + 1);
+              continue;
+            }
+            if (!ts.isPropertyAssignment(member) && !ts.isShorthandPropertyAssignment(member)) { incomplete = true; continue; }
+            const name = propertyNameText(ts, member.name);
+            if (name === null) { incomplete = true; continue; }
+            const child = convertZodNode(ts.isShorthandPropertyAssignment(member) ? member.name : member.initializer,
+              { ...rc, sourceFile: from, depth: depth + 1 });
+            const clean = child ? { ...child } : {};
+            const optional = clean['x-optional'] === true;
+            delete clean['x-optional'];
+            properties[name] = clean;
+            // Later fields overwrite earlier spreads, including optionality.
+            if (optional) required.delete(name); else required.add(name);
+          }
         };
+        readShape(arg0, rc.sourceFile);
+        schema = { type: 'object',
+          ...(Object.keys(properties).length ? { properties } : {}),
+          ...(required.size ? { required: [...required] } : {}),
+        };
+        if (incomplete) schema = partialSchema(schema, 'unresolved-zod-object-shape', true);
         break;
       }
       case "array": {

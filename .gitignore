@@ -14,7 +14,11 @@ obj/
 target/
 .gradle/
 build/
+test-corpus/
+reports/
 
+# Local scan/audit outputs (examples/*.mjs) and third-party real-world API
+# corpus checkpoints are generated on demand; never commit them.
 # Third-party real-world API corpus checkpoints are cloned on demand from
 # pinned commits (see test-corpus/real-apis/fetch-corpus.sh); never vendor them.
 test-corpus/real-apis/repos/
