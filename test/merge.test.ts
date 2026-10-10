@@ -256,3 +256,21 @@ describe("mergeScannedDocument", () => {
     expect(body.schema.$ref).toBe("#/components/schemas/User2");
   });
 });
+
+it('merges and reports removed extension methods through additionalOperations', () => {
+  const operation = {responses:{'200':{description:'ok'}}};
+  const current = {paths:{'/items':{additionalOperations:{PROPFIND:{...operation,summary:'My notes'}}}}};
+  const scanned = {paths:{'/items':{additionalOperations:{PROPFIND:{responses:{'207':{description:'multi'}}},REPORT:operation}}}};
+  const result = mergeScannedDocument({current,scanned,
+    previous:sidecar([['PROPFIND','/items','a','old']]),
+    next:sidecar([['PROPFIND','/items','a','new'],['REPORT','/items','a','added']]),
+  });
+  const item=(result.document as any).paths['/items'];
+  expect(item.additionalOperations.PROPFIND.summary).toBe('My notes');
+  expect(item.additionalOperations.PROPFIND.responses['207']).toBeDefined();
+  expect(item.additionalOperations.REPORT).toBeDefined();
+  expect(item.PROPFIND).toBeUndefined();
+  expect(result.added).toHaveLength(1);expect(result.changed).toHaveLength(1);
+  const removed=mergeScannedDocument({current:result.document,scanned:{paths:{}},previous:sidecar([['REPORT','/items','a','added']]),next:sidecar([])});
+  expect(removed.removed).toEqual([{method:'REPORT',path:'/items'}]);
+});

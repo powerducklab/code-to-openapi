@@ -22,6 +22,7 @@
  *   - info, servers and every other top-level user edit are untouched.
  */
 
+import { getOperation, setOperation } from "@powerduck/openapi-parser/methods";
 import { diffSidecars, type DiscoverySidecar } from "./sidecar.js";
 
 export interface MergeChange {
@@ -43,17 +44,6 @@ export interface MergeResult {
   removed: MergeChange[];
   unchanged: number;
 }
-
-const HTTP_METHOD_KEYS = new Set([
-  "get",
-  "put",
-  "post",
-  "delete",
-  "options",
-  "head",
-  "patch",
-  "trace",
-]);
 
 // User-authored operation-level fields that a structural refresh must keep.
 const PRESERVE_OPERATION_KEYS = [
@@ -349,11 +339,11 @@ export function mergeScannedDocument(input: MergeInput): MergeResult {
   ) => {
     const scannedPathItem = scannedPaths[path];
     if (!isRecord(scannedPathItem)) return;
-    const scannedOperation = scannedPathItem[method];
+    const scannedOperation = getOperation(scannedPathItem, method);
     if (!isRecord(scannedOperation)) return;
     const currentPathItem = currentPaths[path];
     const userOperation = isRecord(currentPathItem)
-      ? currentPathItem[method]
+      ? getOperation(currentPathItem, method)
       : undefined;
     const mergedOperation = mergeOperation(
       scannedOperation,
@@ -363,9 +353,9 @@ export function mergeScannedDocument(input: MergeInput): MergeResult {
     if (!isRecord(currentPaths[path])) {
       // New path: take the scanned path item, then place the merged operation.
       currentPaths[path] = clone(scannedPathItem);
-      currentPaths[path][method] = mergedOperation;
+      setOperation(currentPaths[path], method, mergedOperation);
     } else {
-      currentPaths[path][method] = mergedOperation;
+      setOperation(currentPaths[path], method, mergedOperation);
     }
     list.push(change);
   };
@@ -389,7 +379,7 @@ export function mergeScannedDocument(input: MergeInput): MergeResult {
       // Never delete: surface for manual review. If the user already removed
       // it from the document there is nothing to keep.
       const pathItem = currentPaths[routeChange.previous.path];
-      if (isRecord(pathItem) && pathItem[routeChange.previous.method] !== undefined) {
+      if (isRecord(pathItem) && getOperation(pathItem, routeChange.previous.method) !== undefined) {
         removed.push({
           method: routeChange.previous.method,
           path: routeChange.previous.path,

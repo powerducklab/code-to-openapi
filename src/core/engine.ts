@@ -559,9 +559,9 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
 
     for (const pack of entry.frameworks) {
       if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
-      if (!pack.applies(ctx)) continue;
-      ctx.onProgress?.("extract", pack.id);
       try {
+        if (!pack.applies(ctx)) continue;
+        ctx.onProgress?.("extract", pack.id);
         const result = await pack.extract(analysis, ctx);
         for (const route of result.routes) {
           route.language = pack.language;
@@ -633,9 +633,11 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   }
 
   const baseComponents: DiscoveredComponent[] = [];
+  const componentNames = new Set<string>();
   for (const extraction of extractions) {
     for (const component of extraction.result.components) {
-      if (!baseComponents.some((item) => item.name === component.name)) {
+      if (!componentNames.has(component.name)) {
+        componentNames.add(component.name);
         baseComponents.push(component);
       }
     }
@@ -982,9 +984,9 @@ async function scanMonorepoLeaves(args: {
     for (const { entry, analysis } of languageAnalyses) {
       for (const pack of entry.frameworks) {
         if (options.frameworks && !options.frameworks.includes(pack.id)) continue;
-        if (!pack.applies(leafCtx)) continue;
-        ctx.onProgress?.("extract", `leaf ${pack.id}`);
         try {
+          if (!pack.applies(leafCtx)) continue;
+          ctx.onProgress?.("extract", `leaf ${pack.id}`);
           const result = await pack.extract(analysis, leafCtx);
           // Dedupe identical operations across leaves; keep the first richer one.
           result.routes = result.routes.filter((route) => {

@@ -137,6 +137,7 @@ export interface IndexOptions {
 interface IgnoreLike {
   add(pattern: string | readonly string[]): IgnoreLike;
   ignores(path: string): boolean;
+  test(path: string): { ignored: boolean; unignored: boolean };
 }
 
 function loadGitIgnore(root: string): IgnoreLike {
@@ -167,12 +168,25 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
   let totalBytes = 0;
   const unresolved: NonNullable<FileIndex["unresolved"]> = [];
   const omitted = (path: string, message: string) => unresolved.push({reason:"source-skipped", message, origin:{file:path || "."}});
-  const ig = loadGitIgnore(root);
-  if (options.ignore) ig.add(options.ignore);
+  const explicitIgnore = (ignoreFactory as unknown as () => IgnoreLike)();
+  if (options.ignore) explicitIgnore.add(options.ignore);
 
   const files: FileEntry[] = [];
 
-  const walk = (dir: string): void => {
+  type IgnoreScope = { dir: string; rules: IgnoreLike };
+  const walk = (dir: string, parents: IgnoreScope[] = []): void => {
+    const scopes = [...parents, { dir, rules: loadGitIgnore(dir) }];
+    const ignored = (absolute: string, rel: string, directory = false): boolean => {
+      let excluded = false;
+      for (const scope of scopes) {
+        const local = relative(scope.dir, absolute).split("\\").join("/") + (directory ? "/" : "");
+        const match = scope.rules.test(local);
+        if (match.ignored) excluded = true;
+        else if (match.unignored) excluded = false;
+      }
+      // Caller exclusions are authoritative even when a nested rule re-includes a file.
+      return excluded || explicitIgnore.ignores(rel + (directory ? "/" : ""));
+    };
     let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true }) as Dirent[];
@@ -200,8 +214,8 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
         ) {
           continue;
         }
-        if (ig.ignores(`${rel}/`)) continue;
-        walk(absolute);
+        if (ignored(absolute, rel, true)) continue;
+        walk(absolute, scopes);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -216,7 +230,7 @@ export function indexProject(root: string, options: IndexOptions = {}): FileInde
       const language = EXTENSION_LANGUAGE[ext] ?? (configYaml ? "yaml" : undefined);
       if (!language) continue;
       if (!options.includeTests && TEST_FILE.test(rel)) continue;
-      if (ig.ignores(rel)) continue;
+      if (ignored(absolute, rel)) continue;
 
       let stat;
       try {

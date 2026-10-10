@@ -73,3 +73,16 @@ it('decodes BOM-marked UTF-16 source files without accepting binary or truncated
   expect(index.unresolved?.[0]?.origin?.file).toBe('truncated.ts');
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+it('preserves successful framework results while marking a failed detection as incomplete',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'scan-pack-failure-'));
+ const spy=vi.spyOn(expressPack,'applies').mockImplementation(()=>{throw new Error('injected failure')});
+ try{
+  await writeFile(join(root,'package.json'),JSON.stringify({dependencies:{express:'*',fastify:'*'}}));
+  await writeFile(join(root,'app.js'),`const app=require('fastify')();app.get('/alive',async()=>({ok:true}));`);
+  const r=await scanProject({root,frameworks:['express','fastify']});
+  expect(r.project.operations.some(o=>o.path==='/alive')).toBe(true);
+  expect(r.project.unresolved).toEqual(expect.arrayContaining([expect.objectContaining({reason:'extraction-failed'})]));
+  expect(r.report.diagnostics.join('\n')).toContain('injected failure');
+ }finally{spy.mockRestore();await rm(root,{recursive:true,force:true});}
+});

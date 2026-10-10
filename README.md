@@ -57,7 +57,7 @@ indexer  →  language packs (AST + type checker)
 | Rust       | Axum, actix-web, Rocket | 0.9.x |
 | PHP        | Laravel, Symfony, Slim | 0.9.x |
 
-HTTP is fully supported; SSE endpoints are emitted with the canonical
+HTTP route extraction follows the support matrix above; recognized SSE endpoints are emitted with the canonical
 `x-protocol: "sse"` extension and a `text/event-stream` media type carrying
 `itemSchema` (including named Spring `SseEmitter` events when the event name
 and payload type are statically provable).
@@ -370,3 +370,51 @@ The scanner never runs code generators or project build scripts. Additional root
 HTTP operation discovery includes all nine fixed OpenAPI 3.2 methods (including `trace` and `query`) and custom verbs in `additionalOperations`, such as `PROPFIND`, `REPORT`, and `CUSTOM-VERB`. Shared method helpers come from `@powerduck/openapi-parser/methods`; path metadata is not interpreted as an operation. Custom verbs must be valid HTTP tokens. Use OpenAPI 3.2 when declaring QUERY or `additionalOperations`.
 
 Express route detection includes the Node HTTP method set (plus QUERY). Explicit method lists in Python route declarations and Go ServeMux method patterns accept custom tokens. Framework-specific convenience methods remain limited to the framework APIs; adding an arbitrary convenience function does not make it an HTTP route.
+
+### Scan reliability (0.14.2)
+
+- Nested `.gitignore` and `.powerduckignore` files are evaluated relative to
+  their own directories, including negation; caller `ignore` exclusions remain
+  authoritative. Ignored parent directories are not traversed, as with Git.
+- A framework detection failure is isolated like an extraction failure: other
+  packs can finish, and the report retains an explicit coverage warning.
+- Rescan merging reads and writes extension verbs through OpenAPI 3.2
+  `additionalOperations`. Added, changed and removed PROPFIND/REPORT-style
+  operations are no longer silently skipped. Removed operations remain for review.
+- Component-name deduplication uses a set rather than repeated linear searches.
+
+The 28 framework adapters cover eight displayed languages (JavaScript and
+TypeScript share one analysis pack). This is a support matrix, not a measured
+100% recall claim. Runtime-generated routes, unavailable generated source,
+reflection, dynamic dispatch and unresolved external types can still leave
+coverage or contract gaps. A valid OpenAPI document means it passes document
+validation; it does not prove that every server route or response was discovered.
+AI proposals remain evidence to review, not deterministic completeness proof.
+
+Gin now follows inline `register(api.Group("/users"))` and chained group route
+calls. Recursive helper expansion is stopped with a coverage warning, and a
+nonliteral group prefix is not silently replaced by an empty prefix.
+
+#### Local corpus spot check, 2026-10-11
+
+These are extraction results from the pinned repositories in
+`test-corpus/real-apis/manifest.json`, not recall/accuracy percentages. No AI was
+used. Contract-gap counts are routes with unresolved contract details.
+
+| Repository | Routes | Routes with gaps | Coverage warnings |
+| --- | ---: | ---: | ---: |
+| danielfsousa/express-rest-boilerplate | 15 | 12 | 0 |
+| ivan-borovets/fastapi-clean-example | 0 | 0 | 35 |
+| gothinkster/golang-gin-realworld-example-app | 27 | 24 | 0 |
+| lihengming/spring-boot-api-project-seed | 0 | 0 | 1 |
+| iammukeshm/CleanArchitecture.WebApi | 11 | 0 | 0 |
+| robatipoor/rustfulapi | 2 | 2 | 1 |
+| relaticle/relaticle | 99 | 53 | 0 |
+
+The Gin sample previously emitted only one route: inline group registration
+was silently missed. The FastAPI sample still requires support for router
+factory calls such as `include_router(make_account_router(...))`; its zero
+routes are **not** evidence of an empty API. The Spring seed contains controller
+generator templates rather than generated controller source, so generation is
+needed before those routes can be scanned. All seven outputs passed document
+validation, demonstrating why validation must not be equated with completeness.

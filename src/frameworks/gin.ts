@@ -1015,6 +1015,7 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
         fn: GoFunction;
         paramName: string;
         caller: Instance;
+        ancestry: Set<string>;
       }
       const registrationCalls: RegistrationCall[] = [];
 
@@ -1022,11 +1023,24 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
         scopeRoot: TsNode,
         scopeFile: { path: string; root: TsNode },
         seed: Map<string, Instance>,
+        ancestry = new Set<string>(),
       ) => {
         const instances = new Map(seed);
 
         const registerInstance = (name: string, prefix: string) => {
           instances.set(name, { id: `${scopeFile.path}::${name}`, file: scopeFile.path, name, prefix });
+        };
+
+        const resolveInstance = (node: TsNode, depth = 0): Instance | undefined => {
+          if (depth > 32) return undefined;
+          if (node.type === "identifier") return instances.get(node.text);
+          if (node.type !== "call_expression") return undefined;
+          const group = selectorCall(node);
+          if (!group || group.method !== "Group") return undefined;
+          const parent = resolveInstance(group.receiver, depth + 1);
+          const suffix = literalString(positionalArguments(node)[0]);
+          if (!parent || suffix === null) return undefined;
+          return {...parent, prefix: joinPath(parent.prefix, suffix)};
         };
 
         // Pass 1: engines and groups.
@@ -1052,7 +1066,11 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
                 const parent = instances.get(sel.receiver.text);
                 const name = names[0]?.text;
                 if (parent && name) {
-                  const groupPath = literalString(args[0]) ?? "";
+                  const groupPath = literalString(args[0]);
+                  if (groupPath === null) {
+                    unresolved.push({reason:"dynamic-path", message:"Gin group prefix is not a static string literal", origin:{file:scopeFile.path,line:call.startPosition.row + 1}});
+                    continue;
+                  }
                   registerInstance(name, joinPath(parent.prefix, groupPath));
                 }
               }
@@ -1077,23 +1095,24 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
                 : null;
           if (helperName) {
             const helperArgs = positionalArguments(call);
-            const instanceArg = helperArgs.find(
-              (a) => a.type === "identifier" && instances.has(a.text),
-            );
-            const caller = instanceArg ? instances.get(instanceArg.text) : undefined;
+            const caller = helperArgs.map(arg => resolveInstance(arg)).find(Boolean);
             const candidates = analysis.functions.get(helperName) ?? [];
             const helperFn = candidates.find(
               (candidate) => groupParameterName(candidate) !== null,
             );
             const paramName = helperFn ? groupParameterName(helperFn) : null;
             if (caller && helperFn && paramName) {
-              registrationCalls.push({ fn: helperFn, paramName, caller });
+              const identity = `${helperFn.file}::${helperFn.name}`;
+              if (ancestry.has(identity)) {
+                unresolved.push({reason:"dynamic-path", message:"Recursive Gin route registration cannot be expanded statically", origin:{file:scopeFile.path,line:call.startPosition.row + 1}});
+              } else {
+                registrationCalls.push({ fn: helperFn, paramName, caller, ancestry: new Set([...ancestry, identity]) });
+              }
             }
           }
 
           if (sel) {
-            if (!sel.receiver.type || sel.receiver.type !== "identifier") continue;
-            const instance = instances.get(sel.receiver.text);
+            const instance = resolveInstance(sel.receiver);
             if (!instance) continue;
             const args = positionalArguments(call);
 
@@ -1265,7 +1284,7 @@ export const ginPack: FrameworkPack<GoAnalysis> = {
           const seed = new Map<string, Instance>();
           seed.set(item.paramName, item.caller);
           const scopeFile = analysis.files.get(item.fn.file) ?? file;
-          scanScope(item.fn.node, scopeFile, seed);
+          scanScope(item.fn.node, scopeFile, seed, item.ancestry);
           const discovered = registrationCalls.splice(before, registrationCalls.length - before);
           next.push(...discovered);
         }
