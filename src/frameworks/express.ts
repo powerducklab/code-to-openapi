@@ -1,3 +1,4 @@
+import { METHODS as NODE_HTTP_METHODS } from "node:http";
 import type {
   Confidence,
   DiscoveredSecurityScheme,
@@ -18,16 +19,7 @@ import { convertValidatorChain, type ValidatedField } from "../lang/typescript/v
 import { resolveStaticValue } from "../lang/typescript/staticValue.js";
 import { convertJoiNode, isJoiSchema } from "../lang/typescript/joi.js";
 
-const HTTP_METHODS = new Set([
-  "get",
-  "post",
-  "put",
-  "patch",
-  "delete",
-  "head",
-  "options",
-  "all",
-]);
+const HTTP_METHODS = new Set([...NODE_HTTP_METHODS.map(method => method.toLowerCase()), "query", "all"]);
 
 const AUTH_PATTERN =
   /(^auth$|^authenticate|authorization|^jwt|bearer|^protect|guard|requireauth|isauth|ensureauth|authmiddleware|withauth)/i;
@@ -771,7 +763,7 @@ function expandDataDrivenMounts(ts: any, model: FileModel): void {
  * {...}`, or `export default (app) => {...}`), otherwise null.
  */
 const ROUTER_FACTORY_METHODS = new Set([
-  "use", "get", "post", "put", "patch", "delete", "all", "head", "options",
+  "use", ...HTTP_METHODS,
 ]);
 
 function injectedAppParam(ts: any, node: any, source: any): string | null {

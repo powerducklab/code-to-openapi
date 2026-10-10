@@ -364,3 +364,9 @@ const result = await scanProject({
 ```
 
 The scanner never runs code generators or project build scripts. Additional roots must resolve to subdirectories inside the project; outside symlinks are rejected. Explicit `ignore` patterns and `.powerduckignore` still apply. Missing interface sources remain unresolved rather than fabricated. Spring controller implementations inherit interface mappings, parameter annotations and generated response annotations when the corresponding sources are present. This does not imply support for every generic interface or dynamic mapping.
+
+### Extended HTTP methods
+
+HTTP operation discovery includes all nine fixed OpenAPI 3.2 methods (including `trace` and `query`) and custom verbs in `additionalOperations`, such as `PROPFIND`, `REPORT`, and `CUSTOM-VERB`. Shared method helpers come from `@powerduck/openapi-parser/methods`; path metadata is not interpreted as an operation. Custom verbs must be valid HTTP tokens. Use OpenAPI 3.2 when declaring QUERY or `additionalOperations`.
+
+Express route detection includes the Node HTTP method set (plus QUERY). Explicit method lists in Python route declarations and Go ServeMux method patterns accept custom tokens. Framework-specific convenience methods remain limited to the framework APIs; adding an arbitrary convenience function does not make it an HTTP route.

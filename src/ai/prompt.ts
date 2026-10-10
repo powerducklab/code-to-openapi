@@ -1,3 +1,4 @@
+import { getOperation } from "@powerduck/openapi-parser/methods";
 import { selectComponentContext } from "./componentContext.js";
 import type { GapRequest, GapResolution } from "./gapResolver.js";
 import type { JsonSchema } from "../core/types.js";
@@ -394,7 +395,7 @@ export function parseGapResolution(
   // path or silently apply another endpoint's contract.
   if (request && source.openapi && source.paths) {
     const paths = source.paths as Record<string, any>;
-    const operation = paths[request.route.path]?.[request.route.method.toLowerCase()];
+    const operation = getOperation(paths[request.route.path], request.route.method);
     if (!operation || typeof operation !== "object" || Array.isArray(operation)) return null;
     source = { ...operation, confidence: source.confidence, rationale: source.rationale };
   }

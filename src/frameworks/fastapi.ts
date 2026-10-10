@@ -1,3 +1,4 @@
+import { isHttpMethod } from "@powerduck/openapi-parser/methods";
 import {pythonStaticIterableElements} from '../lang/python/staticRouting.js';
 import { remapSchemaReferences, namespaceComponents } from "../core/schema-references.js";
 /**
@@ -752,7 +753,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
           mc.method === "api_route"
             ? listElements(keywordArgument(callNode, "methods"))
                 .map((node) => literalString(node)?.toLowerCase())
-                .filter((m): m is string => !!m && HTTP_METHODS.has(m))
+                .filter((m): m is string => isHttpMethod(m))
             : HTTP_METHODS.has(mc.method)
               ? [mc.method]
               : null;

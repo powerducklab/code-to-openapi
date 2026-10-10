@@ -1,3 +1,4 @@
+import { isHttpMethod } from "@powerduck/openapi-parser/methods";
 /**
  * Starlette framework pack (Python).
  *
@@ -402,7 +403,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
           const defaultMethods = methodsNode
             ? listElements(methodsNode)
                 .map((n) => literalString(n)?.toLowerCase())
-                .filter((m): m is string => !!m && HTTP_METHODS.has(m))
+                .filter((m): m is string => isHttpMethod(m))
             : ["get"];
           const ep = endpointName
             ? endpointMethods(endpointNode, defaultMethods)
@@ -521,7 +522,7 @@ export const starlettePack: FrameworkPack<PythonAnalysis> = {
         }
         const methodsNode = keywordArgument(call, "methods");
         const methods = methodsNode ? listElements(methodsNode).map(n => literalString(n)?.toLowerCase())
-          .filter((m): m is string => !!m && HTTP_METHODS.has(m)) : ["get"];
+          .filter((m): m is string => isHttpMethod(m)) : ["get"];
         for (const method of methods) {
           const route = buildRoute({ method, path, line: call.startPosition.row + 1,
             symbol: fn.name, statuses: scanStatuses(fn), handler: fn,

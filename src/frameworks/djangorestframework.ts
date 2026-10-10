@@ -1,3 +1,4 @@
+import { isHttpMethod } from "@powerduck/openapi-parser/methods";
 import {partialSchema} from '../core/partial-schema.js';
 import { mergeResponseVariants } from "../core/response-variants.js";
 /**
@@ -893,7 +894,7 @@ function apiViewMethods(fn: PyFunction): string[] | null {
     const methods = listNode
       ? listElements(listNode)
           .map((n) => literalString(n)?.toLowerCase())
-          .filter((m): m is string => !!m && HTTP_METHODS.has(m))
+          .filter((m): m is string => isHttpMethod(m))
       : ["get"];
     return methods;
   }

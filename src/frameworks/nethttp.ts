@@ -62,7 +62,7 @@ const OTHER_GO_FRAMEWORKS = [
 function parsePattern(raw: string): { methods: string[]; path: string; params: string[] } {
   let rest = raw.trim();
   let methods: string[];
-  const methodMatch = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.+)$/.exec(rest);
+  const methodMatch = /^([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s+(.+)$/.exec(rest);
   if (methodMatch) {
     methods = [methodMatch[1].toLowerCase()!];
     rest = methodMatch[2]!;
@@ -119,7 +119,7 @@ export const nethttpPack: FrameworkPack<GoAnalysis> = {
         /\bhttp\.NewServeMux\s*\(/.test(content) ||
         /\bhttp\.HandleFunc\s*\(/.test(content) ||
         /\bhttp\.Handle\s*\(/.test(content) ||
-        /\.Handle(Func)?\s*\(\s*"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\//.test(content)
+        /\.Handle(Func)?\s*\(\s*"([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s+\//.test(content)
       ) {
         stdlibSignal = true;
       }
