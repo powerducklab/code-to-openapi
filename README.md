@@ -371,8 +371,11 @@ HTTP operation discovery includes all nine fixed OpenAPI 3.2 methods (including 
 
 Express route detection includes the Node HTTP method set (plus QUERY). Explicit method lists in Python route declarations and Go ServeMux method patterns accept custom tokens. Framework-specific convenience methods remain limited to the framework APIs; adding an arbitrary convenience function does not make it an HTTP route.
 
-### Scan reliability (0.14.2)
+### Scan reliability (0.14.3)
 
+- FastAPI static router factories resolve local and imported function returns, with
+  lexical isolation for same-named local routers. Recursive and conditional
+  returns remain unresolved; scanning never executes application source.
 - Nested `.gitignore` and `.powerduckignore` files are evaluated relative to
   their own directories, including negation; caller `ignore` exclusions remain
   authoritative. Ignored parent directories are not traversed, as with Git.
@@ -404,7 +407,7 @@ used. Contract-gap counts are routes with unresolved contract details.
 | Repository | Routes | Routes with gaps | Coverage warnings |
 | --- | ---: | ---: | ---: |
 | danielfsousa/express-rest-boilerplate | 15 | 12 | 0 |
-| ivan-borovets/fastapi-clean-example | 0 | 0 | 35 |
+| ivan-borovets/fastapi-clean-example | 4 | 3 | 22 |
 | gothinkster/golang-gin-realworld-example-app | 27 | 24 | 0 |
 | lihengming/spring-boot-api-project-seed | 0 | 0 | 1 |
 | iammukeshm/CleanArchitecture.WebApi | 11 | 0 | 0 |
@@ -412,9 +415,9 @@ used. Contract-gap counts are routes with unresolved contract details.
 | relaticle/relaticle | 99 | 53 | 0 |
 
 The Gin sample previously emitted only one route: inline group registration
-was silently missed. The FastAPI sample still requires support for router
-factory calls such as `include_router(make_account_router(...))`; its zero
-routes are **not** evidence of an empty API. The Spring seed contains controller
+was silently missed. The FastAPI sample improved from zero to four routes after static factory
+resolution. Custom router subclasses and argument-dependent factories still
+leave coverage warnings; these four routes are **not** complete API coverage. The Spring seed contains controller
 generator templates rather than generated controller source, so generation is
 needed before those routes can be scanned. All seven outputs passed document
 validation, demonstrating why validation must not be equated with completeness.

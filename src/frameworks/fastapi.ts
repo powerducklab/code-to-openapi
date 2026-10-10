@@ -375,8 +375,24 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
     const securityBindings: SecurityBinding[] = [];
     const unresolved: ExtractionResult["unresolved"] = [];
 
-    const routerById = (file: string, name: string): RouterInstance | undefined =>
-      routers.get(`${file}::${name}`);
+    const ownerScope = (node: TsNode): TsNode | null => {
+      let parent = node.parent;
+      while (parent && !["function_definition", "class_definition", "lambda"].includes(parent.type)) parent = parent.parent;
+      return parent;
+    };
+    const bindingId = (file: string, name: string, node?: TsNode): string => {
+      const owner = node ? ownerScope(node) : null;
+      return `${file}::${owner ? `${owner.startIndex}::` : ""}${name}`;
+    };
+    const routerById = (file: string, name: string, node?: TsNode): RouterInstance | undefined => {
+      let scope = node ? ownerScope(node) : null;
+      while (scope) {
+        const found = routers.get(`${file}::${scope.startIndex}::${name}`);
+        if (found) return found;
+        scope = ownerScope(scope);
+      }
+      return routers.get(`${file}::${name}`);
+    };
 
     // Map importable module paths ("app.routers.items") to indexed files.
     const moduleToFile = new Map<string, string>();
@@ -417,12 +433,46 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
       return [...base, ...(suffix ? [suffix] : [])].join(".");
     };
 
-    const resolveRouterRef = (file: string, node: TsNode): RouterInstance | null => {
+    const resolveRouterRef = (file: string, node: TsNode, seen = new Set<string>()): RouterInstance | null => {
+      const key = `${file}:${node.startIndex}:${node.endIndex}`;
+      if (seen.has(key) || seen.size >= 32) return null;
+      seen = new Set([...seen, key]);
+      if (node.type === "call") {
+        const callee = node.namedChildren[0];
+        let targetFile = file;
+        let name: string | undefined = callee?.text;
+        if (callee?.type === "identifier") {
+          const imported = analysis.files.get(file)?.imports.get(callee.text);
+          if (imported) {
+            targetFile = resolveModuleFile(resolveRelativeModule(file, imported.module)) ?? "";
+            name = imported.importedName ?? undefined;
+          }
+        } else if (callee?.type === "attribute") {
+          const imported = analysis.files.get(file)?.imports.get(callee.namedChildren[0]?.text ?? "");
+          if (!imported) return null;
+          const module = resolveRelativeModule(file, imported.module);
+          targetFile = resolveModuleFile(imported.importedName ? `${module}.${imported.importedName}` : module) ?? resolveModuleFile(module) ?? "";
+          name = callee.namedChildren[1]?.text;
+        } else return null;
+        const candidates = analysis.functions.filter(fn => fn.file === targetFile && fn.name === name && !ownerScope(fn.node));
+        if (candidates.length !== 1) return null;
+        const fn = candidates[0]!;
+        const returns = findAll(fn.body, item => item.type === "return_statement" && ownerScope(item)?.id === fn.node.id);
+        // Branch-dependent or recursive factories remain unresolved; never execute source.
+        if (returns.length !== 1 || !returns[0]?.namedChildren[0] || returns[0].parent?.id !== fn.body?.id) return null;
+        return resolveRouterRef(fn.file, returns[0].namedChildren[0], seen);
+      }
       if (node.type !== "identifier" && node.type !== "attribute") return null;
       if (node.type === "identifier") {
-        const local = routerById(file, node.text);
+        const local = routerById(file, node.text, node);
         if (local) return local;
         const pyFile = analysis.files.get(file);
+        const scope = ownerScope(node);
+        const assignments = findAll(scope ?? pyFile?.root, item => item.type === "assignment" && item.namedChildren[0]?.text === node.text && ownerScope(item)?.id === scope?.id && item.startIndex < node.startIndex);
+        if (assignments.length === 1) {
+          const value = assignments[0]?.namedChildren.at(-1);
+          if (value && (value.type === "call" || value.type === "identifier")) return resolveRouterRef(file, value, seen);
+        }
         const imported = pyFile?.imports.get(node.text);
         if (imported?.importedName) {
           // from pkg.mod import router
@@ -607,8 +657,8 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         if (!target || target.type !== "identifier" || !value || value.type !== "call") continue;
         const constructorName = callName(value.namedChildren[0] ?? null);
         if (constructorName === "FastAPI") {
-          routers.set(`${file.path}::${target.text}`, {
-            id: `${file.path}::${target.text}`,
+          routers.set(bindingId(file.path, target.text, assignment), {
+            id: bindingId(file.path, target.text, assignment),
             file: file.path,
             name: target.text,
             kind: "app",
@@ -618,8 +668,8 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         } else if (constructorName === "APIRouter") {
           const prefixNode = keywordArgument(value, "prefix");
           const tagsNode = keywordArgument(value, "tags");
-          routers.set(`${file.path}::${target.text}`, {
-            id: `${file.path}::${target.text}`,
+          routers.set(bindingId(file.path, target.text, assignment), {
+            id: bindingId(file.path, target.text, assignment),
             file: file.path,
             name: target.text,
             kind: "router",
@@ -746,7 +796,7 @@ export const fastapiPack: FrameworkPack<PythonAnalysis> = {
         if (!callNode || callNode.type !== "call") continue;
         const mc = methodCall(callNode);
         if (!mc || mc.receiver.type !== "identifier") continue;
-        const router = routerById(fn.file, mc.receiver.text);
+        const router = resolveRouterRef(fn.file, mc.receiver);
         if (!router) continue;
 
         const methods =
