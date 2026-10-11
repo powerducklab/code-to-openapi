@@ -174,6 +174,8 @@ export interface ScanOptions {
   aiReview?: "auto" | "manual";
   /** Include evidence-backed routes without gaps for optional manual audit. */
   reviewAll?: boolean;
+  /** Limit manual evidence construction to these METHOD path keys; also audit complete routes. */
+  reviewRoutes?: string[];
 }
 
 export interface ScanReport {

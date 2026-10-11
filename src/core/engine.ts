@@ -689,8 +689,11 @@ export async function scanProject(options: ScanOptions): Promise<ScanResult> {
   if (reviewMode === "manual") {
     // Surface unresolved handlers for interactive review without calling a
     // model; the host proposes and the user accepts/edits/rejects each one.
+    const selectedRoutes = options.reviewRoutes ? new Set(options.reviewRoutes) : undefined;
+    const audit = options.reviewAll || Boolean(selectedRoutes);
     gapReviews = candidates
-      .map((candidate) => buildGapReview(candidate, componentCatalog, options.reviewAll, candidate.handlerSource && (candidate.gaps.length || options.reviewAll) ? sourceContext(candidate) : undefined))
+      .filter(candidate => !selectedRoutes || selectedRoutes.has(candidate.method.toUpperCase() + " " + (candidate.fullPath ?? candidate.path)))
+      .map((candidate) => buildGapReview(candidate, componentCatalog, audit, candidate.handlerSource && (candidate.gaps.length || audit) ? sourceContext(candidate) : undefined))
       .filter((review): review is import("../ai/review.js").GapReview => review !== null);
     ctx.onProgress?.("ai-review-pending", JSON.stringify({ total: gapReviews.length }));
   } else if (options.gapResolver) {

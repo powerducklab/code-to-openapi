@@ -95,3 +95,20 @@ it('selects imports used through local helpers without spending context on anoth
   expect(context.files.map(f=>f.file)).not.toContain('unrelated.ts');
  }finally{await rm(root,{recursive:true,force:true});}
 });
+it('constructs only selected audit evidence for routes with no gaps',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'ai-selected-source-'));
+ try {
+  await writeFile(join(root,'package.json'),JSON.stringify({dependencies:{express:'*'}}));
+  await writeFile(join(root,'app.ts'),`import express from 'express'; const app=express(); app.get('/one',(req,res)=>res.json({ok:true})); app.get('/two',(req,res)=>res.json({total:42}));`);
+  const baseline=await scanProject({root,aiReview:'manual'});
+  expect(baseline.project.operations).toHaveLength(2);
+  expect(baseline.gapReviews ?? []).toHaveLength(0);
+  const selected=await scanProject({root,aiReview:'manual',reviewRoutes:['GET /two']});
+  expect(selected.project.operations).toHaveLength(2);
+  expect(selected.gapReviews).toHaveLength(1);
+  expect(selected.gapReviews![0]!.path).toBe('/two');
+  expect(selected.gapReviews![0]!.request.handlerSource).toContain('total');
+  const none=await scanProject({root,aiReview:'manual',reviewRoutes:[]});
+  expect(none.gapReviews ?? []).toHaveLength(0);
+ }finally{await rm(root,{recursive:true,force:true});}
+});
