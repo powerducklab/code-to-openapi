@@ -1,0 +1,22 @@
+name: Spring Java fixture
+on:
+  pull_request:
+    paths:
+      - "test/fixtures/spring-java/**"
+      - ".github/workflows/spring-fixture.yml"
+  push:
+    paths:
+      - "test/fixtures/spring-java/**"
+      - ".github/workflows/spring-fixture.yml"
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: test/fixtures/spring-java/pom.xml
+      - run: mvn --batch-mode --no-transfer-progress -f test/fixtures/spring-java/pom.xml clean verify

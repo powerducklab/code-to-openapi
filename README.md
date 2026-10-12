@@ -421,3 +421,16 @@ leave coverage warnings; these four routes are **not** complete API coverage. Th
 generator templates rather than generated controller source, so generation is
 needed before those routes can be scanned. All seven outputs passed document
 validation, demonstrating why validation must not be equated with completeness.
+
+### Building the Spring Java fixture
+
+The Spring Boot fixture in `test/fixtures/spring-java` requires JDK 17+ and Maven
+3.6.3+. Its Maven project declares Bean Validation and Reactor explicitly so the
+DTO validation annotations and SSE `Flux` endpoint resolve in Java IDEs.
+
+```sh
+mvn --batch-mode --no-transfer-progress -f test/fixtures/spring-java/pom.xml clean verify
+```
+
+Scanning Java source with this npm package does not require a JDK or Maven.
+Those tools are needed only to compile the Java application being scanned.
