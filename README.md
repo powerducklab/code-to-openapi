@@ -130,7 +130,7 @@ reuse and honest-gap machinery:
 #### 0.8.0 real-world hardening
 
 The inference engine was validated against dozens of real, complex open-source
-backends (Koel, Bagisto, Snipe-IT, apipost-server, eladmin, novel-plus,
+backends (Koel, Bagisto, Snipe-IT, eladmin, novel-plus,
 Redash, Apache Superset, CleanArchitecture, hackathon-starter, the RealWorld
 family, go-chi/gin examples, Platformatic and others). Highlights:
 

@@ -78,7 +78,6 @@ export interface JavaAnalysis {
   readonly files: Map<string, JavaFile>;
   /** Keyed by simple class name; first declaration wins. */
   readonly types: Map<string, JavaTypeDef>;
-  /** Keyed by fully qualified name, e.g. cn.apipost.result.CommonResult. */
   readonly typesByFqn: Map<string, JavaTypeDef>;
   /** Per-file import table used for simple-name resolution. */
   readonly imports: Map<
