@@ -172,7 +172,7 @@ npm install @powerduck/code-to-openapi
 npm install -D typescript
 ```
 
-The package ships ESM and CJS builds and runs on Node.js 18+.
+The package ships ESM and CJS builds and runs on Node.js 22+.
 
 ## Quick start
 
